@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>User Agent — 远控工作台 (Standalone)</title>
+    <!-- Casdoor & LiveKit CDN (kept online for dev) -->
+    <script src="https://cdn.jsdelivr.net/npm/casdoor-js-sdk@1.0.1/lib/casdoor.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { background: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .header { width: 100%; max-width: 1000px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
+        .dashboard { display: none; width: 100%; max-width: 1000px; flex-direction: column; align-items: center; }
+        #video-container { width: 800px; height: 450px; background: #000; position: relative; border: 2px solid #444; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        .hud-overlay { position: absolute; top: 10px; left: 10px; color: #00ff00; font-family: monospace; font-size: 14px; text-shadow: 1px 1px 2px black; pointer-events: none; }
+        .controls { display: flex; gap: 15px; margin-top: 20px; width: 800px; justify-content: center; background: #1e1e1e; padding: 15px; border-radius: 8px; }
+        button { padding: 12px 24px; cursor: pointer; border: none; border-radius: 6px; font-weight: bold; transition: 0.2s; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-connect { background: #0d6efd; color: white; }
+        .btn-steer { background: #444; color: white; }
+        .btn-brake { background: #dc3545; color: white; }
+        .alert-box { margin-top: 15px; padding: 10px 20px; border-radius: 4px; display: none; width: 800px; text-align: center; }
+        .alert-shadow { background: #ffc107; color: #000; display: block; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h2>🚚 远控车队 — User Agent (Standalone)</h2>
+        <div>
+            <span id="user-info" style="margin-right: 15px;">未登录</span>
+            <button id="auth-btn" onclick="handleAuth()">登录 (SSO)</button>
+        </div>
+    </div>
+
+    <div id="welcome-screen" style="text-align: center; margin-top: 100px;">
+        <h3>请使用企业账号登录以接管车辆</h3>
+    </div>
+
+    <div id="dashboard" class="dashboard">
+        <div class="controls" style="margin-bottom: 15px;">
+            <input type="text" id="target-vehicle" placeholder="输入车辆ID (如: car001)" value="car001" style="padding: 10px; border-radius: 4px; border: 1px solid #444; background: #222; color: white;">
+            <button class="btn-connect" id="connect-btn" onclick="startTeleop()">申请接管</button>
+        </div>
+
+        <div id="alert-banner" class="alert-box"></div>
+
+        <div id="video-container">
+            <div class="hud-overlay" id="hud">STATE: OFFLINE<br>LATENCY: -- ms</div>
+        </div>
+
+        <div class="controls">
+            <button class="btn-steer ctrl-btn" onmousedown="sendCommand('steer', -100)" onmouseup="sendCommand('steer', 0)">◀ 左转</button>
+            <button class="btn-steer ctrl-btn" onmousedown="sendCommand('steer', 100)" onmouseup="sendCommand('steer', 0)">右转 ▶</button>
+            <button class="btn-brake ctrl-btn" onclick="sendCommand('brake', 100)">🛑 紧急制动</button>
+        </div>
+    </div>
+
+    <script>
+        // Runtime configuration via URL query parameters.
+        const params = new URLSearchParams(window.location.search);
+        const GO_BACKEND_URL = params.get('backend') || 'http://localhost:8080';
+        const LIVEKIT_URL = params.get('livekit') || 'ws://localhost:7880';
+        const CASDOOR_URL = params.get('casdoor') || 'http://localhost:8000';
+        const CASDOOR_CLIENT_ID = params.get('clientId') || 'YOUR_CASDOOR_CLIENT_ID';
+        const CASDOOR_ORG = params.get('org') || 'SF-Express';
+        const CASDOOR_APP = params.get('app') || 'Teleop-Dashboard';
+
+        // Minimal Casdoor SDK wrapper (the CDN Sdk expects server config; we provide minimal object)
+        const casdoorConfig = {
+            serverUrl: CASDOOR_URL,
+            clientId: CASDOOR_CLIENT_ID,
+            organizationName: CASDOOR_ORG,
+            appName: CASDOOR_APP,
+            redirectPath: window.location.pathname
+        };
+
+        // Simple SDK compatibility shim when CDN's Sdk constructor name differs
+        let Sdk = window.Sdk || (window.CasdoorSDK && window.CasdoorSDK.Sdk) || function(cfg){
+            return { getSigninUrl: () => `${cfg.serverUrl}/login?client_id=${cfg.clientId}` };
+        };
+
+        const sdk = new Sdk(casdoorConfig);
+
+        let currentRoom = null;
+        let isShadowMode = false;
+
+        window.onload = async () => {
+            const code = new URLSearchParams(window.location.search).get('code');
+            if (code) {
+                // For a standalone user-agent, production should exchange the code with a token on backend.
+                alert('SSO login detected; production should exchange code with backend. Using mock token for dev.');
+                localStorage.setItem('casdoor_jwt', 'mock_jwt');
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }
+            checkLoginState();
+        };
+
+        function checkLoginState() {
+            const token = localStorage.getItem('casdoor_jwt');
+            if (token) {
+                document.getElementById('user-info').innerText = `操作员: demo`;
+                document.getElementById('auth-btn').innerText = '退出登录';
+                document.getElementById('welcome-screen').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'flex';
+            } else {
+                document.getElementById('dashboard').style.display = 'none';
+                document.getElementById('welcome-screen').style.display = 'block';
+            }
+        }
+
+        function handleAuth() {
+            if (localStorage.getItem('casdoor_jwt')) {
+                localStorage.removeItem('casdoor_jwt');
+                location.reload();
+            } else {
+                window.location.href = sdk.getSigninUrl();
+            }
+        }
+
+        async function startTeleop() {
+            const token = localStorage.getItem('casdoor_jwt');
+            const vid = document.getElementById('target-vehicle').value;
+            const hud = document.getElementById('hud');
+            const alertBanner = document.getElementById('alert-banner');
+
+            try {
+                hud.innerHTML = 'STATE: AUTHENTICATING...';
+                const response = await fetch(`${GO_BACKEND_URL}/api/token/operator?vid=${encodeURIComponent(vid)}`, {
+                    headers: { 'Authorization': `Bearer ${token || 'dev-token'}` }
+                });
+                if (!response.ok) throw new Error(await response.text());
+                const data = await response.json();
+                isShadowMode = (data.mode === 'shadow');
+                alertBanner.innerText = data.msg || '';
+                alertBanner.style.display = 'block';
+                alertBanner.className = isShadowMode ? 'alert-box alert-shadow' : 'alert-box';
+                document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = isShadowMode);
+
+                hud.innerHTML = 'STATE: CONNECTING WEBRTC...';
+                currentRoom = new LivekitClient.Room();
+
+                currentRoom.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+                    if (track.kind === 'video') {
+                        const element = track.attach();
+                        const container = document.getElementById('video-container');
+                        container.innerHTML = '';
+                        container.appendChild(document.getElementById('hud'));
+                        container.appendChild(element);
+                        hud.innerHTML = `STATE: ${isShadowMode ? 'SHADOW (READ-ONLY)' : 'DRIVING'}<br>VID: ${vid}`;
+                    }
+                });
+
+                await currentRoom.connect(LIVEKIT_URL, data.token);
+                document.getElementById('connect-btn').disabled = true;
+            } catch (e) {
+                hud.innerHTML = 'STATE: ERROR';
+                alert('接管失败: ' + e.message);
+            }
+        }
+
+        function sendCommand(cmd, value) {
+            if (isShadowMode || !currentRoom) return;
+            const payload = JSON.stringify({ cmd: cmd, val: value, ts: Date.now() });
+            const encoder = new TextEncoder();
+            currentRoom.localParticipant.publishData(encoder.encode(payload), { reliable: false });
+            console.log('发送指令:', payload);
+        }
+    </script>
+</body>
+</html>

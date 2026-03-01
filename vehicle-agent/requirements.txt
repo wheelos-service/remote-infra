@@ -1,0 +1,6 @@
+livekit-api
+livekit-plugins-browser
+aiohttp
+opencv-python
+requests
+pynacl

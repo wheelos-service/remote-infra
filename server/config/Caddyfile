@@ -1,0 +1,6 @@
+{{- /* copied from repo config for unified server layout */ -}}
+{{- /* Please keep this file in sync with config/Caddyfile */ -}}
+
+// Caddy configuration placeholder copied for server/centralized config
+
+{{- /* original content is preserved in root-level config/Caddyfile */ -}}

@@ -1,0 +1,104 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coturn-config
+  namespace: default
+data:
+  turnserver.conf: |
+    # 监听端口
+    listening-port=3478
+    tls-listening-port=5349
+
+    # 指向宿主机的外部暴露IP
+    # external-ip=YOUR_EXTERNAL_IP
+
+    # realm 配置 (WebRTC 必须)
+    realm=teleop.local
+
+    # 启用 REST API 短效凭证认证
+    use-auth-secret
+
+    # 这里通过挂载参数或者用 placeholder 替换，也可直接硬编码读取 ENV
+    # 其实 coturn 支持 --static-auth-secret 传参
+    # static-auth-secret=my-super-secret-turn-key
+
+    total-quota=100
+    stale-nonce
+    no-multicast-peers
+
+    # 禁用非安全协议
+    # no-tlsv1
+    # no-tlsv1_1
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coturn
+  namespace: default
+  labels:
+    app: coturn
+spec:
+  # 注意：为了高可用，通常应至少为 2，并且部署多可用区
+  replicas: 2
+  selector:
+    matchLabels:
+      app: coturn
+  template:
+    metadata:
+      labels:
+        app: coturn
+    spec:
+      # 为了支持 NAT 穿透且避免 iptables MASQUERADE 代价，通常也会开启 hostNetwork
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+
+      # 优化 UDP/TCP Socket 缓冲区队列深度 (极大地影响高码率低延迟流稳定)
+      initContainers:
+      - name: sysctl-tuning
+        image: busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+          sysctl -w net.core.rmem_max=26214400
+          sysctl -w net.core.wmem_max=26214400
+          sysctl -w net.core.rmem_default=26214400
+          sysctl -w net.core.wmem_default=26214400
+        securityContext:
+          privileged: true
+
+      containers:
+      - name: coturn
+        image: coturn/coturn:latest
+        args:
+          - "-c"
+          - "/etc/coturn/turnserver.conf"
+          # 从 Secret 中读取 auth secret，而不是硬编码在 config 中
+          - "--static-auth-secret=$(TURN_SECRET)"
+        ports:
+        - containerPort: 3478
+          protocol: UDP
+        - containerPort: 3478
+          protocol: TCP
+        env:
+        - name: TURN_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: teleop-secrets
+              key: TURN_SECRET
+        volumeMounts:
+        - name: config
+          mountPath: /etc/coturn
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "256Mi"
+          limits:
+            cpu: "2"
+            memory: "1Gi"
+
+      volumes:
+      - name: config
+        configMap:
+          name: coturn-config

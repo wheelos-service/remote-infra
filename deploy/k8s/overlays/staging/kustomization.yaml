@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1
+kind: Kustomization
+resources:
+  - ../../base
+
+configMapGenerator:
+  - name: infra-configs
+    files:
+      - ../../../server/config/livekit.yaml
+      - ../../../server/config/Caddyfile
+
+patchesStrategicMerge:
+  - replicas-patch.yaml

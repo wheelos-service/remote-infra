@@ -1,0 +1,4 @@
+# livekit config copied into server/config for unified server layout
+# Keep this copy in sync with config/livekit.yaml
+
+{{- /* original content preserved at config/livekit.yaml */ -}}
