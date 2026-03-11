@@ -1,0 +1,73 @@
+services:
+
+  # mysql:
+  #   image: mysql:9
+  #   restart: unless-stopped
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: "MyWhee10sSQL"
+  #   ports:
+  #     - "3306:3306"
+  #   volumes:
+  #     - ./data/mysql/data:/var/lib/mysql
+  #   networks:
+  #     - teleop-network
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.2:80:80"
+      - "127.0.0.2:443:443"
+    volumes:
+      - ./data/caddy/etc/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - ./data/caddy/data:/data
+      - ./data/caddy/config:/config
+      - ./user-agent:/app/teleop-ui
+    depends_on:
+      - livekit
+      - teleop-gateway
+    network_mode: host
+
+  # casdoor:
+  #   image: casbin/casdoor:latest
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     - GIN_MODE=release
+  #   volumes:
+  #     - ./data/casdoor/conf:/conf
+  #     - ./data/casdoor/logs:/logs
+  #   depends_on:
+  #     - mysql
+  #   network_mode: host
+
+  livekit:
+    image: livekit/livekit-server:latest
+    network_mode: host
+    environment:
+      LIVEKIT_KEYS: "teleop_prod_key: super_secret_key_for_teleoperation_2026"
+    command: ["--config", "/etc/livekit.yaml"]
+    volumes:
+      - ./data/livekit/livekit.yaml:/etc/livekit.yaml:ro
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - teleop-network
+
+  teleop-gateway:
+    image: teleop-gateway:latest
+    ports:
+      - "8080:8080"
+    environment:
+      LIVEKIT_API_KEY: "teleop_prod_key"
+      LIVEKIT_API_SECRET: "super_secret_key_for_teleoperation_2026"
+      LIVEKIT_URL: "http://teleop.wheelos.cn/rtc"
+    networks:
+      - teleop-network
+
+networks:
+  teleop-network:
+    driver: bridge

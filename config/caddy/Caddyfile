@@ -1,0 +1,73 @@
+{
+    auto_https off
+}
+
+http://teleop.wheelos.cn {
+
+    bind 127.0.0.2
+
+    handle /api/* {
+        reverse_proxy localhost:8080 {
+            header_up Host {host}
+            header_up X-Real-IP {remote}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    handle /rtc* {
+        reverse_proxy localhost:7880 {
+            header_up Host {host}
+            header_up X-Real-IP {remote}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Host {host}
+            header_up X-Forwarded-Proto {scheme}
+
+            # WebSocket 连接超时设置
+            transport http {
+                read_timeout 0
+                write_timeout 0
+                dial_timeout 30s
+            }
+        }
+    }
+
+    handle /casdoor/* {
+        reverse_proxy localhost:8000 {
+            header_up Host {host}
+            header_up X-Real-IP {remote}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # handle_path /* {
+    #     reverse_proxy localhost:8081 {
+    #         header_up Host {host}
+    #         header_up X-Real-IP {remote}
+    #         header_up X-Forwarded-For {remote}
+    #         header_up X-Forwarded-Proto {scheme}
+    #     }
+    # }
+
+    handle /* {
+        root * /app/teleop-ui
+        file_server
+    }
+
+    log {
+        output file /data/access.log
+    }
+}
+
+http://casdoor.wheelos.cn {
+
+    bind 127.0.0.2
+
+    reverse_proxy localhost:8000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote}
+        header_up X-Forwarded-For {remote}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}

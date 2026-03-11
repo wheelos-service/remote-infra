@@ -26,6 +26,13 @@ from typing import Optional
 
 import aiohttp
 
+# 尝试导入 OpenCV
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
 from secure_receiver import (
     CommandVerifier,
     EmergencyBrakeController,
@@ -98,7 +105,7 @@ async def request_livekit_token(session: aiohttp.ClientSession, backend_url: str
         return token
 
 
-async def livekit_connect_loop(runtime: VehicleAgentRuntime, lk_url: str, lk_token: str, publish_video: bool = False) -> None:
+async def livekit_connect_loop(runtime: VehicleAgentRuntime, lk_url: str, lk_token: str, publish_video: bool = False, camera_id: int = 0) -> None:
     try:
         from livekit import rtc
     except Exception as exc:
@@ -107,30 +114,47 @@ async def livekit_connect_loop(runtime: VehicleAgentRuntime, lk_url: str, lk_tok
 
     room = rtc.Room()
 
-    def _on_data(data, participant, kind=None):
+    def _on_data(data_packet):
         try:
-            # data may be bytes or str
-            raw = data.decode("utf-8") if isinstance(data,
-                                                     (bytes, bytearray)) else str(data)
+            # data_packet 是 DataPacket 对象，包含 participant 和 data 属性
+            raw_data = data_packet.data
+            # data 可能是 bytes 或 str
+            raw = raw_data.decode("utf-8") if isinstance(
+                raw_data, (bytes, bytearray)) else str(raw_data)
+            logging.info("[LIVEKIT] received data from %s: %s",
+                        data_packet.participant.identity if hasattr(data_packet, 'participant') and hasattr(data_packet.participant, 'identity') else 'unknown',
+                        raw[:100] if len(raw) > 100 else raw)  # 只打印前100字符
             asyncio.create_task(runtime.on_datachannel_message(raw))
         except Exception as e:
             logging.exception("[LIVEKIT] on_data handler error: %s", e)
 
     room.on("data_received", _on_data)
 
+    # 摄像头捕获任务
+    camera_task = None
+
     try:
         await room.connect(lk_url, lk_token)
         logging.info("[LIVEKIT] connected to %s", lk_url)
+
         if publish_video and hasattr(rtc, "VideoSource"):
             try:
-                src = rtc.VideoSource(640, 480)
-                track = rtc.LocalVideoTrack.create_video_track("camera", src)
-                options = rtc.TrackPublishOptions()
-                options.source = rtc.TrackSource.SOURCE_CAMERA
-                options.video_encoding.max_bitrate = 1_500_000
-                options.video_encoding.max_framerate = 20
-                await room.local_participant.publish_track(track, options)
-                logging.info("[LIVEKIT] published video track")
+                # 检查 OpenCV 是否可用
+                if not CV2_AVAILABLE:
+                    logging.error("[LIVEKIT] OpenCV not available, cannot capture from camera")
+                else:
+                    # 创建 VideoSource
+                    src = rtc.VideoSource(640, 480)
+                    track = rtc.LocalVideoTrack.create_video_track("camera", src)
+                    options = rtc.TrackPublishOptions()
+                    options.source = rtc.TrackSource.SOURCE_CAMERA
+                    options.video_encoding.max_bitrate = 2_000_000
+                    options.video_encoding.max_framerate = 20
+                    await room.local_participant.publish_track(track, options)
+                    logging.info("[LIVEKIT] published video track")
+
+                    # 启动摄像头捕获任务
+                    camera_task = asyncio.create_task(_camera_capture_loop(src, camera_id))
             except Exception:
                 logging.exception(
                     "[LIVEKIT] failed to publish video (continuing)")
@@ -140,10 +164,73 @@ async def livekit_connect_loop(runtime: VehicleAgentRuntime, lk_url: str, lk_tok
             await asyncio.sleep(1)
 
     finally:
+        if camera_task:
+            camera_task.cancel()
+            try:
+                await camera_task
+            except asyncio.CancelledError:
+                pass
         try:
             await room.disconnect()
         except Exception:
             pass
+
+
+async def _camera_capture_loop(video_source: "rtc.VideoSource", camera_id: int, fps: int = 20) -> None:
+    """从摄像头捕获帧并推送到 LiveKit"""
+    from livekit import rtc
+    import cv2
+
+    WIDTH, HEIGHT = 640, 480
+
+    cap = cv2.VideoCapture(camera_id)
+    if not cap.isOpened():
+        logging.error("[CAMERA] 无法打开摄像头 %s", camera_id)
+        return
+
+    try:
+        # 设置摄像头参数
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+
+        logging.info("[CAMERA] 开始从摄像头 %s 捕获，fps=%s", camera_id, fps)
+
+        frame_time = 1.0 / fps
+        next_frame_time = 0
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                logging.warning("[CAMERA] 读取帧失败")
+                await asyncio.sleep(0.1)
+                continue
+
+            # BGR 转 RGBA (LiveKit 需要 RGBA 格式)
+            frame_rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+
+            # 创建 VideoFrame 并推送
+            # 使用 bytearray 来传递数据，这是 LiveKit SDK 推荐的方式
+            frame_buffer = bytearray(frame_rgba.tobytes())
+            video_frame = rtc.VideoFrame(
+                WIDTH, HEIGHT, rtc.VideoBufferType.RGBA, frame_buffer
+            )
+            video_source.capture_frame(video_frame)
+
+            # 精确的帧率控制 (使用 perf_counter 更准确)
+            from time import perf_counter
+            now = perf_counter()
+            if next_frame_time == 0:
+                next_frame_time = now
+            next_frame_time += frame_time
+            sleep_time = max(0, next_frame_time - now)
+            await asyncio.sleep(sleep_time)
+
+    except asyncio.CancelledError:
+        logging.info("[CAMERA] 摄像头捕获已停止")
+    finally:
+        cap.release()
+        logging.info("[CAMERA] 摄像头已释放")
 
 
 async def run_agent(
@@ -160,6 +247,7 @@ async def run_agent(
     backend_token_url: Optional[str] = None,
     livekit_url: Optional[str] = None,
     publish_video: bool = False,
+    camera_id: int = 0,
     load_key_file: Optional[str] = None,
 ) -> None:
     verifier = CommandVerifier(gateway, vehicle_id, token)
@@ -257,7 +345,7 @@ async def run_agent(
         else:
             # livekit mode
             tasks.append(asyncio.create_task(livekit_connect_loop(
-                runtime, livekit_url or ws_url or "", lk_token, publish_video)))
+                runtime, livekit_url or ws_url or "", lk_token, publish_video, camera_id)))
 
         # run until cancelled
         try:
@@ -292,6 +380,8 @@ def _parse_args() -> argparse.Namespace:
                    help="LiveKit websocket URL (used in livekit mode)")
     p.add_argument("--publish-video", action="store_true",
                    help="If set in livekit mode, attempt to publish a local video track")
+    p.add_argument("--camera-id", type=int, default=0,
+                   help="Camera device ID for video capture (default: 0)")
     p.add_argument("--key-refresh-s", type=int, default=30,
                    help="Key refresh interval seconds")
     p.add_argument("--load-key-file",
@@ -334,6 +424,7 @@ def main() -> None:
                 backend_token_url=args.backend_token_url,
                 livekit_url=args.livekit_url,
                 publish_video=bool(args.publish_video),
+                camera_id=args.camera_id,
                 load_key_file=args.load_key_file,
             )
         )
@@ -342,3 +433,7 @@ def main() -> None:
         logging.info("[MAIN] keyboard interrupt")
     finally:
         loop.close()
+
+
+if __name__ == "__main__":
+    main()

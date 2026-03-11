@@ -2,3 +2,8 @@
 bin/
 *.log
 node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.classFEATURES.md

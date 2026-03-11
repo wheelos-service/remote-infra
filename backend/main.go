@@ -94,6 +94,8 @@ func main() {
 	// 【统一鉴权】操作员与车辆接入全部经过 Casdoor JWT 校验
 	mux.Handle("/api/token/operator", CasdoorAuthMiddleware(http.HandlerFunc(handleOperatorConnect)))
 	mux.Handle("/api/token/vehicle", CasdoorAuthMiddleware(http.HandlerFunc(handleVehicleConnect)))
+	// 【只读观看者】不需要鉴权，仅允许订阅视频流（支持 CORS）
+	mux.Handle("/api/token/viewer", CORSMiddleware(http.HandlerFunc(handleViewerConnect)))
 
 	// LiveKit Webhook 接口 (用于兜底安全和锁释放)
 	mux.HandleFunc("/api/webhook/livekit", handleLivekitWebhook)
@@ -153,6 +155,23 @@ func parseDevToken(tok string) *UserClaims {
 		return &UserClaims{Name: parts[0], Organization: parts[1], Roles: roles}
 	}
 	return &UserClaims{Name: tok, Roles: []string{}, Organization: "dev"}
+}
+
+// CORSMiddleware: 添加 CORS 头以支持浏览器跨域请求
+func CORSMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		// 处理 OPTIONS 预检请求
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ==========================================
@@ -263,6 +282,40 @@ func handleVehicleConnect(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": lkToken})
+}
+
+// ==========================================
+// 4.5. 观看者接入逻辑 - 无需鉴权，只读模式
+// ==========================================
+func handleViewerConnect(w http.ResponseWriter, r *http.Request) {
+	vehicleID := r.URL.Query().Get("vid")
+	if vehicleID == "" {
+		http.Error(w, "Missing vehicle ID (vid)", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("【观看者接入】匿名用户申请观看车辆 %s 的视频流", vehicleID)
+
+	// 签发只读 LiveKit Token
+	at := auth.NewAccessToken(lkApiKey, lkApiSecret)
+	grant := &auth.VideoGrant{
+		RoomJoin:       true,
+		Room:           "teleop-" + vehicleID,
+		CanPublish:     bp(false), // 不能推视频
+		CanPublishData: bp(false), // 不能发控制指令
+		CanSubscribe:   bp(true),  // 只能订阅视频流
+	}
+
+	// 观看者身份带 viewer- 前缀，便于识别
+	viewerID := fmt.Sprintf("viewer-%d", time.Now().Unix())
+	at.AddGrant(grant).SetIdentity(viewerID).SetValidFor(2 * time.Hour)
+	lkToken, _ := at.ToJWT()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"token": lkToken,
+		"identity": viewerID,
+	})
 }
 
 // ==========================================

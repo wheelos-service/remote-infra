@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>车辆摄像头观看器 (只读模式)</title>
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: #0a0a0a;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .header {
+            width: 100%;
+            max-width: 1200px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #333;
+            margin-bottom: 20px;
+        }
+        .header h1 { font-size: 1.5rem; color: #4CAF50; }
+        .header .info { font-size: 0.9rem; color: #888; }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .input-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        input, select {
+            padding: 10px 15px;
+            border-radius: 6px;
+            border: 1px solid #444;
+            background: #1a1a1a;
+            color: white;
+            font-size: 14px;
+        }
+        input:focus { outline: 2px solid #4CAF50; border-color: transparent; }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .btn-connect { background: #4CAF50; color: white; }
+        .btn-connect:hover { background: #45a049; }
+        .btn-connect:disabled { background: #333; cursor: not-allowed; opacity: 0.6; }
+        .btn-disconnect { background: #f44336; color: white; }
+        .btn-disconnect:hover { background: #da190b; }
+        .status {
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-size: 14px;
+            text-align: center;
+            min-width: 150px;
+        }
+        .status-disconnected { background: #333; }
+        .status-connecting { background: #ff9800; color: #000; }
+        .status-connected { background: #4CAF50; }
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            width: 100%;
+            max-width: 1400px;
+        }
+        .video-container {
+            background: #000;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 2px solid #333;
+            position: relative;
+            aspect-ratio: 4/3;
+        }
+        .video-container video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .video-info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #4CAF50;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+        .empty-state svg {
+            width: 80px;
+            height: 80px;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-left: 8px;
+        }
+        .badge-viewer { background: #2196F3; }
+        .log {
+            width: 100%;
+            max-width: 1200px;
+            margin-top: 20px;
+            padding: 15px;
+            background: #1a1a1a;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #888;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .log-entry { margin: 4px 0; }
+        .log-info { color: #4CAF50; }
+        .log-error { color: #f44336; }
+        .log-warn { color: #ff9800; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div>
+            <h1>📹 车辆摄像头观看器 <span class="badge badge-viewer">只读模式</span></h1>
+            <div class="info">无需登录，实时查看车辆视频流</div>
+        </div>
+        <div id="status" class="status status-disconnected">未连接</div>
+    </div>
+
+    <div class="controls">
+        <div class="input-group">
+            <label>车辆ID:</label>
+            <input type="text" id="vehicle-id" placeholder="如: car-001" value="car-001">
+        </div>
+        <div class="input-group">
+            <label>LiveKit:</label>
+            <input type="text" id="livekit-url" placeholder="ws://localhost:7880" value="ws://localhost:7880">
+        </div>
+        <div class="input-group">
+            <label>Token:</label>
+            <input type="text" id="access-token" placeholder="访问令牌 (可选)" style="width: 300px;">
+        </div>
+        <button id="connect-btn" class="btn-connect" onclick="connect()">连接观看</button>
+        <button id="disconnect-btn" class="btn-disconnect" onclick="disconnect()" style="display: none;">断开连接</button>
+    </div>
+
+    <div class="video-grid" id="video-grid">
+        <div class="empty-state">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4z"/>
+            </svg>
+            <p>输入车辆 ID 并点击"连接观看"开始查看</p>
+        </div>
+    </div>
+
+    <div class="log" id="log">
+        <div class="log-entry">等待连接...</div>
+    </div>
+
+    <script>
+        // 从 URL 参数获取配置
+        const params = new URLSearchParams(window.location.search);
+        const DEFAULT_VEHICLE_ID = params.get('vehicle') || 'car001';
+        const DEFAULT_LIVEKIT_URL = params.get('livekit') || 'ws://localhost:7880';
+        const DEFAULT_TOKEN = params.get('token') || '';
+
+        // 设置默认值
+        document.getElementById('vehicle-id').value = DEFAULT_VEHICLE_ID;
+        document.getElementById('livekit-url').value = DEFAULT_LIVEKIT_URL;
+        document.getElementById('access-token').value = DEFAULT_TOKEN;
+
+        let currentRoom = null;
+        let videoTracks = new Map();
+
+        function log(msg, type = 'info') {
+            const logDiv = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${time}] ${msg}`;
+            logDiv.insertBefore(entry, logDiv.firstChild);
+            // 只保留最近 50 条
+            while (logDiv.children.length > 50) {
+                logDiv.removeChild(logDiv.lastChild);
+            }
+        }
+
+        function updateStatus(status, text) {
+            const statusEl = document.getElementById('status');
+            statusEl.className = `status status-${status}`;
+            statusEl.textContent = text;
+        }
+
+        async function connect() {
+            const vehicleId = document.getElementById('vehicle-id').value.trim();
+            const livekitUrl = document.getElementById('livekit-url').value.trim();
+            let token = document.getElementById('access-token').value.trim();
+
+            if (!vehicleId) {
+                alert('请输入车辆 ID');
+                return;
+            }
+
+            document.getElementById('connect-btn').disabled = true;
+            updateStatus('connecting', '连接中...');
+            log(`正在连接到车辆 ${vehicleId}...`, 'info');
+
+            try {
+                // 如果没有提供 token，尝试获取只读 token
+                if (!token) {
+                    log('未提供 token，尝试获取只读访问令牌...', 'info');
+                    const response = await fetch(`http://localhost:8080/api/token/viewer?vid=${encodeURIComponent(vehicleId)}`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        token = data.token;
+                        log('已获取只读访问令牌', 'info');
+                    } else {
+                        const error = await response.text();
+                        log(`获取 token 失败 (${response.status}): ${error}`, 'warn');
+                        log('提示：需要后端支持 viewer token 端点，或手动输入 token', 'warn');
+                        throw new Error('无法获取访问令牌');
+                    }
+                }
+
+                // 创建 Room 并连接
+                currentRoom = new LivekitClient.Room();
+
+                // 监听视频轨道订阅
+                currentRoom.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+                    log(`收到视频轨道: ${participant.identity}`, 'info');
+                    attachVideoTrack(track, participant.identity);
+                });
+
+                // 监听参与者连接
+                currentRoom.on(LivekitClient.RoomEvent.ParticipantConnected, (participant) => {
+                    log(`参与者连接: ${participant.identity}`, 'info');
+                });
+
+                // 连接到房间
+                const roomName = `teleop-${vehicleId}`;
+                await currentRoom.connect(livekitUrl, token);
+                log(`已连接到房间: ${roomName}`, 'info');
+
+                // 列出已有的参与者
+                for (const [identity, participant] of Object.entries(currentRoom.remoteParticipants)) {
+                    log(`房间内已有参与者: ${identity}`, 'info');
+                }
+
+                updateStatus('connected', '已连接');
+                document.getElementById('connect-btn').style.display = 'none';
+                document.getElementById('disconnect-btn').style.display = 'inline-block';
+
+            } catch (error) {
+                log(`连接失败: ${error.message}`, 'error');
+                updateStatus('disconnected', '连接失败');
+                document.getElementById('connect-btn').disabled = false;
+            }
+        }
+
+        function attachVideoTrack(track, identity) {
+            const videoGrid = document.getElementById('video-grid');
+
+            // 移除空状态
+            const emptyState = videoGrid.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+
+            // 创建视频容器
+            const container = document.createElement('div');
+            container.className = 'video-container';
+            container.id = `video-${identity}`;
+
+            // 创建视频元素
+            const videoElement = track.attach();
+            container.appendChild(videoElement);
+
+            // 添加信息覆盖层
+            const info = document.createElement('div');
+            info.className = 'video-info';
+            info.textContent = identity;
+            container.appendChild(info);
+
+            videoGrid.appendChild(container);
+
+            // 保存轨道引用
+            videoTracks.set(identity, { track, container });
+        }
+
+        function disconnect() {
+            if (currentRoom) {
+                log('断开连接...', 'info');
+                currentRoom.disconnect();
+                currentRoom = null;
+            }
+
+            // 清理视频
+            videoTracks.clear();
+            const videoGrid = document.getElementById('video-grid');
+            videoGrid.innerHTML = `
+                <div class="empty-state">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4z"/>
+                    </svg>
+                    <p>输入车辆 ID 并点击"连接观看"开始查看</p>
+                </div>
+            `;
+
+            updateStatus('disconnected', '未连接');
+            document.getElementById('connect-btn').style.display = 'inline-block';
+            document.getElementById('connect-btn').disabled = false;
+            document.getElementById('disconnect-btn').style.display = 'none';
+        }
+
+        // 页面卸载时断开连接
+        window.addEventListener('beforeunload', disconnect);
+    </script>
+</body>
+</html>

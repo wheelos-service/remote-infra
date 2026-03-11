@@ -1,0 +1,19 @@
+port: 7880
+bind_addresses:
+    - ""
+rtc:
+    tcp_port: 7881
+    port_range_start: 50000
+    port_range_end: 60000
+    use_external_ip: false
+    enable_loopback_candidate: true
+keys:
+    devkey: secret
+redis:
+    address: localhost:6379
+    username: ""
+    password: ""
+    db: 0
+logging:
+    json: false
+    level: info
