@@ -1,0 +1,21 @@
+services:
+  vehicle-edge:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    init: true
+    devices:
+      - "${CAMERA_DEVICE:-/dev/video0}:/dev/video0"
+    volumes:
+      - "${DEVICE_CONFIG:-/etc/teleop/device.yaml}:/etc/teleop/device.yaml:ro"
+    command:
+      - --gateway
+      - "${GATEWAY_URL:?set GATEWAY_URL}"
+      - --vehicle-id
+      - "${VEHICLE_ID:?set VEHICLE_ID}"
+      - --livekit-url
+      - "${LIVEKIT_URL:?set LIVEKIT_URL}"
+      - --device-config
+      - /etc/teleop/device.yaml
+      - --publish-video

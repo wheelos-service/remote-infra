@@ -1,0 +1,7 @@
+# Install as /etc/teleop/device.yaml on the vehicle; do not commit the installed file.
+vehicle_id: car-001
+client_id: vehicle-client-id
+client_secret: replace-with-device-specific-secret
+token_url: https://casdoor.wheelos.cn/api/login/oauth/access_token
+audience: teleop-api
+scope: teleop:vehicle

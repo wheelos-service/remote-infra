@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teleop-backend
+  namespace: default
+  labels:
+    app: teleop-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: teleop-backend
+  template:
+    metadata:
+      labels:
+        app: teleop-backend
+    spec:
+      containers:
+      - name: backend
+        image: custom-registry.local/livekit-infra/teleop-backend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        env:
+        - name: LIVEKIT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: teleop-secrets
+              key: LIVEKIT_API_KEY
+        - name: LIVEKIT_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: teleop-secrets
+              key: LIVEKIT_API_SECRET
+        - name: LIVEKIT_URL
+          value: "http://livekit:7880"
+        - name: REDIS_URL
+          value: "redis:6379"
+        - name: CONTROL_LEASE_TTL_SECONDS
+          value: "5"
+        - name: VEHICLE_LIVEKIT_TOKEN_TTL_MINUTES
+          value: "30"
+        - name: AUTH_MODE
+          value: "oidc"
+        - name: OIDC_ISSUER
+          valueFrom:
+            secretKeyRef:
+              name: teleop-secrets
+              key: OIDC_ISSUER
+        - name: OIDC_AUDIENCE
+          valueFrom:
+            secretKeyRef:
+              name: teleop-secrets
+              key: OIDC_AUDIENCE
+        - name: OIDC_JWKS_URL
+          valueFrom:
+            secretKeyRef:
+              name: teleop-secrets
+              key: OIDC_JWKS_URL
+        - name: VEHICLE_ACL_JSON
+          valueFrom:
+            secretKeyRef:
+              name: teleop-secrets
+              key: VEHICLE_ACL_JSON
+
+        # CPU/Memory Limits & Requests
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "64Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+
+        # Health Probes
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8080
+          initialDelaySeconds: 3
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teleop-backend
+  namespace: default
+spec:
+  selector:
+    app: teleop-backend
+  ports:
+  - port: 80
+    targetPort: 8080
+    name: http

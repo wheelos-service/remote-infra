@@ -1,0 +1,15 @@
+.venv/
+**/.venv/
+bin/
+*.log
+node_modules/
+apps/operator-console/dist/
+__pycache__/
+.pytest_cache/
+
+apps/vehicle-edge/__pycache__/
+apps/vehicle-edge/src/**/__pycache__/
+apps/vehicle-edge/tests/__pycache__/
+apps/vehicle-edge/device.yaml
+tests/__pycache__/
+*.pyc

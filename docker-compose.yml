@@ -1,0 +1,131 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  casdoor-db:
+    image: mysql:8.0
+    restart: unless-stopped
+    command: ["--default-authentication-plugin=mysql_native_password"]
+    environment:
+      MYSQL_ROOT_PASSWORD: "${CASDOOR_DB_ROOT_PASSWORD}"
+      MYSQL_DATABASE: casdoor
+    volumes:
+      - casdoor-db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  casdoor:
+    image: casbin/casdoor:latest
+    restart: unless-stopped
+    environment:
+      TZ: UTC
+    volumes:
+      - casdoor-config:/conf:ro
+    depends_on:
+      casdoor-db:
+        condition: service_healthy
+      casdoor-config-init:
+        condition: service_completed_successfully
+
+  casdoor-config-init:
+    image: alpine:3.20
+    restart: "no"
+    environment:
+      CASDOOR_DB_ROOT_PASSWORD: "${CASDOOR_DB_ROOT_PASSWORD}"
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        sed "s|__CASDOOR_DB_ROOT_PASSWORD__|$${CASDOOR_DB_ROOT_PASSWORD}|g"
+        /template/app.conf > /generated/app.conf
+    volumes:
+      - ./infra/local-dev/casdoor/app.conf:/template/app.conf:ro
+      - casdoor-config:/generated
+
+  livekit-config:
+    image: alpine:3.20
+    restart: "no"
+    environment:
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET}"
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        sed -e "s|__LIVEKIT_API_KEY__|$${LIVEKIT_API_KEY}|g"
+        -e "s|__LIVEKIT_API_SECRET__|$${LIVEKIT_API_SECRET}|g"
+        /template/livekit.yaml > /generated/livekit.yaml
+    volumes:
+      - ./infra/local-dev/livekit.template.yaml:/template/livekit.yaml:ro
+      - livekit-config:/generated
+
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    ports:
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+    volumes:
+      - livekit-config:/etc
+    depends_on:
+      redis:
+        condition: service_started
+      livekit-config:
+        condition: service_completed_successfully
+
+  teleop-backend:
+    build:
+      context: ./apps/teleop-gateway
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET}"
+      LIVEKIT_URL: "http://livekit:7880"
+      REDIS_URL: "redis:6379"
+      CONTROL_LEASE_TTL_SECONDS: "${CONTROL_LEASE_TTL_SECONDS:-30}"
+      VEHICLE_LIVEKIT_TOKEN_TTL_MINUTES: "${VEHICLE_LIVEKIT_TOKEN_TTL_MINUTES:-30}"
+      AUTH_MODE: "${AUTH_MODE:-dev}"
+      OIDC_ISSUER: "${OIDC_ISSUER:-}"
+      OIDC_AUDIENCE: "${OIDC_AUDIENCE:-}"
+      OIDC_JWKS_URL: "${OIDC_JWKS_URL:-}"
+      VEHICLE_ACL_JSON: "${VEHICLE_ACL_JSON:-[]}"
+      VEHICLE_SUBJECT_MAP_JSON: "${VEHICLE_SUBJECT_MAP_JSON:-{}}"
+      ALLOWED_ORIGINS: "${CLIENT_ORIGIN:-http://localhost:8000}"
+    depends_on:
+      - livekit
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["cloud"]
+    restart: unless-stopped
+    environment:
+      API_DOMAIN: "${API_DOMAIN:-api.example.com}"
+      RTC_DOMAIN: "${RTC_DOMAIN:-rtc.example.com}"
+      CASDOOR_DOMAIN: "${CASDOOR_DOMAIN:-casdoor.example.com}"
+      CASDOOR_UPSTREAM: "${CASDOOR_UPSTREAM:-casdoor:8000}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/local-dev/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - teleop-backend
+      - livekit
+      - casdoor
+
+volumes:
+  livekit-config:
+  caddy-data:
+  caddy-config:
+  casdoor-db:
+  casdoor-config:

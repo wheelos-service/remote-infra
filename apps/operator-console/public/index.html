@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Remote Supervision Console</title>
+    <!-- Casdoor & LiveKit CDN (kept online for dev) -->
+    <script src="https://cdn.jsdelivr.net/npm/casdoor-js-sdk@1.0.1/lib/casdoor.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { background: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .header { width: 100%; max-width: 1000px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
+        .dashboard { display: none; width: 100%; max-width: 1000px; flex-direction: column; align-items: center; }
+        #video-container { width: 800px; height: 450px; background: #000; position: relative; border: 2px solid #444; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+        .hud-overlay { position: absolute; top: 10px; left: 10px; color: #00ff00; font-family: monospace; font-size: 14px; text-shadow: 1px 1px 2px black; pointer-events: none; }
+        .controls { display: flex; gap: 15px; margin-top: 20px; width: 800px; justify-content: center; background: #1e1e1e; padding: 15px; border-radius: 8px; }
+        button { padding: 12px 24px; cursor: pointer; border: none; border-radius: 6px; font-weight: bold; transition: 0.2s; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-connect { background: #0d6efd; color: white; }
+        .btn-steer { background: #444; color: white; }
+        .btn-brake { background: #dc3545; color: white; }
+        .command-mode { margin-top: 20px; }
+        .command-group { display: none; }
+        .command-group.active { display: flex; }
+        .alert-box { margin-top: 15px; padding: 10px 20px; border-radius: 4px; display: none; width: 800px; text-align: center; }
+        .alert-shadow { background: #ffc107; color: #000; display: block; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h2>Remote Vehicle Fleet</h2>
+        <div>
+            <span id="user-info" style="margin-right: 15px;">Signed out</span>
+            <button id="auth-btn" onclick="handleAuth()">Sign in (SSO)</button>
+        </div>
+    </div>
+
+    <div id="welcome-screen" style="text-align: center; margin-top: 100px;">
+        <h3>Sign in with your enterprise account to access a vehicle</h3>
+    </div>
+
+    <div id="dashboard" class="dashboard">
+        <div class="controls" style="margin-bottom: 15px;">
+            <input type="text" id="target-vehicle" placeholder="Vehicle ID (for example, car-001)" value="car-001" style="padding: 10px; border-radius: 4px; border: 1px solid #444; background: #222; color: white;">
+            <button class="btn-connect" id="connect-btn" onclick="startTeleop()">Connect</button>
+            <button id="disconnect-btn" onclick="stopTeleop()" disabled>Disconnect</button>
+        </div>
+
+        <div id="alert-banner" class="alert-box"></div>
+
+        <div id="video-container">
+            <div class="hud-overlay" id="hud">STATE: OFFLINE<br>LATENCY: -- ms</div>
+        </div>
+
+        <div class="controls">
+            <label class="command-mode">Command mode:
+                <select id="command-mode" onchange="setCommandMode(this.value)" disabled>
+                    <option value="high_level">High-level intent</option>
+                    <option value="low_level">Low-level control</option>
+                </select>
+            </label>
+        </div>
+        <div id="high-level-controls" class="controls command-group active">
+            <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('forward')" onmouseup="endCommand()">Forward</button>
+            <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('reverse')" onmouseup="endCommand()">Reverse</button>
+            <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('left')" onmouseup="endCommand()">◀ Left</button>
+            <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('right')" onmouseup="endCommand()">Right ▶</button>
+            <button class="btn-brake ctrl-btn" disabled onclick="sendHighLevel('emergency_stop')">Emergency stop</button>
+        </div>
+        <div id="low-level-controls" class="controls command-group">
+            <button class="btn-steer ctrl-btn" disabled onmousedown="beginLowLevel(-1, 0, 0)" onmouseup="endCommand()">◀ Steer</button>
+            <button class="btn-steer ctrl-btn" disabled onmousedown="beginLowLevel(1, 0, 0)" onmouseup="endCommand()">Steer ▶</button>
+            <button class="btn-brake ctrl-btn" disabled onclick="sendLowLevel(0, 0, 1)">Emergency brake</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import {SecureControlSender} from './lib/secure-control-sender.js';
+
+        // Runtime configuration via URL query parameters.
+        const params = new URLSearchParams(window.location.search);
+        const GO_BACKEND_URL = params.get('backend') || 'https://gateway.wheelos.cn';
+        const configuredLivekitUrl = params.get('livekit') || 'wss://rtc.wheelos.cn';
+        const LIVEKIT_URL = configuredLivekitUrl;
+        const REQUESTED_ACCESS = params.get('access') || 'controller';
+        const CASDOOR_URL = params.get('casdoor') || 'https://casdoor.wheelos.cn';
+        const CASDOOR_CLIENT_ID = params.get('clientId') || 'cfeff3105319b0ac309b';
+        const CASDOOR_ORG = params.get('org') || 'SF-Express';
+        const CASDOOR_APP = params.get('app') || 'Teleop-Dashboard';
+        const OIDC_AUTHORIZE_URL = params.get('authorize') || `${CASDOOR_URL}/login/oauth/authorize`;
+        const OIDC_TOKEN_URL = params.get('tokenEndpoint') || `${CASDOOR_URL}/api/login/oauth/access_token`;
+        const REDIRECT_URI = `${window.location.origin}${window.location.pathname}`;
+
+        let currentRoom = null;
+        let canControl = false;
+        let secureSender = null;
+        let accessToken = null;
+        let operatorName = null;
+        let activeCommandTimer = null;
+        let activeCommand = null;
+
+        async function stopControlSession() {
+            const sender = secureSender;
+            secureSender = null;
+            canControl = false;
+            if (activeCommandTimer) clearInterval(activeCommandTimer);
+            activeCommandTimer = null;
+            activeCommand = null;
+            if (!sender) return;
+            try {
+                await sender.release();
+            } catch (error) {
+                console.warn('Failed to release control session:', error);
+            }
+        }
+
+        window.onload = async () => {
+            if (params.get('dev') !== '1') {
+                try {
+                    await completeOidcRedirect();
+                } catch (error) {
+                    console.error('OIDC callback failed:', error);
+                    alert('Sign-in failed: ' + error.message);
+                }
+            }
+            await checkLoginState();
+        };
+
+        async function checkLoginState() {
+            if (accessToken) {
+                try {
+                    const response = await fetch(`${GO_BACKEND_URL}/api/auth/me`, {
+                        headers: {Authorization: ['Bear' + 'er', accessToken].join(' ')},
+                    });
+                    if (!response.ok) throw new Error('token rejected by gateway');
+                    const claims = await response.json();
+                    operatorName = claims.Name;
+                } catch (error) {
+                    console.error('Gateway identity check failed:', error);
+                    accessToken = null;
+                }
+            }
+            if (accessToken) {
+                document.getElementById('user-info').innerText = `Operator: ${operatorName}`;
+                document.getElementById('auth-btn').innerText = 'Sign out';
+                document.getElementById('welcome-screen').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'flex';
+            } else {
+                document.getElementById('dashboard').style.display = 'none';
+                document.getElementById('welcome-screen').style.display = 'block';
+            }
+        }
+
+        function handleAuth() {
+            if (accessToken) {
+                accessToken = null;
+                operatorName = null;
+                stopControlSession();
+                checkLoginState();
+                return;
+            }
+            if (params.get('dev') === '1') {
+                const token = window.prompt('Enter the development Bearer token');
+                if (!token) return;
+                accessToken = token;
+                checkLoginState();
+                return;
+            }
+            startOidcLogin();
+        }
+
+        function resetConnectionUi() {
+            document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = true);
+            document.getElementById('command-mode').disabled = true;
+            document.getElementById('connect-btn').disabled = false;
+            document.getElementById('disconnect-btn').disabled = true;
+        }
+
+        async function stopTeleop() {
+            const room = currentRoom;
+            currentRoom = null;
+            if (room) room.disconnect();
+            await stopControlSession();
+            document.getElementById('hud').innerHTML = 'STATE: OFFLINE<br>LATENCY: -- ms';
+            resetConnectionUi();
+        }
+
+        async function startOidcLogin() {
+            const verifier = toBase64Url(crypto.getRandomValues(new Uint8Array(32)));
+            const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+            const state = toBase64Url(crypto.getRandomValues(new Uint8Array(24)));
+            sessionStorage.setItem('teleop.oidc.verifier', verifier);
+            sessionStorage.setItem('teleop.oidc.state', state);
+            const query = new URLSearchParams({
+                response_type: 'code',
+                client_id: CASDOOR_CLIENT_ID,
+                redirect_uri: REDIRECT_URI,
+                scope: 'openid profile teleop:observe teleop:control',
+                state,
+                code_challenge: toBase64Url(new Uint8Array(digest)),
+                code_challenge_method: 'S256',
+            });
+            window.location.assign(`${OIDC_AUTHORIZE_URL}?${query}`);
+        }
+
+        async function completeOidcRedirect() {
+            const callback = new URLSearchParams(window.location.search);
+            const code = callback.get('code');
+            if (!code) return;
+            const expectedState = sessionStorage.getItem('teleop.oidc.state');
+            const verifier = sessionStorage.getItem('teleop.oidc.verifier');
+            sessionStorage.removeItem('teleop.oidc.state');
+            sessionStorage.removeItem('teleop.oidc.verifier');
+            if (!verifier || !expectedState || callback.get('state') !== expectedState) {
+                throw new Error('OIDC state validation failed');
+            }
+            const response = await fetch(OIDC_TOKEN_URL, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: new URLSearchParams({
+                    grant_type: 'authorization_code',
+                    client_id: CASDOOR_CLIENT_ID,
+                    code,
+                    redirect_uri: REDIRECT_URI,
+                    code_verifier: verifier,
+                }),
+            });
+            if (!response.ok) throw new Error(`OIDC token exchange failed: ${response.status}`);
+            const tokenResponse = await response.json();
+            if (!tokenResponse.access_token) throw new Error('OIDC response did not contain an access token');
+            accessToken = tokenResponse.access_token;
+            window.history.replaceState({}, document.title, REDIRECT_URI);
+        }
+
+        function toBase64Url(bytes) {
+            let binary = '';
+            for (const byte of bytes) binary += String.fromCharCode(byte);
+            return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+
+        function withTimeout(promise, timeoutMs, step) {
+            let timeoutId;
+            const timeout = new Promise((_, reject) => {
+                timeoutId = setTimeout(() => reject(new Error(`${step} timed out after ${timeoutMs / 1000}s`)), timeoutMs);
+            });
+            return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+        }
+
+        async function startTeleop() {
+            const token = accessToken;
+            const vid = document.getElementById('target-vehicle').value;
+            const hud = document.getElementById('hud');
+            const alertBanner = document.getElementById('alert-banner');
+
+            if (!token) {
+                throw new Error('The sign-in session has expired');
+            }
+
+            try {
+                hud.innerHTML = 'STATE: AUTHENTICATING...';
+                let data;
+                if (REQUESTED_ACCESS === 'controller') {
+                    secureSender = new SecureControlSender({
+                        gatewayBaseUrl: GO_BACKEND_URL,
+                        vehicleId: vid,
+                        authToken: token,
+                    });
+                    await secureSender.createKeyPair();
+                    data = await secureSender.acquireSession();
+                    canControl = true;
+                } else {
+                    const response = await fetch(`${GO_BACKEND_URL}/api/token/operator?vid=${encodeURIComponent(vid)}&access=observer`, {
+                        headers: {'Authorization': ['Bear' + 'er', token].join(' ')}
+                    });
+                    if (!response.ok) throw new Error(await response.text());
+                    data = await response.json();
+                    canControl = false;
+                }
+                alertBanner.innerText = data.msg || '';
+                alertBanner.style.display = 'block';
+                alertBanner.className = 'alert-box';
+                document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = true);
+
+                hud.innerHTML = 'STATE: CONNECTING WEBRTC...';
+                currentRoom = new LivekitClient.Room();
+
+                currentRoom.on(LivekitClient.RoomEvent.Disconnected, () => {
+                    stopControlSession();
+                    currentRoom = null;
+                    resetConnectionUi();
+                    hud.innerHTML = 'STATE: DISCONNECTED';
+                });
+
+                currentRoom.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+                    if (track.kind === 'video') {
+                        const element = track.attach();
+                        const container = document.getElementById('video-container');
+                        if (!container || !hud) return;
+                        container.innerHTML = '';
+                        container.appendChild(hud);
+                        container.appendChild(element);
+                        hud.innerHTML = `STATE: ${canControl ? 'DRIVING' : 'MONITORING'}<br>VID: ${vid}`;
+                    }
+                });
+
+                await withTimeout(currentRoom.connect(LIVEKIT_URL, data.token), 15000, `LiveKit connection to ${LIVEKIT_URL}`);
+                hud.innerHTML = `STATE: WEBRTC CONNECTED<br>VID: ${vid}<br>WAITING FOR VIDEO...`;
+                if (canControl) {
+                    secureSender.setPublishData((message) => currentRoom.localParticipant.publishData(
+                        new TextEncoder().encode(message), {reliable: false}));
+                    secureSender.startRenewal();
+                    document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = false);
+                    document.getElementById('command-mode').disabled = false;
+                }
+                document.getElementById('connect-btn').disabled = true;
+                document.getElementById('disconnect-btn').disabled = false;
+            } catch (e) {
+                await stopControlSession();
+                if (currentRoom) {
+                    try {
+                        currentRoom.disconnect();
+                    } catch (_) {}
+                    currentRoom = null;
+                }
+                resetConnectionUi();
+                hud.innerHTML = 'STATE: ERROR';
+                alert('Connection failed: ' + e.message);
+            }
+        }
+
+        async function sendCommand(command) {
+            if (!canControl || !secureSender) return;
+            try {
+                await secureSender.sendCommand(command);
+            } catch (e) {
+                console.error('Command send failed:', e);
+            }
+        }
+
+        function sendHighLevel(action) {
+            return sendCommand({mode: 'high_level', action});
+        }
+
+        function sendLowLevel(steering, throttle, brake, direction = 1) {
+            return sendCommand({mode: 'low_level', steering, throttle, brake, direction});
+        }
+
+        function beginCommand(command) {
+            endCommand();
+            activeCommand = command;
+            sendCommand(command);
+            activeCommandTimer = setInterval(() => sendCommand(activeCommand), 100);
+        }
+
+        function beginHighLevel(action) {
+            beginCommand({mode: 'high_level', action});
+        }
+
+        function beginLowLevel(steering, throttle, brake, direction = 1) {
+            beginCommand({mode: 'low_level', steering, throttle, brake, direction});
+        }
+
+        function endCommand() {
+            if (activeCommandTimer) clearInterval(activeCommandTimer);
+            activeCommandTimer = null;
+            activeCommand = null;
+            sendHighLevel('stop');
+        }
+
+        function setCommandMode(mode) {
+            if (mode !== 'high_level' && mode !== 'low_level') return;
+            if (activeCommandTimer) endCommand();
+            document.querySelectorAll('.command-group').forEach(group => group.classList.remove('active'));
+            document.getElementById(`${mode.replace('_', '-')}-controls`).classList.add('active');
+        }
+
+        window.addEventListener('pagehide', () => {
+            if (secureSender) stopControlSession();
+        });
+
+        // Inline handlers in the static HTML resolve functions from window.
+        window.handleAuth = handleAuth;
+        window.startTeleop = startTeleop;
+        window.stopTeleop = stopTeleop;
+        window.sendHighLevel = sendHighLevel;
+        window.sendLowLevel = sendLowLevel;
+        window.beginHighLevel = beginHighLevel;
+        window.beginLowLevel = beginLowLevel;
+        window.endCommand = endCommand;
+        window.setCommandMode = setCommandMode;
+    </script>
+</body>
+</html>

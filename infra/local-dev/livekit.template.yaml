@@ -1,0 +1,26 @@
+port: 7880
+
+bind_addresses:
+  - ""
+
+keys:
+  __LIVEKIT_API_KEY__: "__LIVEKIT_API_SECRET__"
+
+rtc:
+  use_external_ip: true
+  port_range_start: 50000
+  port_range_end: 50100
+  tcp_port: 7881
+  congestion_control:
+    enabled: true
+
+redis:
+  address: redis:6379
+
+webhook:
+  api_key: __LIVEKIT_API_KEY__
+  urls:
+    - "http://teleop-backend:8080/api/webhook/livekit"
+
+logging:
+  level: warn

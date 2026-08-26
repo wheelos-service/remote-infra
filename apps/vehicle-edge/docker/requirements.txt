@@ -1,0 +1,5 @@
+livekit
+aiohttp
+opencv-python
+pynacl
+pyyaml

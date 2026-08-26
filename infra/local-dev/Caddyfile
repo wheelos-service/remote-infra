@@ -1,0 +1,11 @@
+{$API_DOMAIN} {
+    reverse_proxy teleop-backend:8080
+}
+
+{$RTC_DOMAIN} {
+    reverse_proxy livekit:7880
+}
+
+{$CASDOOR_DOMAIN} {
+    reverse_proxy {$CASDOOR_UPSTREAM}
+}

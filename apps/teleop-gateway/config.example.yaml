@@ -1,0 +1,13 @@
+## Backend config template (non-sensitive defaults)
+# Copy to backend/config.local.yaml and override secrets via environment or secrets manager
+
+listen: ":8080"
+log_level: info
+
+# LiveKit API key name (the key id configured in livekit/livekit.yaml)
+livekit_api_key: teleop_prod_key
+
+# Webhook verification: when using HMAC, backend should verify with LIVEKIT_API_SECRET
+# In production, prefer mTLS or a dedicated signing key rotated regularly
+webhook:
+  require_hmac: true

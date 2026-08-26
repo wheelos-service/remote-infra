@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DataChannelControl",
+  "type": "object",
+  "properties": {
+    "version": { "const": 1 },
+    "type": { "const": "control" },
+    "session_id": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "timestamp_ms": { "type": "integer" },
+    "command": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": { "const": "high_level" },
+            "action": { "enum": ["forward", "reverse", "left", "right", "stop", "emergency_stop"] }
+          },
+          "required": ["mode", "action"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": { "const": "low_level" },
+            "steering": { "type": "number", "minimum": -1, "maximum": 1 },
+            "throttle": { "type": "number", "minimum": 0, "maximum": 1 },
+            "brake": { "type": "number", "minimum": 0, "maximum": 1 },
+            "direction": { "enum": [-1, 0, 1] }
+          },
+          "required": ["mode", "steering", "throttle", "brake", "direction"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "signature": { "type": "string", "description": "Ed25519 signature (base64)" }
+  },
+  "required": ["version", "type", "session_id", "sequence", "timestamp_ms", "command", "signature"],
+  "additionalProperties": false
+}

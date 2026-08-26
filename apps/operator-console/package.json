@@ -1,0 +1,13 @@
+{
+  "name": "operator-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p . && cp public/index.html dist/index.html",
+    "watch": "tsc -p . -w"
+  },
+  "devDependencies": {
+    "typescript": "^5.2.2"
+  }
+}

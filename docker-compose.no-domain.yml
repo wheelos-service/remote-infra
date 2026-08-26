@@ -1,0 +1,13 @@
+services:
+  livekit:
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+
+  teleop-backend:
+    ports:
+      - "8080:8080"
+    environment:
+      AUTH_MODE: "${AUTH_MODE:-dev}"
+      ALLOWED_ORIGINS: "${CLIENT_ORIGIN:-http://127.0.0.1:8000}"
