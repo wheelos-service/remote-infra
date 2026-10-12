@@ -4,16 +4,16 @@ This project is a LiveKit remote vehicle monitoring and teleoperation prototype 
 
 ## Modules
 
-- `apps/operator-console/`: OIDC Authorization Code + PKCE authentication, control-session acquisition, video subscription, and Ed25519-signed command publishing. Access tokens and private keys remain in page memory.
+- `apps/operator-console/`: OIDC Authorization Code + PKCE authentication, control-session acquisition, camera-track layout, and Ed25519-signed command publishing. Access tokens and private keys remain in page memory.
 - `apps/teleop-gateway/`: identity validation, least-privilege LiveKit token issuance, Redis control leases, webhooks, telemetry, and auditing.
-- `apps/vehicle-edge/src/vehicle_edge/`: vehicle session orchestration, OAuth client-credential refresh, LiveKit connection, DataPacket handling, command verification, watchdog, and telemetry.
+- `apps/vehicle-edge/src/vehicle_edge/`: vehicle session orchestration, OAuth client-credential refresh, LiveKit connection, camera configuration/capture/publishing modules, DataPacket handling, command verification, watchdog, and telemetry.
 - `infra/`: Docker Compose, LiveKit, Caddy, build scripts, and deferred Kubernetes manifests.
 - `tests/`: LiveKit QoS and vehicle-side security tests.
 
 ## Data Flow
 
 1. The browser obtains an operator access token through OIDC Authorization Code + PKCE. The vehicle obtains a `teleop:vehicle` token with its device credentials. The Gateway validates identity, tenant, and scopes, then issues a short-lived token limited to `teleop-<vehicle_id>`.
-2. Both participants join the same LiveKit room. The vehicle publishes camera video and the browser subscribes to it.
+2. Both participants join the same LiveKit room. The vehicle publishes either one front camera track or separate left, center, and right camera tracks; the browser subscribes and displays each track independently.
 3. A Controller browser creates a one-time Ed25519 key pair and a Redis-backed Control Session. The Gateway atomically binds the vehicle, operator, public key, and short-lived LiveKit token.
 4. The browser sends versioned control messages containing the session ID, sequence, timestamp, command, and signature through LiveKit DataPackets. Commands are either high-level driving intents (the default) or explicit low-level actuator values. The vehicle validates and maps high-level intents before applying them. The session is released when the page or RTC connection closes.
 5. The vehicle polls for the active session and accepts only packets from the matching operator with a valid signature, sequence, timestamp, and unexpired session. A watchdog applies the configured safety action when control messages stop.

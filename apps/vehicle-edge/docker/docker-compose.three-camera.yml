@@ -1,0 +1,8 @@
+services:
+  vehicle-edge:
+    environment:
+      CAMERA_LAYOUT: three
+    devices:
+      - "${CAMERA_LEFT_DEVICE:-/dev/video0}:/dev/video0"
+      - "${CAMERA_CENTER_DEVICE:-/dev/video1}:/dev/video1"
+      - "${CAMERA_RIGHT_DEVICE:-/dev/video2}:/dev/video2"

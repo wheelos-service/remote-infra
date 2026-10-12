@@ -95,7 +95,7 @@ PYTHONPATH=apps/vehicle-edge/src python3 -m vehicle_edge.vehicle_node \
   --vehicle-id car-001 \
   --device-config /etc/teleop/device.yaml \
   --livekit-url ws://<server-ip>:7880 \
-  --publish-video
+  --camera-layout single
 ```
 
 This direct-IP mode has no browser-trusted TLS certificate and provides no encrypted
@@ -119,7 +119,7 @@ PYTHONPATH=src python3 -m vehicle_edge.vehicle_node \
   --vehicle-id car-001 \
   --device-config /etc/teleop/device.yaml \
   --livekit-url wss://rtc.example.com \
-  --publish-video
+  --camera-layout single
 ```
 
 The vehicle needs outbound HTTPS/WSS access to the server. It does not need Redis, Casdoor
@@ -135,7 +135,7 @@ docker run --rm --network host \
   --vehicle-id car-001 \
   --device-config /etc/teleop/device.yaml \
   --livekit-url wss://rtc.example.com \
-  --publish-video
+  --camera-layout single
 ```
 
 ## 3. Operator client

@@ -19,23 +19,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 from typing import Any, Optional
 
 import aiohttp
 
-from .camera_publisher import open_configured_camera, publish_camera_frames
+from .camera_config import CameraLayout, CameraOptions
 from .control_session_receiver import SessionCommandVerifier, SessionVehicleRuntime
 from .device_credentials import FileDeviceCredentialProvider, VehicleTokenManager
 from .secure_receiver import EmergencyBrakeController
-from .video_state import VideoStateManager
-
-
-def _bitrate_for_camera(profile, width: int, height: int, fps: float) -> int:
-    baseline_pixels_per_second = profile.width * profile.height * profile.fps
-    actual_pixels_per_second = width * height * fps
-    return max(1, round(
-        profile.bitrate_bps * actual_pixels_per_second / baseline_pixels_per_second))
+from .video_publisher import LiveKitVideoPublisher
 
 
 async def _periodic_session_refresh(verifier: SessionCommandVerifier, session: aiohttp.ClientSession, interval_s: int = 1) -> None:
@@ -64,11 +58,7 @@ async def livekit_connect_loop(
     runtime: Any,
     lk_url: str,
     lk_token: str,
-    publish_video: bool = False,
-    camera_index: int = 0,
-    camera_width: int = 0,
-    camera_height: int = 0,
-    camera_fps: int = 0,
+    camera_options: CameraOptions,
 ) -> None:
     try:
         from livekit import rtc
@@ -77,8 +67,7 @@ async def livekit_connect_loop(
         return
 
     room = rtc.Room()
-    frame_task = None
-    video_state = VideoStateManager()
+    video_publisher = None
 
     def _on_data(data, participant, kind=None):
         try:
@@ -97,62 +86,19 @@ async def livekit_connect_loop(
     try:
         await room.connect(lk_url, lk_token, rtc.RoomOptions(dynacast=True))
         logging.info("[LIVEKIT] connected to %s", lk_url)
-        if publish_video and hasattr(rtc, "VideoSource"):
-            camera = None
-            try:
-                profile = video_state.set_mode("ACTIVE")
-                camera, camera_format = open_configured_camera(
-                        camera_index,
-                        camera_width or 0,
-                        camera_height or 0,
-                        camera_fps or profile.fps)
-                src = rtc.VideoSource(camera_format.width, camera_format.height)
-                track = rtc.LocalVideoTrack.create_video_track("camera", src)
-                bitrate_bps = _bitrate_for_camera(
-                    profile,
-                    camera_format.width,
-                    camera_format.height,
-                    camera_format.fps,
-                )
-                options = rtc.TrackPublishOptions(
-                    source=rtc.TrackSource.SOURCE_CAMERA,
-                    simulcast=True,
-                    video_encoding=rtc.VideoEncoding(
-                        max_bitrate=bitrate_bps,
-                        max_framerate=camera_format.fps,
-                    ),
-                )
-                await room.local_participant.publish_track(track, options)
-                frame_task = asyncio.create_task(
-                    publish_camera_frames(
-                        src,
-                        camera,
-                        camera_format.width,
-                        camera_format.height,
-                        camera_format.fps,
-                    ))
-                logging.info(
-                    "[LIVEKIT] published camera %s video track at %sx%s@%.2ffps",
-                    camera_index,
-                    camera_format.width,
-                    camera_format.height,
-                    camera_format.fps,
-                )
-            except Exception:
-                if camera is not None and frame_task is None:
-                    camera.release()
-                logging.exception(
-                    "[LIVEKIT] failed to publish video (continuing)")
+        if camera_options.layout is not CameraLayout.OFF:
+            video_publisher = LiveKitVideoPublisher(rtc, room.local_participant)
+            await video_publisher.start(camera_options)
 
         # keep running until disconnected
         while True:
-            if frame_task is not None and frame_task.done():
-                frame_task.result()
+            if video_publisher is not None:
+                await video_publisher.collect_finished()
             await asyncio.sleep(1)
 
     finally:
-        if frame_task is not None:
-            frame_task.cancel()
+        if video_publisher is not None:
+            await video_publisher.close()
         try:
             await room.disconnect()
         except Exception:
@@ -165,12 +111,8 @@ async def run_agent(
     device_config: str = "/etc/teleop/device.yaml",
     backend_token_url: Optional[str] = None,
     livekit_url: Optional[str] = None,
-    publish_video: bool = False,
-    camera_index: int = 0,
-    camera_width: int = 0,
-    camera_height: int = 0,
-    camera_fps: int = 0,
     auth_token: Optional[str] = None,
+    camera_options: CameraOptions = CameraOptions(),
 ) -> None:
     brake = EmergencyBrakeController()
     verifier = SessionCommandVerifier(gateway, vehicle_id, "")
@@ -223,14 +165,7 @@ async def run_agent(
             runtime.telemetry_loop(gateway, vehicle_id, session)))
         tasks.append(asyncio.create_task(runtime.audit_loop(gateway, session)))
         tasks.append(asyncio.create_task(livekit_connect_loop(
-            runtime,
-            livekit_url or "",
-            lk_token,
-            publish_video,
-            camera_index,
-            camera_width,
-            camera_height,
-            camera_fps)))
+            runtime, livekit_url or "", lk_token, camera_options)))
 
         # run until cancelled
         try:
@@ -256,10 +191,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Gateway endpoint to exchange JWT for LiveKit token, e.g. http://localhost:8080/api/token/vehicle")
     p.add_argument("--livekit-url", required=True,
                    help="LiveKit websocket URL")
-    p.add_argument("--publish-video", action="store_true",
-                   help="If set in livekit mode, publish frames from a local camera")
-    p.add_argument("--camera-index", type=int, default=0,
-                   help="Local camera index for --publish-video (default: 0)")
+    p.add_argument("--camera-layout", choices=tuple(layout.value for layout in CameraLayout),
+                   default=os.environ.get("CAMERA_LAYOUT", CameraLayout.OFF.value),
+                   help="Camera publishing mode: off, single front camera, or three cameras")
     p.add_argument("--camera-width", type=int, default=0,
                    help="Camera width; 0 keeps the driver's default mode")
     p.add_argument("--camera-height", type=int, default=0,
@@ -296,12 +230,13 @@ def main() -> None:
                 device_config=args.device_config,
                 backend_token_url=args.backend_token_url,
                 livekit_url=args.livekit_url,
-                publish_video=bool(args.publish_video),
-                camera_index=args.camera_index,
-                camera_width=args.camera_width,
-                camera_height=args.camera_height,
-                camera_fps=args.camera_fps,
                 auth_token=args.auth_token,
+                camera_options=CameraOptions(
+                    layout=CameraLayout(args.camera_layout),
+                    width=args.camera_width,
+                    height=args.camera_height,
+                    fps=args.camera_fps,
+                ),
             )
         )
 
@@ -313,4 +248,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

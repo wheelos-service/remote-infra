@@ -5,6 +5,8 @@ services:
       dockerfile: docker/Dockerfile
     restart: unless-stopped
     init: true
+    environment:
+      CAMERA_LAYOUT: "${CAMERA_LAYOUT:-single}"
     devices:
       - "${CAMERA_DEVICE:-/dev/video0}:/dev/video0"
     volumes:
@@ -18,4 +20,3 @@ services:
       - "${LIVEKIT_URL:?set LIVEKIT_URL}"
       - --device-config
       - /etc/teleop/device.yaml
-      - --publish-video

@@ -1,8 +1,9 @@
 # Vehicle Edge Deployment
 
-The recommended vehicle deployment is Docker Compose with one V4L2 camera. The
-vehicle process only makes outbound connections to the Gateway and LiveKit; it
-does not need to expose an HTTP port.
+The recommended vehicle deployment is Docker Compose. By default it publishes
+one front-facing V4L2 camera. An optional Compose override publishes separate
+left, center, and right camera tracks. The vehicle process only makes outbound
+connections to the Gateway and LiveKit; it does not need to expose an HTTP port.
 
 ## Prerequisites
 
@@ -34,6 +35,34 @@ docker compose -f docker/docker-compose.yml up -d
 docker compose -f docker/docker-compose.yml logs -f vehicle-edge
 ```
 
+This default configuration publishes one track named `camera-front`.
+`CAMERA_LAYOUT=off` disables camera publishing. To publish three cameras, set
+the host device paths and use the three-camera Compose override:
+
+```bash
+export CAMERA_LEFT_DEVICE=/dev/video0
+export CAMERA_CENTER_DEVICE=/dev/video1
+export CAMERA_RIGHT_DEVICE=/dev/video2
+
+docker compose \
+  -f docker/docker-compose.yml \
+  -f docker/docker-compose.three-camera.yml \
+  build
+docker compose \
+  -f docker/docker-compose.yml \
+  -f docker/docker-compose.three-camera.yml \
+  up -d
+```
+
+The override changes only the camera layout and device mappings, leaving the
+shared command, volume, and build configuration in the base Compose file. It
+maps cameras into the container as `/dev/video0`, `/dev/video1`, and
+`/dev/video2`; they are published as `camera-left`, `camera-center`, and
+`camera-right`. Set the device variables to match the host's V4L2 devices.
+`--camera-width`, `--camera-height`, and `--camera-fps` apply to every camera.
+If an individual camera cannot be opened or stops returning frames, the other
+camera tracks continue publishing.
+
 For a temporary IP-based deployment:
 
 ```bash
@@ -53,10 +82,12 @@ v4l2-ctl --list-formats-ext -d /dev/video0
 docker compose -f docker/docker-compose.yml run --rm vehicle-edge --help
 ```
 
+For a three-camera deployment, also inspect `/dev/video1` and `/dev/video2`.
 The application requests the ACTIVE profile, reads back the resolution and FPS
-accepted by the V4L2 driver, and logs the actual format before publishing. The
-Compose file maps the selected host device to `/dev/video0` inside the
-container, so the application always uses camera index `0`.
+accepted by each V4L2 driver, and logs the actual format before publishing.
+The single-camera Compose configuration maps the selected host device to
+`/dev/video0`; the three-camera override maps all three devices to those
+container paths.
 
 For a camera whose full fisheye image is not 16:9, leave the width and height
 unset so the driver keeps its default mode. To select a specific supported mode,

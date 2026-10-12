@@ -4,8 +4,9 @@ This component is the standalone browser client for the remote vehicle
 supervision Demo.
 
 The HTML entrypoint is kept in `public/index.html`. The control sender
-implementation lives in `src/lib/secure-control-sender.ts` and is compiled to
-`dist` by the build.
+and video-grid modules live in `src/lib/` and are compiled to `dist` by the
+build. The video-grid stylesheet lives in `public/css/video-grid.css` and is
+copied into `dist`.
 
 Goals:
 - Run the UI as a static site for manual testing or in a browser kiosk.
