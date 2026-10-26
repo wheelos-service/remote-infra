@@ -1,0 +1,86 @@
+🚀 网站部署指南
+===========================
+
+📋 准备工作：
+确保您已经拥有 dist/ 目录 — 这包含了您网站的最终构建
+
+💡 部署到云平台（推荐）：
+
+🌟 Vercel (vercel.com) – 最简单
+1. 访问 vercel.com 并注册
+2. 点击“New Project”
+3. 选择“Browse All Templates” → “Static”
+4. 拖放 dist/ 文件夹到上传区域
+5. 输入项目名称，点击“Deploy”
+6. 几分钟内即可获得免费 HTTPS URL！
+
+☁️ Cloudflare Pages (pages.cloudflare.com) – 最快
+1. 访问 pages.cloudflare.com 并登录
+2. 点击“Create a project” → “Upload assets”
+3. 压缩 dist/ 文件夹
+4. 上传压缩文件
+5. 设置项目名称，点击“Deploy site”
+6. 享受全球 CDN 加速！
+
+🔥 Netlify (netlify.com) – 用户友好
+1. 访问 netlify.com 并注册
+2. 将 dist/ 文件夹拖放到主页上传区域
+3. 等待上传完成
+4. 您将获得一个随机域名（可在设置中自定义）
+
+📘 GitHub Pages (pages.github.com) – 免费且可靠
+1. 在 GitHub 上创建一个新仓库
+2. 将 dist/ 文件夹的内容上传到仓库
+3. 前往仓库设置 → Pages
+4. 选择“Deploy from a branch” → 主分支
+5. 在 username.github.io/repository-name 访问您的网站
+
+---
+
+🔧 高级部署（适合开发者）：
+
+基于 Git 的自动部署
+1. 将整个项目（包括源代码）推送到 GitHub/GitLab
+2. 将您的仓库连接到 Vercel/Netlify
+3. 配置构建设置：
+   - 构建命令：npm run build
+   - 发布目录：dist
+   - Node.js 版本：16.x 或更高
+4. 每次推送将自动触发构建和部署
+
+传统服务器部署
+如果您有自己的服务器：
+1. 将 dist/ 目录内的所有文件上传到服务器的 web 根目录
+2. 确保服务器支持静态文件托管
+3. 通过您的域名访问网站
+
+---
+
+💰 价格信息：
+- Vercel：免费计划足够个人使用
+- Cloudflare Pages：完全免费，无限制
+- Netlify：免费计划包含 100GB 带宽/月
+- GitHub Pages：完全免费，100GB 带宽/月
+
+---
+
+🎯 推荐：
+- 初学者：Vercel 或 Netlify（拖放上传）
+- 速度优先：Cloudflare Pages
+- 长期项目：GitHub Pages
+- 开发者：基于 Git 的自动部署
+
+---
+
+⚡ 提示：
+- 所有平台提供免费 HTTPS 证书
+- 您可以绑定自定义域名（有些需要付费计划）
+- 部署后，在不同设备上测试您的网站
+
+---
+
+🆘 故障排除：
+1. 确保上传的是 dist/ 的内容，而不是整个项目
+2. 确保 index.html 在根目录
+3. 查看托管平台上的错误日志
+4. 确保所有文件已正确上传
