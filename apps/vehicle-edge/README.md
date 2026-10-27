@@ -99,6 +99,64 @@ pass the dimensions and FPS explicitly, for example:
 
 Choose the values from `v4l2-ctl --list-formats-ext -d /dev/video0`.
 
+### Capture full frames and publish smaller video
+
+`--camera-width` and `--camera-height` select the hardware capture mode.
+For a camera supporting only 1080p/30, capture that supported mode and use
+`--video-width` and `--video-height` to reduce the published video independently:
+
+```bash
+PYTHONPATH=src python3 -m vehicle_edge.vehicle_node \
+  --gateway https://api.example.com \
+  --vehicle-id car-001 \
+  --livekit-url wss://rtc.example.com \
+  --device-config /etc/teleop/device.yaml \
+  --camera-layout three \
+  --camera-width 1920 --camera-height 1080 --camera-fps 30 \
+  --video-width 640 --video-height 360
+```
+
+Every captured frame is scaled to fit the output without cropping or stretching;
+different aspect ratios receive black padding. Both video dimensions must be
+positive even numbers, or both omitted to publish at the capture size. All
+cameras share these settings. The encoder bitrate is calculated from the output
+size and actual capture FPS. Capture and conversion still incur the cost of the
+hardware capture mode; software scaling does not recover any field of view
+already cropped by that mode. `[CAMERA]` logs report capture dimensions, while
+`[LIVEKIT] published` logs report output dimensions. There is no independent
+output FPS option; the camera driver determines the accepted capture FPS.
+
+### Six cameras: three front and three rear
+
+Use `--camera-layout six` to publish all six independent tracks continuously.
+The default capture indices are 0–5; override them with six distinct indices in
+front-left, front-center, front-right, rear-left, rear-center, rear-right order:
+
+```bash
+--camera-layout six \
+--camera-indices 0 1 2 3 4 5 \
+--camera-width 1920 --camera-height 1080 --camera-fps 30 \
+--video-width 640 --video-height 360
+```
+
+These are device indices, not guaranteed physical positions. Confirm each V4L2
+capture device and its orientation before assigning it; some USB cameras expose
+extra metadata nodes, so the usable indices may instead be 0, 2, 4, 6, 8, 10.
+Custom `--camera-indices` also supports `single` (one index) and `three` (three
+indices); invalid counts, duplicate indices and negative values are rejected.
+
+Tracks are named `camera-left`, `camera-center`, `camera-right`,
+`camera-rear-left`, `camera-rear-center`, `camera-rear-right`. Front track names
+preserve the existing three-camera interface. All six use the same capture,
+output size and FPS settings; failure of one camera does not stop the others.
+The browser subscribes to all six and changes only display groups. Reverse
+requests show rear immediately; stop and emergency retain the selected group.
+Fresh chassis gear provides confirmation and observer view selection. The
+browser's front/rear manual selector is independent of vehicle gear commands.
+With no rear hardware there is no synthesized rear view: the rear slots show
+missing-video messages. Real six-camera switching still requires hardware/browser
+validation. Account for six simultaneous capture, encoding and upload streams.
+
 ## Operations
 
 ```bash
@@ -156,7 +214,10 @@ these matching bindings and generated messages may also run
 `python -m vehicle_edge.vehicle_node` with the same arguments.
 
 Every 200 ms, the vehicle publishes a JSON DataPacket with LiveKit topic
-`vehicle.state` to participants in its vehicle room. It contains `version: 1`,
+`vehicle.state` to participants in its vehicle room using reliable delivery,
+because full snapshots can exceed LiveKit's recommended 1300-byte lossy payload.
+Each send still has a 150 ms timeout; snapshots are not queued by the publisher.
+It contains `version: 1`,
 `type: "vehicle_state"`, `vehicle_id`, `stream_id`, `sequence`, `timestamp_ms`,
 `control`, and `localization` / `chassis` entries. `stream_id` changes only when
 the state publisher is recreated; `sequence` increases across RTC reconnects.
@@ -189,14 +250,89 @@ it never claims that an actuator executed that command.
 Add **`--cyber-control`** to explicitly enable `ControlCommand` publication on
 `/apollo/control`, or choose an arbiter's input with `--cyber-control-channel`.
 Only commands accepted by the existing ControlSession signature, sender,
-sequence, and age checks reach this writer. Normalized throttle/brake become
-percentages; braking suppresses throttle. Steering is negated and scaled by
-100 because console negative-left corresponds to WheelOS positive-CCW.
-Forward/reverse select drive/reverse. A stop explicitly retains the most recent
-fresh chassis gear, falling back to the last remote gear: Apollo's consumer reads
-even an absent gear field as proto2's default neutral. If neither source is known,
-an initial stop is rejected rather than guessing a gear. No pad message or
-automatic driving-mode takeover is generated.
+sequence, and age checks reach this writer. All high-level and low-level commands
+pass through the same vehicle-side percentage limits. Normalized throttle and
+steering multiply their configured ceilings, rather than clipping at those ceilings. Braking suppresses throttle.
+Steering is negated because console negative-left corresponds to WheelOS
+positive-CCW. High-level left/right retain the reported gear and request no throttle;
+they no longer select DRIVE. No pad message or automatic driving-mode takeover is
+generated.
+
+### Vehicle-side control limits and guards
+
+Motion output defaults to disabled: both throttle limits, steering limit, and speed
+limit default to zero. Configure calibrated values explicitly; no default or example
+percentage is a safe vehicle calibration. The CLI accepts:
+
+| Flag | Default | Meaning |
+| --- | ---: | --- |
+| `--cyber-max-forward-throttle-pct` | 0 | Forward throttle ceiling, 0–100 percent |
+| `--cyber-max-reverse-throttle-pct` | 0 | Reverse throttle ceiling, 0–100 percent |
+| `--cyber-max-steering-pct` | 0 | Absolute steering ceiling, 0–100 percent, not degrees |
+| `--cyber-stop-brake-pct` | 100 | Normal stop and shift-hold brake percentage |
+| `--cyber-emergency-brake-pct` | 100 | Explicit emergency, faults, timeout, and shutdown brake percentage |
+| `--cyber-max-speed-mps` | 0 | Speed threshold for rejecting motion; not closed-loop speed regulation |
+| `--cyber-chassis-timeout-s` | 0.5 | Maximum age since the last local chassis callback |
+| `--cyber-shift-speed-mps` | 0.05 | Maximum absolute reported speed permitting a gear request |
+| `--cyber-shift-timeout-s` | 2 | Time allowed for target gear feedback |
+| `--cyber-throttle-rise-pct-s` | 20 | Maximum throttle increase in percentage points per second |
+| `--cyber-steering-rate-pct-s` | 80 | Maximum absolute steering change in percentage points per second |
+
+Percentages must be finite and in range; require
+`0 < stop_brake_pct <= emergency_brake_pct <= 100`. Timeouts must be positive.
+Ordinary low-level brake travel scales by the normal stop percentage; an explicit
+high-level `emergency_stop` uses the emergency percentage. Both braking defaults
+remain 100 to preserve the former braking request until calibrated independently.
+
+Append these flags to the existing `bazel run //:vehicle_node -- ... --cyber
+--cyber-control` command using your calibrated shell variables:
+
+```bash
+--cyber-max-forward-throttle-pct "${FORWARD_THROTTLE_PCT:?set calibrated value}" \
+--cyber-max-reverse-throttle-pct "${REVERSE_THROTTLE_PCT:?set calibrated value}" \
+--cyber-max-steering-pct "${STEERING_PCT:?set calibrated value}" \
+--cyber-stop-brake-pct "${STOP_BRAKE_PCT:?set calibrated value}" \
+--cyber-emergency-brake-pct "${EMERGENCY_BRAKE_PCT:?set calibrated value}" \
+--cyber-max-speed-mps "${MAX_SPEED_MPS:?set calibrated value}"
+```
+
+Motion requires fresh chassis feedback with explicitly present finite `speed_mps`,
+a valid `gear_location`, and `driving_mode=COMPLETE_AUTO_DRIVE`. Reported chassis
+errors, a nonzero error mask, or an engaged parking brake reject motion. At the
+speed threshold further throttle is rejected; exceeding it rejects steering-only
+motion too. The runtime then requests emergency braking. Partial-auto/manual modes
+are intentionally not accepted, and another autonomous controller must not publish
+competing commands on the actuator channel.
+
+A direction change above the shift-speed threshold is rejected. When stopped,
+the bridge requests the target gear with zero throttle, zero steering, and normal
+stop braking. Repeated commands keep braking until a chassis callback newer than
+the shift request confirms the target gear. Confirmation timeout, a target change
+while shifting, or movement above the shift threshold rejects the request. Send a
+normal stop with valid feedback before retrying a failed shift. Sending stop cancels
+a pending shift. Braking retains the last observed gear rather than guessing a gear;
+before any valid gear observation, even braking cannot safely form a gear command
+and is rejected.
+
+High-level `stop` and `emergency_stop` now remain distinct internally without
+changing the signed packet format. A successful normal stop uses the normal brake
+setting. If command input then goes quiet, the watchdog repeats normal braking
+instead of reporting a movement timeout. It continues requiring fresh valid speed
+and gear feedback; loss of that feedback escalates to emergency braking. Session
+loss, transport loss, and publication failures still take priority and trigger
+emergency braking. Motion silence still triggers the existing 300 ms watchdog.
+Emergency braking can retain the last observed valid gear when chassis data is
+stale and is not reduced by throttle/steering/normal-brake caps.
+
+Throttle increases and steering changes are rate-limited using elapsed monotonic
+time; idle gaps contribute at most 0.2 seconds of slew budget. Throttle reduction,
+normal stop, emergency braking, and shift-hold braking bypass the motion rise
+limiter. These are command-percentage rate limits, not measured acceleration or
+steering-wheel velocity limits. These guards do not implement actuator calibration,
+a speed controller, a latched physical emergency stop, or independent
+Canbus-side enforcement. Chassis age measures callback freshness, not source
+sensor timestamp validity. Native tests use isolated test channels; vehicle
+calibration and physical braking still require separate validation.
 
 Browser control uses the lossy `vehicle.control` topic, directed to the vehicle
 identity. The receiver accepts both this topic and legacy empty-topic packets;
@@ -206,9 +342,10 @@ latest arrival; verification still rejects out-of-order sequences and expired
 commands. The browser also permits only one in-flight command send.
 
 The watchdog does not publish while only monitoring or before the first accepted
-remote command. Once remote control has been armed, loss of valid commands for
-300 ms publishes zero throttle and full brake repeatedly at the watchdog's
-50 ms interval. Session expiry is checked at the same interval; Gateway polling
+remote command. Once remote control has been armed, loss of valid movement commands for
+300 ms publishes zero throttle and the configured emergency brake repeatedly at
+the watchdog's 50 ms interval. A successful explicit normal stop instead maintains
+the configured normal brake while chassis feedback remains valid. Session expiry is checked at the same interval; Gateway polling
 detects revocation at its next response (normally every second). Failed polls
 invalidate the session and stop control, without waiting for the command timeout.
 A successful poll does not interrupt control or reset its anti-replay sequence.
@@ -237,3 +374,77 @@ messages, and shuts down Cyber. Ordinary `pytest` skips this native check
 unless `VEHICLE_CYBER_INTEGRATION=1` is set in a configured WheelOS environment.
 Update the Python lock with
 `pip-compile requirements-cyber.in --output-file=requirements-cyber.txt`.
+
+
+### Proportional-gamepad simulation profile
+
+`run-simulation.sh` supplies the expanded simulation ceilings: forward throttle
+20%, reverse throttle 10%, absolute steering 40%, speed threshold 4 m/s. These
+are twice the previous simulation ceilings. Normal brake remains 30%, emergency
+brake 100%; throttle rise is 20 percentage points/s and steering change 80
+percentage points/s. Production/default `CyberOptions` still have zero motion
+ceilings. The speed threshold is a rejection/braking threshold, not cruise control.
+
+Run directly inside the managed Cyber container:
+
+```bash
+cd /apollo/remote-infra/apps/vehicle-edge
+./run-simulation.sh
+```
+
+The script includes the current simulation endpoints (`http://118.145.117.118:8080`
+and `ws://118.145.117.118:7880`), vehicle `car-001`, and the existing development
+identity `car-001|fleet-a|vehicle`. This identity is only for the current development
+setup; do not put production credentials in this script. Trailing arguments can
+still override defaults, for example `./run-simulation.sh --camera-layout three
+--camera-indices 0 1 2`.
+
+The script includes six cameras, 1920x1080 capture at 30 FPS and 640x360 output.
+Camera indices follow the selected layout automatically: six uses 0–5, three
+uses 0–2, single uses 0, and off uses no cameras. Append `--camera-layout three`,
+`--camera-layout single`, or `--camera-layout off` to switch layouts. Pass custom
+`--camera-indices` matching the selected layout when needed; for example,
+`./run-simulation.sh --camera-layout three --camera-indices 0 2 4`.
+Additional CLI arguments override the profile defaults.
+Use existing development auth options only in the applicable development setup.
+Only the development identity above is included; no production credentials belong in the script. At 50% effective travel, steady requests
+are forward throttle 10%, reverse throttle 5%, steering magnitude 20%, reached
+subject to the motion rate limits. Keyboard high-level commands still request
+full configured travel; emergency remains independent of the analog magnitude.
+The simulation values are not vehicle actuator calibration.
+
+
+### Control debugging logs
+
+Monitoring logs `[STATE] publisher started` on each room connection and
+`[STATE] published` after the first successful data publication, then every
+30 seconds. The publication line reports sequence, payload size and Cyber sample
+freshness; it does not confirm browser receipt. Transport drops report exception
+types, and snapshot generation failures report their exception type before
+propagating to room reconnect. No state payloads or credentials are logged.
+Camera open failures are independent of state publication. For simulation
+without cameras, append `--camera-layout off` to `./run-simulation.sh`.
+
+Default INFO logging prints `[CONTROL_ACCEPT]` after session/signature validation:
+sequence, command mode/action, normalized steering/throttle/brake and direction.
+`[CYBER_TX]` is emitted only after a successful Cyber writer call and reports the
+control topic, publication sequence, gear enum number, steering/throttle/brake
+percentages after scaling and rate limits. This is middleware acceptance, not
+actuator acknowledgement. Steady commands log at most once per second; direction,
+braking, and explicit stop/emergency transitions are logged immediately. Analog
+value changes within one motion state are summarized by the next periodic line.
+`[CONTROL_REJECT]` reports failed packet validation at most once per second,
+including `reason`, `packet_age_ms`, `max_age_ms`, and `max_future_skew_ms`.
+Reasons distinguish `no_active_session`, `session_mismatch`, `sender_mismatch`,
+`session_expired_or_inactive`, `packet_too_old`, `packet_from_future`,
+`sequence_not_increasing`, `invalid_command`, `invalid_signature`,
+`invalid_envelope`, and `malformed_packet`. A positive packet age means the
+packet timestamp is behind the vehicle clock; it includes clock offset and
+transport delay, and does not alone measure network latency. A negative age
+means the browser timestamp is ahead. The default maximum packet age is 150 ms;
+the future-skew limit is 100 ms. Rejected-packet metadata is diagnostic and unverified.
+No packet bodies, keys, signatures or session identifiers are included.
+Restart the vehicle process to enable these diagnostics;
+application/state/gear errors keep their existing `[CONTROL]` error logs.
+No packet contents, signatures, session identifiers or credentials are logged.
+Restart the vehicle process after updating; no additional logging flag is needed.

@@ -82,7 +82,29 @@ def open_configured_camera(
         raise
 
 
-def read_i420_frame(camera, width: int, height: int):
+def fit_frame(frame, width: int, height: int):
+    """Fit the entire capture into the output, padding rather than cropping."""
+    import cv2
+
+    source_height, source_width = frame.shape[:2]
+    if (source_width, source_height) == (width, height):
+        return frame
+    scale = min(width / source_width, height / source_height)
+    scaled_width = max(1, min(width, round(source_width * scale)))
+    scaled_height = max(1, min(height, round(source_height * scale)))
+    resized = cv2.resize(
+        frame, (scaled_width, scaled_height),
+        interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR,
+    )
+    left = (width - scaled_width) // 2
+    top = (height - scaled_height) // 2
+    return cv2.copyMakeBorder(
+        resized, top, height - scaled_height - top,
+        left, width - scaled_width - left, cv2.BORDER_CONSTANT, value=(0, 0, 0),
+    )
+
+
+def read_i420_frame(camera, width: int, height: int, video_width: int = 0, video_height: int = 0):
     import cv2
 
     ok, frame = camera.read()
@@ -93,4 +115,6 @@ def read_i420_frame(camera, width: int, height: int):
             f"camera returned frame {frame.shape[1]}x{frame.shape[0]}, "
             f"expected {width}x{height}"
         )
+    if video_width and video_height:
+        frame = fit_frame(frame, video_width, video_height)
     return cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420)

@@ -3,7 +3,7 @@ import base64
 import json
 import time
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from nacl.signing import SigningKey
 
@@ -88,6 +88,61 @@ class SessionRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
     async def command(self, sequence=1):
         await self.runtime.on_datachannel_message(self.packet(sequence), "operator-driver-1")
+
+    async def test_rejection_reasons_and_time_limits_preserve_fail_closed_behavior(self):
+        now = int(time.time() * 1000)
+        cases = [
+            ({"timestamp_ms": now - 151}, "operator-driver-1", "packet_too_old", 151),
+            ({"timestamp_ms": now + 101}, "operator-driver-1", "packet_from_future", -101),
+            ({"session_id": "other-session"}, "operator-driver-1", "session_mismatch", None),
+            ({}, "operator-other", "sender_mismatch", None),
+            ({"sequence": 0}, "operator-driver-1", "sequence_not_increasing", 0),
+            ({"command": {"mode": "high_level", "action": "invalid"}},
+             "operator-driver-1", "invalid_command", 0),
+            ({"signature": base64.b64encode(bytes(64)).decode()},
+             "operator-driver-1", "invalid_signature", 0),
+            ({"type": "wrong"}, "operator-driver-1", "invalid_envelope", None),
+        ]
+        with patch("vehicle_edge.control_session_receiver.time.time", return_value=now / 1000):
+            for changes, sender, reason, age in cases:
+                with self.subTest(reason=reason):
+                    packet = json.loads(self.packet())
+                    packet.update(changes)
+                    await self.runtime.on_datachannel_message(json.dumps(packet), sender)
+                    self.assertEqual(self.verifier.last_reject_reason, reason)
+                    self.assertEqual(self.verifier.last_packet_age_ms, age)
+                    self.assertEqual(self.verifier.last_sequence, 0)
+                    self.assertEqual(self.brake.applied, [])
+            for age in (-100, 108, 109, 150):
+                with self.subTest(accepted_age=age):
+                    packet = json.loads(self.packet(self.verifier.last_sequence + 1))
+                    packet["timestamp_ms"] = now - age
+                    packet["signature"] = base64.b64encode(
+                        self.key.sign(build_sign_message(packet).encode()).signature).decode()
+                    await self.runtime.on_datachannel_message(json.dumps(packet), "operator-driver-1")
+                    self.assertIsNone(self.verifier.last_reject_reason)
+            self.assertEqual(len(self.brake.applied), 4)
+
+    async def test_reject_log_reports_reason_without_packet_secrets(self):
+        packet = json.loads(self.packet())
+        packet["session_id"] = "private-session"
+        with self.assertLogs(level="WARNING") as logs:
+            await self.runtime.on_datachannel_message(json.dumps(packet), "operator-driver-1")
+        output = "\n".join(logs.output)
+        self.assertIn("reason=session_mismatch", output)
+        self.assertNotIn("private-session", output)
+        self.assertNotIn(packet["signature"], output)
+        self.assertNotIn(self.verifier.session.public_key_b64, output)
+
+    async def test_missing_expired_and_malformed_session_rejection_diagnostics(self):
+        raw = self.packet()
+        self.assertIsNone(self.verifier.verify_packet("not json", "operator-driver-1"))
+        self.assertEqual(self.verifier.last_reject_reason, "malformed_packet")
+        self.verifier.session.expires_at_ms = 0
+        self.assertIsNone(self.verifier.verify_packet(raw, "operator-driver-1"))
+        self.assertEqual(self.verifier.last_reject_reason, "session_expired_or_inactive")
+        self.assertIsNone(self.verifier.verify_packet(raw, "operator-driver-1"))
+        self.assertEqual(self.verifier.last_reject_reason, "no_active_session")
 
     async def test_revocation_or_failed_poll_stops_without_waiting_for_command_timeout(self):
         for status in (404, 503):

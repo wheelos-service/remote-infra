@@ -47,7 +47,7 @@ class LiveKitTransportTest(unittest.IsolatedAsyncioTestCase):
             command.assert_awaited_once_with("new", "operator-1")
             await transport.send(b"state", "vehicle.state")
             room.local_participant.publish_data.assert_awaited_once_with(
-                b"state", reliable=False, topic="vehicle.state")
+                b"state", reliable=True, topic="vehicle.state")
             room.callbacks["reconnecting"]()
             room.packet(data=b"late")
             await asyncio.wait_for(task, 1)
@@ -59,6 +59,19 @@ class LiveKitTransportTest(unittest.IsolatedAsyncioTestCase):
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+    async def test_large_state_uses_reliable_delivery_and_control_remains_lossy(self):
+        participant = SimpleNamespace(publish_data=AsyncMock())
+        transport = LiveKitTransport("ws://rtc", AsyncMock(), AsyncMock(), AsyncMock(), Mock())
+        transport._participant = participant
+        payload = b"x" * 1334
+        await transport.send(payload, "vehicle.state")
+        participant.publish_data.assert_awaited_once_with(
+            payload, reliable=True, topic="vehicle.state")
+        participant.publish_data.reset_mock()
+        await transport.send(b"control", "vehicle.control")
+        participant.publish_data.assert_awaited_once_with(
+            b"control", reliable=False, topic="vehicle.control")
 
     async def test_reconnect_refreshes_token_restarts_services_and_ignores_old_room(self):
         rooms = [FakeRoom(), FakeRoom()]

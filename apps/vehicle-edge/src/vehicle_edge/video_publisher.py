@@ -32,7 +32,7 @@ class LiveKitVideoPublisher:
         self._publications: dict[str, Any] = {}
 
     async def start(self, options: CameraOptions) -> None:
-        for config in camera_configs(options.layout):
+        for config in camera_configs(options.layout, options.indices):
             camera = None
             try:
                 camera, camera_format = open_configured_camera(
@@ -41,7 +41,12 @@ class LiveKitVideoPublisher:
                     options.height,
                     options.fps or self._profile.fps,
                 )
-                await self._publish_track(config.name, camera, camera_format)
+                video_format = CameraFormat(
+                    options.video_width or camera_format.width,
+                    options.video_height or camera_format.height,
+                    camera_format.fps,
+                )
+                await self._publish_track(config.name, camera, camera_format, video_format)
                 camera = None
             except Exception:
                 logging.exception(
@@ -57,8 +62,9 @@ class LiveKitVideoPublisher:
         name: str,
         camera: Any,
         camera_format: CameraFormat,
+        video_format: CameraFormat,
     ) -> None:
-        source = self._rtc.VideoSource(camera_format.width, camera_format.height)
+        source = self._rtc.VideoSource(video_format.width, video_format.height)
         track = self._rtc.LocalVideoTrack.create_video_track(
             f"camera-{name}", source)
         options = self._rtc.TrackPublishOptions(
@@ -67,23 +73,23 @@ class LiveKitVideoPublisher:
             video_encoding=self._rtc.VideoEncoding(
                 max_bitrate=_bitrate_for_camera(
                     self._profile,
-                    camera_format.width,
-                    camera_format.height,
-                    camera_format.fps,
+                    video_format.width,
+                    video_format.height,
+                    video_format.fps,
                 ),
-                max_framerate=camera_format.fps,
+                max_framerate=video_format.fps,
             ),
         )
         publication = await self._participant.publish_track(track, options)
         self._publications[name] = publication
         self._tasks[name] = asyncio.create_task(
-            self._publish_frames(source, camera, camera_format))
+            self._publish_frames(source, camera, camera_format, video_format))
         logging.info(
             "[LIVEKIT] published %s camera at %sx%s@%.2ffps",
             name,
-            camera_format.width,
-            camera_format.height,
-            camera_format.fps,
+            video_format.width,
+            video_format.height,
+            video_format.fps,
         )
 
     async def _publish_frames(
@@ -91,6 +97,7 @@ class LiveKitVideoPublisher:
         source: Any,
         camera: Any,
         camera_format: CameraFormat,
+        video_format: CameraFormat,
     ) -> None:
         frame_interval = 1 / camera_format.fps
         next_deadline = time.monotonic()
@@ -101,12 +108,14 @@ class LiveKitVideoPublisher:
                     camera,
                     camera_format.width,
                     camera_format.height,
+                    video_format.width,
+                    video_format.height,
                 )
                 if frame is None:
                     raise RuntimeError("camera stopped returning frames")
                 source.capture_frame(self._rtc.VideoFrame(
-                    camera_format.width,
-                    camera_format.height,
+                    video_format.width,
+                    video_format.height,
                     self._rtc.VideoBufferType.I420,
                     frame.tobytes(),
                 ))

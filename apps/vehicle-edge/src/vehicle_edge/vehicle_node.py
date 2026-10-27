@@ -180,7 +180,9 @@ def _parse_args() -> argparse.Namespace:
                    help="LiveKit websocket URL")
     p.add_argument("--camera-layout", choices=tuple(layout.value for layout in CameraLayout),
                    default=os.environ.get("CAMERA_LAYOUT", CameraLayout.OFF.value),
-                   help="Camera publishing mode: off, single front camera, or three cameras")
+                   help="Camera publishing mode: off, single, three front cameras, or six front/rear cameras")
+    p.add_argument("--camera-indices", type=int, nargs="+", default=None,
+                   help="Distinct capture indices in layout order; six: front left/center/right, rear left/center/right")
     p.add_argument("--camera-width", type=int, default=0,
                    help="Camera width; 0 keeps the driver's default mode")
     p.add_argument("--camera-height", type=int, default=0,
@@ -195,9 +197,43 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--cyber-localization-channel", default="/apollo/localization/pose")
     p.add_argument("--cyber-chassis-channel", default="/apollo/canbus/chassis")
     p.add_argument("--cyber-control-channel", default="/apollo/control")
+    p.add_argument("--video-width", type=int, default=0,
+                   help="Published video width; set with --video-height to fit the full capture")
+    p.add_argument("--video-height", type=int, default=0,
+                   help="Published video height; 0 with video width 0 keeps the capture size")
+    p.add_argument("--cyber-max-forward-throttle-pct", type=float, default=CyberOptions().max_forward_throttle_pct)
+    p.add_argument("--cyber-max-reverse-throttle-pct", type=float, default=CyberOptions().max_reverse_throttle_pct)
+    p.add_argument("--cyber-max-steering-pct", type=float, default=CyberOptions().max_steering_pct)
+    p.add_argument("--cyber-stop-brake-pct", type=float, default=CyberOptions().stop_brake_pct)
+    p.add_argument("--cyber-emergency-brake-pct", type=float, default=CyberOptions().emergency_brake_pct)
+    p.add_argument("--cyber-max-speed-mps", type=float, default=CyberOptions().max_speed_mps)
+    p.add_argument("--cyber-chassis-timeout-s", type=float, default=CyberOptions().chassis_timeout_s)
+    p.add_argument("--cyber-shift-speed-mps", type=float, default=CyberOptions().shift_speed_mps)
+    p.add_argument("--cyber-shift-timeout-s", type=float, default=CyberOptions().shift_timeout_s)
+    p.add_argument("--cyber-throttle-rise-pct-s", type=float, default=CyberOptions().throttle_rise_pct_s)
+    p.add_argument("--cyber-steering-rate-pct-s", type=float, default=CyberOptions().steering_rate_pct_s)
     args = p.parse_args()
     if args.cyber_control and not args.cyber:
         p.error("--cyber-control requires --cyber")
+    try:
+        CameraOptions(layout=CameraLayout(args.camera_layout),
+                      indices=tuple(args.camera_indices) if args.camera_indices is not None else None,
+                      video_width=args.video_width, video_height=args.video_height)
+        CyberOptions(
+            max_forward_throttle_pct=args.cyber_max_forward_throttle_pct,
+            max_reverse_throttle_pct=args.cyber_max_reverse_throttle_pct,
+            max_steering_pct=args.cyber_max_steering_pct,
+            stop_brake_pct=args.cyber_stop_brake_pct,
+            emergency_brake_pct=args.cyber_emergency_brake_pct,
+            max_speed_mps=args.cyber_max_speed_mps,
+            chassis_timeout_s=args.cyber_chassis_timeout_s,
+            shift_speed_mps=args.cyber_shift_speed_mps,
+            shift_timeout_s=args.cyber_shift_timeout_s,
+            throttle_rise_pct_s=args.cyber_throttle_rise_pct_s,
+            steering_rate_pct_s=args.cyber_steering_rate_pct_s,
+        )
+    except ValueError as exc:
+        p.error(str(exc))
     return args
 
 
@@ -231,9 +267,12 @@ def main() -> None:
                 auth_token=args.auth_token,
                 camera_options=CameraOptions(
                     layout=CameraLayout(args.camera_layout),
+                    indices=tuple(args.camera_indices) if args.camera_indices is not None else None,
                     width=args.camera_width,
                     height=args.camera_height,
                     fps=args.camera_fps,
+                    video_width=args.video_width,
+                    video_height=args.video_height,
                 ),
                 cyber_options=CyberOptions(
                     enabled=args.cyber,
@@ -242,6 +281,17 @@ def main() -> None:
                     localization_channel=args.cyber_localization_channel,
                     chassis_channel=args.cyber_chassis_channel,
                     control_channel=args.cyber_control_channel,
+                    max_forward_throttle_pct=args.cyber_max_forward_throttle_pct,
+                    max_reverse_throttle_pct=args.cyber_max_reverse_throttle_pct,
+                    max_steering_pct=args.cyber_max_steering_pct,
+                    stop_brake_pct=args.cyber_stop_brake_pct,
+                    emergency_brake_pct=args.cyber_emergency_brake_pct,
+                    max_speed_mps=args.cyber_max_speed_mps,
+                    chassis_timeout_s=args.cyber_chassis_timeout_s,
+                    shift_speed_mps=args.cyber_shift_speed_mps,
+                    shift_timeout_s=args.cyber_shift_timeout_s,
+                    throttle_rise_pct_s=args.cyber_throttle_rise_pct_s,
+                    steering_rate_pct_s=args.cyber_steering_rate_pct_s,
                 ),
             )
         )

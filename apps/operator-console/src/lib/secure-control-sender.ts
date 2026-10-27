@@ -1,4 +1,4 @@
-type ControlCommand = {
+export type ControlCommand = {
     mode: 'high_level' | 'low_level';
     action?: 'forward' | 'reverse' | 'left' | 'right' | 'stop' | 'emergency_stop';
     steering?: number;
@@ -11,6 +11,7 @@ type SenderOptions = {
     gatewayBaseUrl: string;
     vehicleId: string;
     authToken: string;
+    onRenewalError?: (error: unknown) => void;
 };
 
 function toBase64(buffer: ArrayBuffer): string {
@@ -41,11 +42,13 @@ export class SecureControlSender {
     private readonly gatewayBaseUrl: string;
     private readonly vehicleId: string;
     private readonly authToken: string;
+    private readonly onRenewalError?: (error: unknown) => void;
 
-    constructor({gatewayBaseUrl, vehicleId, authToken}: SenderOptions) {
+    constructor({gatewayBaseUrl, vehicleId, authToken, onRenewalError}: SenderOptions) {
         this.gatewayBaseUrl = gatewayBaseUrl.replace(/\/$/, '');
         this.vehicleId = vehicleId;
         this.authToken = authToken;
+        this.onRenewalError = onRenewalError;
     }
 
     async createKeyPair(): Promise<void> {
@@ -74,7 +77,11 @@ export class SecureControlSender {
 
     startRenewal(): void {
         this.stopRenewal();
-        this.renewTimer = setInterval(() => this.renew().catch(console.error), this.renewAfterMs);
+        this.renewTimer = setInterval(() => this.renew().catch(error => {
+            this.stopRenewal();
+            console.error('Control session renewal failed:', error);
+            this.onRenewalError?.(error);
+        }), this.renewAfterMs);
     }
 
     stopRenewal(): void {

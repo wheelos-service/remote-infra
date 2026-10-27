@@ -18,6 +18,34 @@ class CyberOptions:
     localization_channel: str = "/apollo/localization/pose"
     chassis_channel: str = "/apollo/canbus/chassis"
     control_channel: str = "/apollo/control"
+    max_forward_throttle_pct: float = 0.0
+    max_reverse_throttle_pct: float = 0.0
+    max_steering_pct: float = 0.0
+    stop_brake_pct: float = 100.0
+    emergency_brake_pct: float = 100.0
+    max_speed_mps: float = 0.0
+    chassis_timeout_s: float = 0.5
+    shift_speed_mps: float = 0.05
+    shift_timeout_s: float = 2.0
+    throttle_rise_pct_s: float = 20.0
+    steering_rate_pct_s: float = 80.0
+
+    def __post_init__(self) -> None:
+        for name in ("max_forward_throttle_pct", "max_reverse_throttle_pct",
+                     "max_steering_pct", "stop_brake_pct", "emergency_brake_pct"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or not 0 <= value <= 100:
+                raise ValueError(f"{name} must be finite and within 0..100")
+        if not 0 < self.stop_brake_pct <= self.emergency_brake_pct:
+            raise ValueError("require 0 < stop_brake_pct <= emergency_brake_pct")
+        for name in ("max_speed_mps", "shift_speed_mps", "chassis_timeout_s", "shift_timeout_s",
+                     "throttle_rise_pct_s", "steering_rate_pct_s"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if (self.chassis_timeout_s == 0 or self.shift_timeout_s == 0 or
+                self.throttle_rise_pct_s == 0 or self.steering_rate_pct_s == 0):
+            raise ValueError("timeouts and actuator change rates must be positive")
 
 
 @dataclass(frozen=True)
@@ -37,6 +65,14 @@ class CyberBridge:
         self._samples: dict[str, tuple[Any, float, int]] = {}
         self._reported_gear: tuple[int, float] | None = None
         self._last_gear: int | None = None
+        self._pending_gear: int | None = None
+        self._shift_started = 0.0
+        self._shift_fault = False
+        self._motion_at: float | None = None
+        self._output_steering = 0.0
+        self._output_throttle = 0.0
+        self._last_tx_log_at = float("-inf")
+        self._last_tx_log_kind = None
         self._cyber: Any = None
         self._node: Any = None
         self._writer: Any = None
@@ -91,7 +127,42 @@ class CyberBridge:
             for kind, (message, received, received_at_ms) in samples.items()
         }
 
-    def _publish(self, steering: float, throttle: float, brake: float, direction: int) -> None:
+    def _chassis(self, motion: bool = False):
+        with self._lock:
+            sample = self._samples.get("chassis")
+        if sample is None or time.monotonic() - sample[1] > self.options.chassis_timeout_s:
+            raise RuntimeError("chassis feedback missing or stale")
+        chassis = sample[0]
+        if not chassis.HasField("speed_mps") or not math.isfinite(chassis.speed_mps):
+            raise RuntimeError("chassis speed missing or non-finite")
+        if (not chassis.HasField("gear_location") or chassis.gear_location not in (
+                self._chassis_type.GEAR_NEUTRAL, self._chassis_type.GEAR_DRIVE,
+                self._chassis_type.GEAR_REVERSE, self._chassis_type.GEAR_PARKING,
+                self._chassis_type.GEAR_LOW)):
+            raise RuntimeError("chassis gear missing or invalid")
+        if motion:
+            if (not chassis.HasField("driving_mode") or
+                    chassis.driving_mode != self._chassis_type.COMPLETE_AUTO_DRIVE):
+                raise RuntimeError("chassis must be in COMPLETE_AUTO_DRIVE")
+            if ((chassis.HasField("error_code") and chassis.error_code != 0) or
+                    (chassis.HasField("chassis_error_mask") and chassis.chassis_error_mask != 0) or
+                    (chassis.HasField("parking_brake") and chassis.parking_brake)):
+                raise RuntimeError("chassis fault or parking brake prevents motion")
+        return chassis, sample[1]
+
+    def _hold_gear(self) -> int:
+        with self._lock:
+            reported = self._reported_gear
+        # Braking may use the last observed valid gear after feedback loss.
+        # Never substitute an unconfirmed shift request for observed gear.
+        if reported:
+            return reported[0]
+        if self._last_gear is not None:
+            return self._last_gear
+        raise RuntimeError("cannot hold gear before receiving chassis gear")
+
+    def _publish(self, steering: float, throttle: float, brake: float, gear: int) -> None:
+        """Publish already guarded percentages. Safety braking bypasses motion limits."""
         if self._writer is None:
             raise RuntimeError("Cyber control writer is not available")
         message = self._control_type()
@@ -99,25 +170,32 @@ class CyberBridge:
         message.header.timestamp_sec = time.time()
         message.header.module_name = self.options.node_name
         message.header.sequence_num = self._sequence
-        # Console steering is negative-left; WheelOS is positive counterclockwise.
-        message.steering_target = -steering * 100
-        message.throttle = 0 if brake > 0 else throttle * 100
-        message.brake = brake * 100
-        if direction:
-            gear = (
-                self._chassis_type.GEAR_DRIVE if direction > 0 else self._chassis_type.GEAR_REVERSE)
-        else:
-            with self._lock:
-                reported = self._reported_gear
-            gear = reported[0] if reported and time.monotonic() - reported[1] <= 1 else self._last_gear
-            if gear is None:
-                raise RuntimeError("cannot hold gear before receiving chassis gear or a remote drive command")
-        # Canbus reads gear even when absent; omission would select proto2 neutral.
+        message.steering_target = steering
+        message.throttle = 0 if brake > 0 else throttle
+        message.brake = brake
         message.gear_location = gear
-        self._last_gear = gear
         self._armed = True
         if not self._writer.write(message):
             raise RuntimeError("Cyber control publication failed")
+        self._last_gear = gear
+        self._motion_at = time.monotonic()
+        self._output_steering = steering
+        self._output_throttle = message.throttle
+        kind = (gear, brake > 0, brake == self.options.emergency_brake_pct)
+        if kind != self._last_tx_log_kind or self._motion_at - self._last_tx_log_at >= 1:
+            logging.info(
+                "[CYBER_TX] topic=%s seq=%s gear=%s steering_target_pct=%.2f "
+                "throttle_pct=%.2f brake_pct=%.2f middleware_accepted=true actuator_ack=false",
+                self.options.control_channel, self._sequence, gear,
+                message.steering_target, message.throttle, message.brake,
+            )
+            self._last_tx_log_at = self._motion_at
+            self._last_tx_log_kind = kind
+
+    async def maintain_stop(self) -> None:
+        # Repeated normal braking still requires live speed/gear feedback.
+        self._chassis()
+        self._publish(0, 0, self.options.stop_brake_pct, self._hold_gear())
 
     async def apply_control(self, cmd: str, val: Any) -> bool:
         if not self.options.control_enabled:
@@ -132,7 +210,69 @@ class CyberBridge:
         if not (-1 <= steering <= 1 and 0 <= throttle <= 1 and 0 <= brake <= 1
                 and direction in (-1, 0, 1)):
             raise ValueError("Cyber command outside normalized range")
-        self._publish(steering, throttle, brake, int(direction))
+        brake_mode = val.get("brake_mode")
+        if brake_mode == "emergency":
+            self._pending_gear = None
+            self._publish(0, 0, self.options.emergency_brake_pct, self._hold_gear())
+            self.in_emergency = True
+            return True
+        if brake_mode == "stop":
+            self._pending_gear = None
+            await self.maintain_stop()
+            self._shift_fault = False
+            self.in_emergency = False
+            return True
+
+        if self._shift_fault:
+            raise RuntimeError("gear change fault; send stop before retry")
+        chassis, received_at = self._chassis(motion=True)
+        gear = chassis.gear_location
+        speed = abs(chassis.speed_mps)
+        if brake == 0 and (speed > self.options.max_speed_mps or
+                           (throttle > 0 and speed >= self.options.max_speed_mps)):
+            raise RuntimeError("vehicle speed reached configured limit")
+        if brake > 0:
+            self._pending_gear = None
+        target = (gear if brake > 0 else
+                  self._chassis_type.GEAR_DRIVE if direction > 0 else
+                  self._chassis_type.GEAR_REVERSE if direction < 0 else gear)
+        if target != gear or self._pending_gear is not None:
+            if speed > self.options.shift_speed_mps:
+                self._shift_fault = True
+                raise RuntimeError("gear change requires vehicle stopped")
+            now = time.monotonic()
+            if self._pending_gear is not None and self._pending_gear != target:
+                self._shift_fault = True
+                raise RuntimeError("gear change already pending; stop before changing target")
+            if self._pending_gear is None:
+                self._pending_gear = target
+                self._shift_started = now
+            if now - self._shift_started >= self.options.shift_timeout_s:
+                self._shift_fault = True
+                raise RuntimeError("gear feedback confirmation timed out; stop before retry")
+            if gear != target or received_at <= self._shift_started:
+                self._publish(0, 0, self.options.stop_brake_pct, target)
+                self.in_emergency = False
+                return True
+            self._pending_gear = None
+        if throttle > 0 and gear not in (self._chassis_type.GEAR_DRIVE, self._chassis_type.GEAR_REVERSE):
+            raise RuntimeError("throttle requires confirmed drive or reverse gear")
+        throttle_limit = (self.options.max_reverse_throttle_pct
+                          if gear == self._chassis_type.GEAR_REVERSE
+                          else self.options.max_forward_throttle_pct)
+        # Normalize across the configured full travel, rather than clipping early.
+        steering_target = -steering * self.options.max_steering_pct
+        throttle_target = 0 if brake > 0 else throttle * throttle_limit
+        now = time.monotonic()
+        elapsed = 0.1 if self._motion_at is None else min(0.2, max(0, now - self._motion_at))
+        step = self.options.steering_rate_pct_s * elapsed
+        steering_target = max(self._output_steering - step,
+                              min(steering_target, self._output_steering + step))
+        steering_target = max(-self.options.max_steering_pct,
+                              min(steering_target, self.options.max_steering_pct))
+        # Throttle reduction and all safety braking bypass the rise limiter.
+        throttle_target = min(throttle_target, self._output_throttle + self.options.throttle_rise_pct_s * elapsed)
+        self._publish(steering_target, throttle_target, brake * self.options.stop_brake_pct, gear)
         self.in_emergency = False
         return True
 
@@ -143,12 +283,13 @@ class CyberBridge:
         if not self.in_emergency:
             logging.error("[CYBER] remote emergency stop: %s", reason)
         self.in_emergency = True
-        self._publish(0, 0, 1, 0)
+        self._pending_gear = None
+        self._publish(0, 0, self.options.emergency_brake_pct, self._hold_gear())
 
     def close(self) -> None:
         try:
             if self._armed and self._writer is not None:
-                self._publish(0, 0, 1, 0)
+                self._publish(0, 0, self.options.emergency_brake_pct, self._hold_gear())
         finally:
             self._armed = False
             self._writer = None

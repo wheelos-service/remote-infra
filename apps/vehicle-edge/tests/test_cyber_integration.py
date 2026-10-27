@@ -27,6 +27,8 @@ class NativeCyberTest(unittest.IsolatedAsyncioTestCase):
             localization_channel=prefix + "/localization",
             chassis_channel=prefix + "/chassis",
             control_channel=prefix + "/control",
+            max_forward_throttle_pct=100, max_steering_pct=100, max_speed_mps=5,
+            throttle_rise_pct_s=1e9, steering_rate_pct_s=1e9,
         ))
         bridge.start()
         try:
@@ -52,6 +54,9 @@ class NativeCyberTest(unittest.IsolatedAsyncioTestCase):
             while time.monotonic() < deadline:
                 self.assertTrue(localization_writer.write(localization))
                 self.assertTrue(chassis_writer.write(chassis))
+                if "chassis" not in bridge.snapshot():
+                    await asyncio.sleep(0.05)
+                    continue
                 await bridge.apply_control("remote", {
                     "steering": -0.25, "throttle": 0.1, "brake": 0, "direction": 1,
                 })

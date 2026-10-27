@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any, Awaitable, Callable
 
+from .state_publisher import STATE_TOPIC
+
 CONTROL_TOPIC = "vehicle.control"
 
 
@@ -31,7 +33,10 @@ class LiveKitTransport:
         if self._participant is None:
             raise ConnectionError("LiveKit is disconnected")
         try:
-            await self._participant.publish_data(payload, reliable=False, topic=topic)
+            # State snapshots can exceed the recommended 1300-byte lossy MTU.
+            # Their publisher bounds send time and the receiver rejects old sequences.
+            await self._participant.publish_data(
+                payload, reliable=topic == STATE_TOPIC, topic=topic)
         except Exception as exc:
             raise ConnectionError("LiveKit data publication failed") from exc
 

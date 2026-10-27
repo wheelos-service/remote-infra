@@ -33,3 +33,14 @@ def test_low_level_commands_require_explicit_direction() -> None:
 
 def test_unknown_high_level_action_is_rejected() -> None:
     assert not valid_command({"mode": HIGH_LEVEL_MODE, "action": "spin"})
+
+
+def test_stop_and_emergency_are_distinct_internal_intents() -> None:
+    for action, brake_mode in (("stop", "stop"), ("emergency_stop", "emergency")):
+        command = resolve_command({"mode": HIGH_LEVEL_MODE, "action": action})
+        assert command["brake_mode"] == brake_mode
+        assert command["direction"] == 0
+    for action in ("left", "right"):
+        assert resolve_command({"mode": HIGH_LEVEL_MODE, "action": action})["direction"] == 0
+    # This internal metadata cannot be supplied as a signed wire command.
+    assert not valid_command({"mode": HIGH_LEVEL_MODE, "action": "stop", "brake_mode": "stop"})

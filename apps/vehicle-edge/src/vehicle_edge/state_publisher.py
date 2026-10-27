@@ -82,11 +82,28 @@ class StatePublisher:
         return packet
 
     async def run(self, send: Callable[[bytes, str], Awaitable[None]]) -> None:
+        last_log_at = float("-inf")
+        logging.info("[STATE] publisher started topic=%s rate_hz=5", STATE_TOPIC)
         while True:
             started = time.monotonic()
             try:
-                payload = json.dumps(self.packet(), allow_nan=False, separators=(",", ":")).encode()
+                packet = self.packet()
+                payload = json.dumps(packet, allow_nan=False, separators=(",", ":")).encode()
                 await asyncio.wait_for(send(payload, STATE_TOPIC), timeout=0.15)
-            except (asyncio.TimeoutError, ConnectionError):
-                logging.warning("[STATE] dropped snapshot: transport unavailable")
+                if started - last_log_at >= 30:
+                    logging.info(
+                        "[STATE] published topic=%s sequence=%s bytes=%s "
+                        "localization_stale=%s chassis_stale=%s receiver_ack=false",
+                        STATE_TOPIC, packet["sequence"], len(payload),
+                        packet["localization"]["stale"], packet["chassis"]["stale"],
+                    )
+                    last_log_at = started
+            except (asyncio.TimeoutError, ConnectionError) as exc:
+                logging.warning(
+                    "[STATE] dropped snapshot: transport unavailable error_type=%s cause_type=%s",
+                    type(exc).__name__, type(exc.__cause__).__name__ if exc.__cause__ else "none",
+                )
+            except Exception as exc:
+                logging.error("[STATE] snapshot failed error_type=%s", type(exc).__name__)
+                raise
             await asyncio.sleep(max(0, 0.2 - (time.monotonic() - started)))

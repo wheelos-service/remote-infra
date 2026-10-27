@@ -49,23 +49,23 @@
     overflow: hidden;
 }
 
-.video-slot.has-video {
+.video-slot.is-visible {
     display: flex;
 }
 
-.video-grid.single-camera .video-slot.has-video {
+.video-grid.single-camera .video-slot.is-visible {
     grid-column: 1 / -1;
 }
 
-.video-grid.center-focused [data-camera="center"] {
+.video-grid.center-focused [data-position="center"] {
     grid-area: center;
 }
 
-.video-grid.center-focused [data-camera="left"] {
+.video-grid.center-focused [data-position="left"] {
     grid-area: left;
 }
 
-.video-grid.center-focused [data-camera="right"] {
+.video-grid.center-focused [data-position="right"] {
     grid-area: right;
 }
 
@@ -93,18 +93,32 @@
     background: #000;
 }
 
-.camera-focus {
-    display: none;
-    padding: 4px 8px;
-    border-radius: 4px;
+#camera-focus {
+    padding: 6px 10px;
     background: #444;
     color: white;
-    font-size: 12px;
 }
 
-.video-grid.multi-camera [data-camera="center"].has-video .camera-focus {
-    display: inline-block;
+.camera-view-controls {
+    width: min(960px, calc(100vw - 48px));
+    flex-wrap: wrap;
 }
+
+#camera-view-status { color: #ffc107; font-size: 13px; }
+
+.camera-empty {
+    position: absolute;
+    inset: 30px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #101010;
+    color: #ffc107;
+    font-size: 14px;
+    pointer-events: none;
+}
+
+.video-slot.has-video .camera-empty { display: none; }
 
 [data-camera="front"].has-video {
     grid-column: 1 / -1;

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {webcrypto} from 'node:crypto';
 import {SecureControlSender} from '../dist/lib/secure-control-sender.js';
 
 async function sender(t) {
@@ -52,4 +53,48 @@ test('session release during signing prevents late control publication', async t
     await control.release();
     await pending;
     assert.equal(count, 0);
+});
+
+test('failed renewal cancels renewal timer and notifies the page', async t => {
+    const originalFetch = globalThis.fetch;
+    const originalSet = globalThis.setInterval;
+    const originalClear = globalThis.clearInterval;
+    const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+    Object.defineProperty(globalThis, 'crypto', {value: webcrypto, configurable: true});
+    let tick, cleared = false, failed = false;
+    const errors = [];
+    globalThis.setInterval = (callback, delay) => {
+        assert.equal(delay, 15000);
+        tick = callback;
+        return 42;
+    };
+    globalThis.clearInterval = id => { if (id === 42) cleared = true; };
+    globalThis.fetch = async (url, request) => {
+        if (url.endsWith('/acquire')) {
+            assert.ok(JSON.parse(request.body).public_key_b64);
+            return {ok: true, json: async () => ({session: {session_id: 'test-session'}, renew_after_ms: 15000})};
+        }
+        assert.ok(url.endsWith('/renew'));
+        failed = true;
+        return {ok: false, status: 404};
+    };
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+        globalThis.setInterval = originalSet;
+        globalThis.clearInterval = originalClear;
+        if (cryptoDescriptor) Object.defineProperty(globalThis, 'crypto', cryptoDescriptor);
+        else delete globalThis.crypto;
+    });
+    const sender = new SecureControlSender({
+        gatewayBaseUrl: 'http://test-gateway', vehicleId: 'test-car', authToken: 'test-token',
+        onRenewalError: error => errors.push(error),
+    });
+    await sender.createKeyPair();
+    await sender.acquireSession();
+    sender.startRenewal();
+    await tick();
+    assert.equal(failed, true);
+    assert.equal(cleared, true);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /404/);
 });
