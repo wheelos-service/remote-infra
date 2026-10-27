@@ -8,6 +8,16 @@ and video-grid modules live in `src/lib/` and are compiled to `dist` by the
 build. The video-grid stylesheet lives in `public/css/video-grid.css` and is
 copied into `dist`.
 
+The `vehicle-state` module displays 5 Hz `vehicle.state` DataPackets alongside
+video. It verifies the sending vehicle identity and envelope, discards reordered
+packets, and marks missing/old telemetry stale independently of video. Control
+feedback indicates middleware publication, never actuator acknowledgement.
+Control messages use lossy `vehicle.control` packets addressed to the vehicle.
+RTC reconnect releases control; disconnect/connect to explicitly reacquire it.
+
+Run `npm test` to build and exercise monitoring and command-signing behavior
+with Node's built-in test runner (Node 22 or newer).
+
 Goals:
 - Run the UI as a static site for manual testing or in a browser kiosk.
 - Make runtime configuration easy via URL query parameters so the page can be reused across environments.

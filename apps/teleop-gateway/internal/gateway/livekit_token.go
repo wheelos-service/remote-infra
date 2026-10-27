@@ -28,7 +28,7 @@ func issueVehicleToken(vehicleID string) (string, error) {
 		RoomJoin:       true,
 		Room:           "teleop-" + vehicleID,
 		CanPublish:     bp(true),
-		CanPublishData: bp(false),
+		CanPublishData: bp(true),
 		CanSubscribe:   bp(true),
 	}).SetIdentity("vehicle-" + vehicleID).SetValidFor(vehicleLiveKitTokenTTL())
 

@@ -1,0 +1,30 @@
+module(
+    name = "teleop_vehicle_edge",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "wheelos_msgs", version = "0.1.5.bcr.1")
+bazel_dep(name = "wheelos_core", version = "1.0.4.bcr.1")
+single_version_override(
+    module_name = "wheelos_core",
+    patch_strip = 1,
+    patches = ["//:patches/cyber-node-close-gil.patch"],
+    version = "1.0.4.bcr.1",
+)
+
+bazel_dep(name = "rules_python", version = "0.34.0")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    is_default = True,
+    python_version = "3.10",
+)
+use_repo(python, "python_3_10")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "vehicle_pip",
+    python_version = "3.10",
+    requirements_lock = "//:requirements-cyber.txt",
+)
+use_repo(pip, "vehicle_pip")

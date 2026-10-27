@@ -23,6 +23,7 @@
         .command-group.active { display: flex; }
         .alert-box { margin-top: 15px; padding: 10px 20px; border-radius: 4px; display: none; width: min(960px, calc(100vw - 48px)); text-align: center; }
         .alert-shadow { background: #ffc107; color: #000; display: block; }
+        .vehicle-state { width: min(960px, calc(100vw - 48px)); white-space: pre-wrap; overflow-wrap: anywhere; background: #1e1e1e; padding: 15px; border-radius: 8px; }
     </style>
 </head>
 <body>
@@ -70,6 +71,7 @@
             <div class="hud-overlay" id="hud">STATE: OFFLINE<br>LATENCY: -- ms</div>
         </div>
 
+        <pre id="vehicle-state" class="vehicle-state">MONITOR: OFFLINE</pre>
         <div class="controls">
             <label class="command-mode">Command mode:
                 <select id="command-mode" onchange="setCommandMode(this.value)" disabled>
@@ -83,18 +85,19 @@
             <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('reverse')" onmouseup="endCommand()">Reverse</button>
             <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('left')" onmouseup="endCommand()">◀ Left</button>
             <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('right')" onmouseup="endCommand()">Right ▶</button>
-            <button class="btn-brake ctrl-btn" disabled onclick="sendHighLevel('emergency_stop')">Emergency stop</button>
+            <button class="btn-brake ctrl-btn" disabled onclick="beginHighLevel('emergency_stop')">Emergency stop</button>
         </div>
         <div id="low-level-controls" class="controls command-group">
             <button class="btn-steer ctrl-btn" disabled onmousedown="beginLowLevel(-1, 0, 0)" onmouseup="endCommand()">◀ Steer</button>
             <button class="btn-steer ctrl-btn" disabled onmousedown="beginLowLevel(1, 0, 0)" onmouseup="endCommand()">Steer ▶</button>
-            <button class="btn-brake ctrl-btn" disabled onclick="sendLowLevel(0, 0, 1)">Emergency brake</button>
+            <button class="btn-brake ctrl-btn" disabled onclick="beginLowLevel(0, 0, 1, 0)">Emergency brake</button>
         </div>
     </div>
 
     <script type="module">
         import {SecureControlSender} from './lib/secure-control-sender.js';
         import {createVideoGrid} from './lib/video-grid.js';
+        import {VehicleStateMonitor} from './lib/vehicle-state.js';
 
         // Runtime configuration via URL query parameters.
         const params = new URLSearchParams(window.location.search);
@@ -117,6 +120,7 @@
         let operatorName = null;
         let activeCommandTimer = null;
         let activeCommand = null;
+        let stateMonitor = null;
         const videoGrid = createVideoGrid(() => {
             document.getElementById('hud').innerHTML =
                 `STATE: ${canControl ? 'DRIVING' : 'MONITORING'}<br>VID: ${document.getElementById('target-vehicle').value}`;
@@ -203,6 +207,8 @@
             const room = currentRoom;
             currentRoom = null;
             if (room) room.disconnect();
+            stateMonitor?.close();
+            stateMonitor = null;
             videoGrid.clear();
             await stopControlSession();
             document.getElementById('hud').innerHTML = 'STATE: OFFLINE<br>LATENCY: -- ms';
@@ -281,6 +287,10 @@
             }
 
             try {
+                if (currentRoom) await stopTeleop();
+                document.getElementById('connect-btn').disabled = true;
+                stateMonitor?.close();
+                stateMonitor = new VehicleStateMonitor(document.getElementById('vehicle-state'), vid);
                 hud.innerHTML = 'STATE: AUTHENTICATING...';
                 let data;
                 if (REQUESTED_ACCESS === 'controller') {
@@ -306,15 +316,35 @@
                 document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = true);
 
                 hud.innerHTML = 'STATE: CONNECTING WEBRTC...';
-                currentRoom = new LivekitClient.Room();
+                const room = new LivekitClient.Room();
+                currentRoom = room;
 
-                currentRoom.on(LivekitClient.RoomEvent.Disconnected, () => {
+                room.on(LivekitClient.RoomEvent.Disconnected, () => {
+                    if (currentRoom !== room) return;
                     stopControlSession();
+                    stateMonitor?.close();
+                    stateMonitor = null;
                     videoGrid.clear();
                     currentRoom = null;
                     resetConnectionUi();
                     hud.innerHTML = 'STATE: DISCONNECTED';
                 });
+
+                room.on(LivekitClient.RoomEvent.Reconnecting, () => {
+                    if (currentRoom !== room) return;
+                    stopControlSession();
+                    document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = true);
+                    document.getElementById('command-mode').disabled = true;
+                    hud.textContent = 'STATE: RECONNECTING (CONTROL RELEASED)';
+                });
+                room.on(LivekitClient.RoomEvent.Reconnected, () => {
+                    if (currentRoom !== room) return;
+                    hud.textContent = 'STATE: MONITORING; disconnect/connect to reacquire control';
+                });
+                room.on(LivekitClient.RoomEvent.DataReceived,
+                    (data, participant, kind, topic) => {
+                        if (currentRoom === room) stateMonitor?.receive(data, participant, topic);
+                    });
 
                 currentRoom.on(LivekitClient.RoomEvent.TrackSubscribed,
                     (track, publication) => videoGrid.subscribe(track, publication));
@@ -322,11 +352,13 @@
                     LivekitClient.RoomEvent.TrackUnsubscribed,
                     track => videoGrid.unsubscribe(track));
 
-                await withTimeout(currentRoom.connect(LIVEKIT_URL, data.token), 15000, `LiveKit connection to ${LIVEKIT_URL}`);
+                await withTimeout(room.connect(LIVEKIT_URL, data.token), 15000, `LiveKit connection to ${LIVEKIT_URL}`);
+                if (currentRoom !== room) return;
                 hud.innerHTML = `STATE: WEBRTC CONNECTED<br>VID: ${vid}<br>WAITING FOR VIDEO...`;
                 if (canControl) {
-                    secureSender.setPublishData((message) => currentRoom.localParticipant.publishData(
-                        new TextEncoder().encode(message), {reliable: false}));
+                    secureSender.setPublishData((message) => room.localParticipant.publishData(
+                        new TextEncoder().encode(message), {reliable: false, topic: 'vehicle.control',
+                            destinationIdentities: [`vehicle-${vid}`]}));
                     secureSender.startRenewal();
                     document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = false);
                     document.getElementById('command-mode').disabled = false;
@@ -334,6 +366,8 @@
                 document.getElementById('connect-btn').disabled = true;
                 document.getElementById('disconnect-btn').disabled = false;
             } catch (e) {
+                stateMonitor?.close();
+                stateMonitor = null;
                 await stopControlSession();
                 if (currentRoom) {
                     try {
@@ -366,7 +400,7 @@
         }
 
         function beginCommand(command) {
-            endCommand();
+            if (activeCommandTimer) clearInterval(activeCommandTimer);
             activeCommand = command;
             sendCommand(command);
             activeCommandTimer = setInterval(() => sendCommand(activeCommand), 100);
@@ -396,6 +430,12 @@
 
         window.addEventListener('pagehide', () => {
             if (secureSender) stopControlSession();
+        });
+        window.addEventListener('mouseup', () => {
+            if (activeCommandTimer) endCommand();
+        });
+        window.addEventListener('blur', () => {
+            if (activeCommandTimer) endCommand();
         });
 
         // Inline handlers in the static HTML resolve functions from window.

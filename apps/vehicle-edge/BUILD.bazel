@@ -1,0 +1,42 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+load("@vehicle_pip//:requirements.bzl", "requirement")
+
+exports_files(["patches/cyber-node-close-gil.patch"])
+
+py_library(
+    name = "vehicle_edge",
+    srcs = glob(["src/vehicle_edge/*.py"]),
+    imports = ["src"],
+    deps = [
+        "@wheelos_core//cyber/python/cyber_py3:cyber",
+        "@wheelos_msgs//wheelos_msgs/chassis_msgs:chassis_py_pb2",
+        "@wheelos_msgs//wheelos_msgs/control_msgs:control_cmd_py_pb2",
+        "@wheelos_msgs//wheelos_msgs/localization_msgs:localization_py_pb2",
+        requirement("aiohttp"),
+        requirement("livekit"),
+        requirement("opencv-python"),
+        requirement("protobuf"),
+        requirement("pynacl"),
+        requirement("pyyaml"),
+    ],
+)
+
+py_binary(
+    name = "vehicle_node",
+    srcs = ["cyber_vehicle_main.py"],
+    env = {"PYTHONNOUSERSITE": "1"},
+    main = "cyber_vehicle_main.py",
+    deps = [":vehicle_edge"],
+)
+
+py_test(
+    name = "cyber_integration_test",
+    size = "small",
+    srcs = ["tests/test_cyber_integration.py"],
+    env = {
+        "PYTHONNOUSERSITE": "1",
+        "VEHICLE_CYBER_INTEGRATION": "1",
+    },
+    main = "tests/test_cyber_integration.py",
+    deps = [":vehicle_edge"],
+)

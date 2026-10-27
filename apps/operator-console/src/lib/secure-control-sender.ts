@@ -37,6 +37,7 @@ export class SecureControlSender {
     private renewTimer?: ReturnType<typeof setInterval>;
     private publishData?: (message: string) => Promise<void>;
     private sequence = 0;
+    private sending = false;
     private readonly gatewayBaseUrl: string;
     private readonly vehicleId: string;
     private readonly authToken: string;
@@ -107,16 +108,23 @@ export class SecureControlSender {
         if (!this.privateKey || !this.sessionId || !this.publishData) {
             throw new Error('secure control sender is not initialized');
         }
-        const payload = {
-            version: 1,
-            type: 'control',
-            session_id: this.sessionId,
-            sequence: ++this.sequence,
-            timestamp_ms: Date.now(),
-            command,
-        };
-        const signature = await crypto.subtle.sign(
-            'Ed25519', this.privateKey, new TextEncoder().encode(signMessage(payload)));
-        await this.publishData(JSON.stringify({...payload, signature: toBase64(signature)}));
+        if (this.sending) return;
+        this.sending = true;
+        try {
+            const payload = {
+                version: 1,
+                type: 'control',
+                session_id: this.sessionId,
+                sequence: ++this.sequence,
+                timestamp_ms: Date.now(),
+                command,
+            };
+            const signature = await crypto.subtle.sign(
+                'Ed25519', this.privateKey, new TextEncoder().encode(signMessage(payload)));
+            if (this.sessionId !== payload.session_id) return;
+            await this.publishData(JSON.stringify({...payload, signature: toBase64(signature)}));
+        } finally {
+            this.sending = false;
+        }
     }
 }

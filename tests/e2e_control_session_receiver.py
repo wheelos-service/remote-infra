@@ -93,6 +93,7 @@ async def main() -> None:
 
     brake = EmergencyBrakeController()
     runtime = SessionVehicleRuntime(make_verifier(signing_key), brake)
+    await runtime.on_datachannel_message(make_packet(signing_key, 1), "operator-operator-001")
     watchdog = asyncio.create_task(runtime.safety_watchdog(timeout_ms=20, check_interval_ms=5))
     await await_watchdog(runtime, watchdog)
     print("[E2E] control session verifier passed")

@@ -19,9 +19,52 @@ This project is a LiveKit remote vehicle monitoring and teleoperation prototype 
 5. The vehicle polls for the active session and accepts only packets from the matching operator with a valid signature, sequence, timestamp, and unexpired session. A watchdog applies the configured safety action when control messages stop.
 6. The Gateway audits login, vehicle access, control acquire/renew/release, and vehicle disconnect events. The vehicle rate-limits watchdog, rejected-command, and emergency-stop telemetry.
 
+## Vehicle Runtime Responsibilities
+
+The vehicle remains one process with one LiveKit room connection. It has no
+additional broker or IPC bridge.
+
+| Module | Responsibility |
+|---|---|
+| `vehicle_node.py` | Configuration, credentials, task composition and shutdown |
+| `livekit_transport.py` | RTC lifecycle, token renewal on reconnect, topic routing, bounded command dispatch and lossy sending |
+| `control_session_receiver.py` | Session/signature/replay/age checks, command resolution, safety policy and publication feedback |
+| `cyber_bridge.py` | Typed Cyber subscriptions/writer, raw latest-sample cache, actuator units and gear mapping |
+| `state_publisher.py` | Fixed-rate compact snapshots, stream/sequence envelope, bounded state sends |
+
+`cyber_bridge` knows nothing about LiveKit, and the transport knows nothing about
+protobuf messages. `vehicle_node` connects them through callbacks.
+
+Real-time monitoring (`vehicle.state`, vehicle to room) and control
+(`vehicle.control`, controller to vehicle identity) use lossy DataChannel
+packets. Video remains on media tracks. Gateway HTTPS owns authentication,
+control leases, audit and aggregate transport telemetry, not per-command relay.
+Vehicle tokens permit data publication for monitoring; observer tokens still
+cannot publish data. State recipients check the vehicle's participant identity;
+control recipients independently verify the active session and signature.
+Empty-topic control packets remain supported for existing clients.
+
+State snapshots run at 5 Hz and contain only selected localization/chassis
+fields, receive freshness, and control publication feedback. Callbacks retain
+only the latest raw Cyber messages; high-frequency messages are not individually
+JSON-encoded. The publisher drops state sends after 150 ms. One pending command
+slot prevents ingress backlog; sequence/age checks remain authoritative.
+The browser rejects old state packets, distinguishes restarted streams, and
+independently marks stopped or stale telemetry.
+
+Control is explicitly opt-in. The local watchdog acts after 300 ms without a
+valid command, session expiry/revocation, RTC loss or publication failure, but
+never arms an idle monitoring vehicle. Revocation is observed on the next
+Gateway poll, not pushed through RTC. Safety handling precedes asynchronous
+connection cleanup; reconnect acquires a new room token and restarts services
+without replaying queued commands. Browser reconnect releases its lease and
+requires explicit reacquisition. Middleware publication is not ECU acknowledgement.
+An external autonomy/teleop arbiter, gear-change interlocks, chassis timeout and
+physical emergency stop remain required before real-vehicle operation.
+
 ## Access Modes
 
-Operators request either `access=observer` or `access=controller`. Observers can subscribe to video only. Controllers can subscribe to video and publish signed control DataPackets. Redis leases ensure that each vehicle has at most one active Controller session; a conflicting acquire returns `409 Conflict`.
+Operators request either `access=observer` or `access=controller`. Observers can receive video and vehicle state but cannot publish data. Controllers can additionally publish signed control DataPackets. Redis leases ensure that each vehicle has at most one active Controller session; a conflicting acquire returns `409 Conflict`.
 
 ## Authentication and Secret Boundaries
 
