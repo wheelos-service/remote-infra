@@ -378,6 +378,52 @@ Update the Python lock with
 
 ### Proportional-gamepad simulation profile
 
+#### Apollo-native Cyber runtime
+
+In this Apollo checkout, `run-simulation.sh` uses `run-apollo.sh` to build against
+the **local Apollo Cyber**, its Fast RTPS dependency and its generated messages.
+The standalone `bazel run //:vehicle_node` target still uses WheelOS Core; do not
+use that target to connect to this Apollo Dreamview runtime. Matching channel
+names, `CYBER_IP` and `CYBER_DOMAIN_ID` alone does not establish compatibility
+between the two middleware builds.
+
+Run inside the managed Apollo development container as the development user:
+
+```bash
+cd /apollo/remote-infra/apps/vehicle-edge
+bash run-apollo.sh probe  # read-only: requires running SimControl feedback
+bash run-apollo.sh test   # isolated, non-actuator test channels
+bash run-simulation.sh
+```
+
+`prepare_apollo.py` creates a source view in `.apollo-local/workspace`. Apollo
+source files are referenced through symlinks; the generated MODULE selects Python
+3.10 for this build and adds vehicle-edge's pinned dependencies. This rebuilds
+Apollo's Python bindings for 3.10 without loading its existing Python 3.8 `.so`
+files. As in Apollo's `cyber/setup.bash`, the launcher selects protobuf's pure
+Python implementation so an incompatible host-built protobuf extension is not
+loaded. The generated copy of the shutdown binding releases the GIL while Cyber
+joins callback threads. No Apollo source files, default toolchain settings or
+existing running processes are changed. Outputs, dependency caches and diagnostic
+logs stay in `.apollo-local/`, which is ignored by Git. The initial build needs
+the same system prerequisites as Apollo and access to its Bazel registries.
+`APOLLO_ROOT_DIR` selects another local Apollo source tree;
+`VEHICLE_BUILD_JOBS` sets build concurrency (default 4). The isolated integration
+test checks control delivery to a separate process and the stale-feedback stop.
+
+The Apollo entry point explicitly selects `VEHICLE_CYBER_BACKEND=apollo` and
+imports `modules.common_msgs` messages. A missing import fails startup; there is
+no automatic fallback to WheelOS. `[CYBER]` logs the loaded module, domain, IP and
+channels. `probe` creates no control writer and requires fresh chassis and
+localization feedback for a full second, including valid speed and gear. It
+exits unsuccessfully when feedback is unavailable. Run `bash run-apollo.sh build`
+to build the vehicle executable without starting cameras or remote connections.
+
+The 0.5-second chassis timeout, gear checks, speed limits and emergency braking
+remain active. Dreamview's Simulation Perfect Control follows planning
+trajectories; this runtime change does not add `/apollo/control` actuation to
+that model. Use a simulator that consumes control commands for a driving test.
+
 `run-simulation.sh` supplies the expanded simulation ceilings: forward throttle
 20%, reverse throttle 10%, absolute steering 40%, speed threshold 4 m/s. These
 are twice the previous simulation ceilings. Normal brake remains 30%, emergency
@@ -441,7 +487,7 @@ Reasons distinguish `no_active_session`, `session_mismatch`, `sender_mismatch`,
 `invalid_envelope`, and `malformed_packet`. A positive packet age means the
 packet timestamp is behind the vehicle clock; it includes clock offset and
 transport delay, and does not alone measure network latency. A negative age
-means the browser timestamp is ahead. The default maximum packet age is 150 ms;
+means the browser timestamp is ahead. The default maximum packet age is 200 ms;
 the future-skew limit is 100 ms. Rejected-packet metadata is diagnostic and unverified.
 No packet bodies, keys, signatures or session identifiers are included.
 Restart the vehicle process to enable these diagnostics;

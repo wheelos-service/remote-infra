@@ -1,0 +1,50 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+load("@vehicle_pip//:requirements.bzl", "requirement")
+
+py_library(
+    name = "vehicle_edge",
+    srcs = glob(["src/vehicle_edge/*.py"]),
+    imports = ["src"],
+    deps = [
+        "//cyber/python/cyber_py3:cyber",
+        "//modules/common_msgs/chassis_msgs:chassis_py_pb2",
+        "//modules/common_msgs/control_msgs:control_cmd_py_pb2",
+        "//modules/common_msgs/localization_msgs:localization_py_pb2",
+        requirement("aiohttp"),
+        requirement("livekit"),
+        requirement("opencv-python"),
+        requirement("protobuf"),
+        requirement("pynacl"),
+        requirement("pyyaml"),
+    ],
+)
+
+py_binary(
+    name = "vehicle_node",
+    srcs = ["apollo_vehicle_main.py"],
+    env = {"PYTHONNOUSERSITE": "1", "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python"},
+    deps = [":vehicle_edge"],
+    main = "apollo_vehicle_main.py",
+)
+
+py_binary(
+    name = "probe_feedback",
+    srcs = ["probe_apollo_feedback.py"],
+    env = {"PYTHONNOUSERSITE": "1", "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python"},
+    deps = [":vehicle_edge"],
+    main = "probe_apollo_feedback.py",
+)
+
+py_test(
+    name = "cyber_integration_test",
+    srcs = ["tests/test_cyber_integration.py"],
+    env = {
+        "PYTHONNOUSERSITE": "1",
+        "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python",
+        "VEHICLE_CYBER_BACKEND": "apollo",
+        "VEHICLE_CYBER_INTEGRATION": "1",
+    },
+    main = "tests/test_cyber_integration.py",
+    deps = [":vehicle_edge"],
+    size = "small",
+)

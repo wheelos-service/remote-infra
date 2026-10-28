@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -79,10 +80,9 @@ class CyberBridge:
         self._readers: list[Any] = []
 
     def start(self) -> None:
-        from cyber.python.cyber_py3 import cyber
-        from wheelos_msgs.chassis_msgs.chassis_pb2 import Chassis
-        from wheelos_msgs.control_msgs.control_cmd_pb2 import ControlCommand
-        from wheelos_msgs.localization_msgs.localization_pb2 import LocalizationEstimate
+        from .cyber_runtime import load_runtime
+
+        cyber, Chassis, ControlCommand, LocalizationEstimate = load_runtime()
 
         self._control_type = ControlCommand
         self._chassis_type = Chassis
@@ -90,6 +90,15 @@ class CyberBridge:
         try:
             if not cyber.init(self.options.node_name):
                 raise RuntimeError("Cyber initialization failed")
+            logging.info(
+                "[CYBER] backend=%s module=%s domain=%s ip=%s chassis=%s localization=%s control=%s",
+                os.environ.get("VEHICLE_CYBER_BACKEND", "wheelos"),
+                getattr(cyber, "__file__", "unknown"),
+                os.environ.get("CYBER_DOMAIN_ID", "80"),
+                os.environ.get("CYBER_IP", "127.0.0.1"),
+                self.options.chassis_channel, self.options.localization_channel,
+                self.options.control_channel if self.options.control_enabled else "disabled",
+            )
             self._node = cyber.Node(self.options.node_name)
             for kind, channel, message_type in (
                 ("localization", self.options.localization_channel, LocalizationEstimate),

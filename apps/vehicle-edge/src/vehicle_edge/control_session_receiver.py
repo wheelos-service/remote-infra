@@ -28,7 +28,7 @@ class ActiveControlSession:
 
 
 class SessionCommandVerifier:
-    def __init__(self, gateway_url: str, vehicle_id: str, auth_token: str, max_age_ms: int = 150, max_future_skew_ms: int = 100) -> None:
+    def __init__(self, gateway_url: str, vehicle_id: str, auth_token: str, max_age_ms: int = 200, max_future_skew_ms: int = 100) -> None:
         self.gateway_url = gateway_url.rstrip("/")
         self.vehicle_id = vehicle_id
         self.auth_token = auth_token

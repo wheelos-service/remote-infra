@@ -92,7 +92,7 @@ class SessionRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_rejection_reasons_and_time_limits_preserve_fail_closed_behavior(self):
         now = int(time.time() * 1000)
         cases = [
-            ({"timestamp_ms": now - 151}, "operator-driver-1", "packet_too_old", 151),
+            ({"timestamp_ms": now - 201}, "operator-driver-1", "packet_too_old", 201),
             ({"timestamp_ms": now + 101}, "operator-driver-1", "packet_from_future", -101),
             ({"session_id": "other-session"}, "operator-driver-1", "session_mismatch", None),
             ({}, "operator-other", "sender_mismatch", None),
@@ -113,7 +113,7 @@ class SessionRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(self.verifier.last_packet_age_ms, age)
                     self.assertEqual(self.verifier.last_sequence, 0)
                     self.assertEqual(self.brake.applied, [])
-            for age in (-100, 108, 109, 150):
+            for age in (-100, 150, 151, 152, 200):
                 with self.subTest(accepted_age=age):
                     packet = json.loads(self.packet(self.verifier.last_sequence + 1))
                     packet["timestamp_ms"] = now - age
@@ -121,7 +121,7 @@ class SessionRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         self.key.sign(build_sign_message(packet).encode()).signature).decode()
                     await self.runtime.on_datachannel_message(json.dumps(packet), "operator-driver-1")
                     self.assertIsNone(self.verifier.last_reject_reason)
-            self.assertEqual(len(self.brake.applied), 4)
+            self.assertEqual(len(self.brake.applied), 5)
 
     async def test_reject_log_reports_reason_without_packet_secrets(self):
         packet = json.loads(self.packet())

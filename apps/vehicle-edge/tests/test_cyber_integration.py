@@ -2,7 +2,9 @@
 
 import asyncio
 import faulthandler
+import json
 import os
+import sys
 import time
 import unittest
 
@@ -14,12 +16,11 @@ from vehicle_edge.state_publisher import StatePublisher
                      "requires native Cyber runtime and generated WheelOS messages")
 class NativeCyberTest(unittest.IsolatedAsyncioTestCase):
     async def test_native_publish_subscribe_and_control(self):
-        faulthandler.dump_traceback_later(15)
+        faulthandler.dump_traceback_later(30)
         self.addCleanup(faulthandler.cancel_dump_traceback_later)
-        from cyber.python.cyber_py3 import cyber
-        from wheelos_msgs.chassis_msgs.chassis_pb2 import Chassis
-        from wheelos_msgs.control_msgs.control_cmd_pb2 import ControlCommand
-        from wheelos_msgs.localization_msgs.localization_pb2 import LocalizationEstimate
+        from vehicle_edge.cyber_runtime import load_runtime
+
+        cyber, Chassis, ControlCommand, LocalizationEstimate = load_runtime()
 
         prefix = f"/teleop/test/{os.getpid()}"
         bridge = CyberBridge(CyberOptions(
@@ -77,7 +78,60 @@ class NativeCyberTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(commands[-1].steering_target, 25)
             self.assertEqual(commands[-1].throttle, 10)
             self.assertEqual(commands[-1].gear_location, Chassis.GEAR_DRIVE)
+            if os.environ.get("VEHICLE_CYBER_BACKEND") == "apollo":
+                # Verify an independently initialized Apollo process can receive
+                # the bridge's command, on an isolated non-actuator channel.
+                child_code = '''
+import json, sys, time
+from vehicle_edge.cyber_runtime import load_runtime
+cyber, _, ControlCommand, _ = load_runtime()
+assert cyber.init("teleop_cross_process")
+node = cyber.Node("teleop_cross_process")
+messages = []
+reader = node.create_reader(sys.argv[1], ControlCommand, messages.append)
+assert reader is not None
+print("READY", flush=True)
+deadline = time.monotonic() + 8
+while not messages and time.monotonic() < deadline:
+    time.sleep(0.05)
+result = [messages[-1].steering_target, messages[-1].throttle] if messages else None
+cyber.shutdown()
+print(json.dumps(result), flush=True)
+'''
+                env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "-u", "-c", child_code, prefix + "/control",
+                    env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    self.assertEqual(await asyncio.wait_for(process.stdout.readline(), 5), b"READY\n")
+                    received = asyncio.create_task(process.stdout.readline())
+                    cross_deadline = time.monotonic() + 7
+                    while not received.done() and time.monotonic() < cross_deadline:
+                        self.assertTrue(chassis_writer.write(chassis))
+                        await asyncio.sleep(0.05)
+                        await bridge.apply_control("remote", {
+                            "steering": -0.25, "throttle": 0.1, "brake": 0, "direction": 1,
+                        })
+                        await asyncio.sleep(0.05)
+                    self.assertEqual(json.loads(await asyncio.wait_for(received, 2)), [25, 10])
+                    self.assertEqual(await asyncio.wait_for(process.wait(), 3), 0)
+                finally:
+                    if process.returncode is None:
+                        process.kill()
+                        await process.wait()
+            # No fresh chassis arrives after this point. Motion must fail closed
+            # before writing another control command.
+            await asyncio.sleep(bridge.options.chassis_timeout_s + 0.1)
             count = len(commands)
+            with self.assertRaisesRegex(RuntimeError, "chassis feedback missing or stale"):
+                await bridge.apply_control("remote", {
+                    "steering": 0, "throttle": 0.1, "brake": 0, "direction": 1,
+                })
+            await asyncio.sleep(0.1)
+            self.assertEqual(len(commands), count)
+            count = len(commands)
+            deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 await bridge.emergency_brake("integration watchdog")
                 await asyncio.sleep(0.05)

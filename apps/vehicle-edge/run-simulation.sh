@@ -4,7 +4,7 @@
 # The auth token below is the existing development identity, not a production credential.
 set -euo pipefail
 cd "$(dirname "$0")"
-exec bazel run //:vehicle_node -- \
+exec bash ./run-apollo.sh run \
   --gateway http://118.145.117.118:8080 \
   --vehicle-id car-001 \
   --livekit-url ws://118.145.117.118:7880 \

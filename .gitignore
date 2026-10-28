@@ -14,3 +14,4 @@ apps/vehicle-edge/device.yaml
 tests/__pycache__/
 *.pyc
 apps/vehicle-edge/bazel-*
+apps/vehicle-edge/.apollo-local/
