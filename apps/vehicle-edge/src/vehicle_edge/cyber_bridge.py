@@ -67,6 +67,8 @@ class CyberBridge:
         self._reported_gear: tuple[int, float] | None = None
         self._last_gear: int | None = None
         self._pending_gear: int | None = None
+        self._explicit_gear: int | None = None
+        self._explicit_shift_started = 0.0
         self._shift_started = 0.0
         self._shift_fault = False
         self._motion_at: float | None = None
@@ -170,7 +172,8 @@ class CyberBridge:
             return self._last_gear
         raise RuntimeError("cannot hold gear before receiving chassis gear")
 
-    def _publish(self, steering: float, throttle: float, brake: float, gear: int) -> None:
+    def _publish(self, steering: float, throttle: float, brake: float, gear: int,
+                 pad_action: str | None = None) -> None:
         """Publish already guarded percentages. Safety braking bypasses motion limits."""
         if self._writer is None:
             raise RuntimeError("Cyber control writer is not available")
@@ -183,6 +186,14 @@ class CyberBridge:
         message.throttle = 0 if brake > 0 else throttle
         message.brake = brake
         message.gear_location = gear
+        if pad_action is not None:
+            # Resolve the enum from the selected runtime's actual protobuf type.
+            try:
+                action_enum = message.pad_msg.DESCRIPTOR.fields_by_name["action"].enum_type
+                message.pad_msg.action = action_enum.values_by_name[pad_action].number
+                message.pad_msg.header.CopyFrom(message.header)
+            except (AttributeError, KeyError) as exc:
+                raise RuntimeError("Cyber runtime does not support the requested pad action") from exc
         self._armed = True
         if not self._writer.write(message):
             raise RuntimeError("Cyber control publication failed")
@@ -202,15 +213,64 @@ class CyberBridge:
             self._last_tx_log_kind = kind
 
     async def maintain_stop(self) -> None:
+        if self._explicit_gear is not None:
+            chassis, received_at = self._chassis(motion=True)
+            if abs(chassis.speed_mps) > self.options.shift_speed_mps:
+                raise RuntimeError("gear change requires vehicle stopped")
+            if (chassis.gear_location == self._explicit_gear
+                    and received_at > self._explicit_shift_started):
+                self._explicit_gear = None
+            elif time.monotonic() - self._explicit_shift_started >= self.options.shift_timeout_s:
+                self._shift_fault = True
+                raise RuntimeError("gear feedback confirmation timed out; stop before retry")
+            else:
+                self._publish(0, 0, self.options.stop_brake_pct, self._explicit_gear)
+                return
         # Repeated normal braking still requires live speed/gear feedback.
         self._chassis()
         self._publish(0, 0, self.options.stop_brake_pct, self._hold_gear())
+
+    async def _apply_vehicle_action(self, action: str) -> bool:
+        gears = {"gear_park": self._chassis_type.GEAR_PARKING,
+                 "gear_neutral": self._chassis_type.GEAR_NEUTRAL,
+                 "gear_drive": self._chassis_type.GEAR_DRIVE,
+                 "gear_reverse": self._chassis_type.GEAR_REVERSE}
+        if action in gears:
+            if self._shift_fault:
+                raise RuntimeError("gear change fault; send stop before retry")
+            chassis, _ = self._chassis(motion=True)
+            if abs(chassis.speed_mps) > self.options.shift_speed_mps:
+                raise RuntimeError("gear change requires vehicle stopped")
+            if self._pending_gear is not None or self._explicit_gear is not None:
+                raise RuntimeError("gear change already pending; stop before changing target")
+            self._explicit_gear = gears[action]
+            self._explicit_shift_started = time.monotonic()
+            self._publish(0, 0, self.options.stop_brake_pct, gears[action])
+        elif action in ("auto_enter", "auto_exit"):
+            if action == "auto_enter":
+                chassis, _ = self._chassis()
+                if abs(chassis.speed_mps) > self.options.shift_speed_mps:
+                    raise RuntimeError("entering auto requires vehicle stopped")
+                if ((chassis.HasField("error_code") and chassis.error_code != 0) or
+                        (chassis.HasField("chassis_error_mask") and chassis.chassis_error_mask != 0)):
+                    raise RuntimeError("chassis fault prevents entering auto")
+            self._explicit_gear = None
+            self._pending_gear = None
+            self._publish(0, 0, self.options.stop_brake_pct, self._hold_gear(),
+                          "START" if action == "auto_enter" else "RESET")
+        else:
+            raise ValueError("unknown vehicle action")
+        logging.info("[CYBER_ACTION] action=%s middleware_accepted=true actuator_ack=false", action)
+        self.in_emergency = False
+        return True
 
     async def apply_control(self, cmd: str, val: Any) -> bool:
         if not self.options.control_enabled:
             return False
         if cmd != "remote" or not isinstance(val, dict):
             raise ValueError("Cyber accepts only verified, resolved remote commands")
+        if "vehicle_action" in val:
+            return await self._apply_vehicle_action(val["vehicle_action"])
         steering, throttle, brake, direction = (
             val["steering"], val["throttle"], val["brake"], val["direction"])
         if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -221,11 +281,13 @@ class CyberBridge:
             raise ValueError("Cyber command outside normalized range")
         brake_mode = val.get("brake_mode")
         if brake_mode == "emergency":
+            self._explicit_gear = None
             self._pending_gear = None
             self._publish(0, 0, self.options.emergency_brake_pct, self._hold_gear())
             self.in_emergency = True
             return True
         if brake_mode == "stop":
+            self._explicit_gear = None
             self._pending_gear = None
             await self.maintain_stop()
             self._shift_fault = False
@@ -234,6 +296,10 @@ class CyberBridge:
 
         if self._shift_fault:
             raise RuntimeError("gear change fault; send stop before retry")
+        if self._explicit_gear is not None:
+            await self.maintain_stop()
+            if self._explicit_gear is not None:
+                return True
         chassis, received_at = self._chassis(motion=True)
         gear = chassis.gear_location
         speed = abs(chassis.speed_mps)
@@ -292,6 +358,7 @@ class CyberBridge:
         if not self.in_emergency:
             logging.error("[CYBER] remote emergency stop: %s", reason)
         self.in_emergency = True
+        self._explicit_gear = None
         self._pending_gear = None
         self._publish(0, 0, self.options.emergency_brake_pct, self._hold_gear())
 

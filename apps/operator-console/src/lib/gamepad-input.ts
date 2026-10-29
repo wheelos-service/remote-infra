@@ -1,15 +1,25 @@
 import {ControlInput, isEditableTarget} from './control-input.js';
+import type {VehicleAction} from './secure-control-sender.js';
+
+export const vehicleActionButtons = {
+    parkButton: 'gear_park', neutralButton: 'gear_neutral', driveButton: 'gear_drive',
+    reverseButton: 'gear_reverse', autoEnterButton: 'auto_enter', autoExitButton: 'auto_exit',
+} as const;
 
 export type GamepadMapping = {
     axisX: number; axisY: number; invertX: boolean; invertY: boolean;
     enableButton: number; emergencyButton: number;
     upButton: number; downButton: number; leftButton: number; rightButton: number;
+    parkButton: number; neutralButton: number; driveButton: number;
+    reverseButton: number; autoEnterButton: number; autoExitButton: number;
 };
 
 export const defaultGamepadMapping: GamepadMapping = {
     axisX: 0, axisY: 3, invertX: false, invertY: false,
     enableButton: 4, emergencyButton: 1,
     upButton: 12, downButton: 13, leftButton: 14, rightButton: 15,
+    parkButton: 0, neutralButton: 2, driveButton: 3, reverseButton: 5,
+    autoEnterButton: 9, autoExitButton: 8,
 };
 
 export type Pad = Pick<Gamepad, 'index' | 'id' | 'mapping' | 'axes' | 'buttons' | 'connected'>;
@@ -27,9 +37,11 @@ export type GamepadView = {
 export function validateMapping(mapping: GamepadMapping, pad: Pad): string {
     const axes = [mapping.axisX, mapping.axisY];
     const directions = [mapping.upButton, mapping.downButton, mapping.leftButton, mapping.rightButton];
-    const buttons = [mapping.enableButton, mapping.emergencyButton, ...directions];
+    const actions = Object.keys(vehicleActionButtons).map(key => mapping[key as keyof typeof vehicleActionButtons]);
+    const buttons = [mapping.enableButton, mapping.emergencyButton, ...directions, ...actions];
     if (axes.some(index => !Number.isInteger(index) || index < -1 || index >= pad.axes.length) ||
         directions.some(index => !Number.isInteger(index) || index < -1) ||
+        actions.some(index => !Number.isInteger(index) || index < -1) ||
         [mapping.enableButton, mapping.emergencyButton].some(index => !Number.isInteger(index) || index < 0) ||
         buttons.some(index => index >= pad.buttons.length)) return '映射编号超出当前手柄范围；不用的轴/方向键请填 -1';
     const enabledAxes = axes.filter(index => index >= 0);
@@ -61,6 +73,7 @@ export class GamepadInput {
     private message = '连接手柄后按一下按钮，先检测并确认映射';
     private validation = '';
     private enableHeld = false;
+    private previousActions = new Set<VehicleAction>();
 
     constructor(private readonly input: ControlInput, private readonly onView: (view: GamepadView) => void) {}
 
@@ -153,6 +166,13 @@ export class GamepadInput {
             this.confirmed = false;
         }
         this.pad = pad;
+        const actions = Object.entries(vehicleActionButtons)
+            .filter(([key]) => {
+                const index = this.mapping[key as keyof typeof vehicleActionButtons];
+                return index >= 0 && Boolean(pad.buttons[index]?.pressed);
+            }).map(([, action]) => action);
+        const freshActions = actions.filter(action => !this.previousActions.has(action));
+        this.previousActions = new Set(actions);
         this.validation = validateMapping(this.mapping, pad);
         this.enableHeld = this.mapping.enableButton >= 0 && Boolean(pad.buttons[this.mapping.enableButton]?.pressed);
         if (!foreground) this.disarm('页面失焦或正在输入：手柄控制已关闭');
@@ -190,11 +210,20 @@ export class GamepadInput {
             const centered = horizontal === 0 && longitudinal === 0 && !left && !right && !up && !reverse;
             if (this.needsNeutral) {
                 this.input.updateGamepad('stop');
-                if (!this.enableHeld && centered) {
+                if (!this.enableHeld && centered && actions.length === 0) {
                     this.needsNeutral = false;
                     this.lastDirection = 0;
                     this.message = '已就绪：按住使能键，摇杆幅度控制油门与转向';
                 } else this.message = '等待回中：请松开使能键和所有方向键';
+            } else if (actions.length > 0) {
+                if (this.enableHeld && centered && actions.length === 1 && freshActions.length === 1) {
+                    this.input.vehicleAction(freshActions[0]);
+                    this.message = '挡位/模式请求已发送；查看底盘反馈，松开按钮和使能键并回中后继续';
+                } else {
+                    this.input.updateGamepad('stop');
+                    this.message = '挡位/模式操作需摇杆回中、按住使能键，并且一次只按一个操作按钮';
+                }
+                this.needsNeutral = true;
             } else if (conflict) {
                 this.input.updateGamepad('stop');
                 this.needsNeutral = true;

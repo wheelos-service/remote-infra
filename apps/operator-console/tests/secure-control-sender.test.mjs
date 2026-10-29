@@ -28,6 +28,21 @@ test('signed commands remain compatible with vehicle verification', async t => {
         new TextEncoder().encode(signed)));
 });
 
+test('gear and mode actions are covered by the existing high-level signature', async t => {
+    const {sender: control, publicKey} = await sender(t);
+    let packet;
+    control.setPublishData(async message => { packet = JSON.parse(message); });
+    const key = await crypto.subtle.importKey('raw', Buffer.from(publicKey, 'base64'), 'Ed25519', false, ['verify']);
+    for (const action of ['gear_park', 'gear_neutral', 'gear_drive', 'gear_reverse', 'auto_enter', 'auto_exit']) {
+        await control.sendCommand({mode: 'high_level', action});
+        const prefix = `1|control|session-1|${packet.sequence}|${packet.timestamp_ms}|high_level|`;
+        const verify = value => crypto.subtle.verify('Ed25519', key, Buffer.from(packet.signature, 'base64'),
+            new TextEncoder().encode(prefix + value));
+        assert.ok(await verify(action));
+        assert.equal(await verify('stop'), false);
+    }
+});
+
 test('blocked publication never queues concurrent commands', async t => {
     const {sender: control} = await sender(t);
     let release, started;

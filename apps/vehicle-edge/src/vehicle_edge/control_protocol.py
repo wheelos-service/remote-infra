@@ -8,7 +8,9 @@ PROTOCOL_VERSION = 1
 CONTROL_TYPE = "control"
 HIGH_LEVEL_MODE = "high_level"
 LOW_LEVEL_MODE = "low_level"
-HIGH_LEVEL_ACTIONS = frozenset({"forward", "reverse", "left", "right", "stop", "emergency_stop"})
+VEHICLE_ACTIONS = frozenset({"gear_park", "gear_neutral", "gear_drive", "gear_reverse",
+                             "auto_enter", "auto_exit"})
+HIGH_LEVEL_ACTIONS = frozenset({"forward", "reverse", "left", "right", "stop", "emergency_stop"}) | VEHICLE_ACTIONS
 
 
 def build_sign_message(packet: Mapping[str, Any]) -> str:
@@ -66,6 +68,9 @@ def resolve_command(command: Mapping[str, Any]) -> dict[str, float | str]:
     """Map a high-level intent or low-level command to actuator values."""
     if command.get("mode") == HIGH_LEVEL_MODE:
         action = command["action"]
+        if action in VEHICLE_ACTIONS:
+            return {"steering": 0.0, "throttle": 0.0, "brake": 1.0, "direction": 0.0,
+                    "vehicle_action": action}
         if action == "forward":
             return {"steering": 0.0, "throttle": 1.0, "brake": 0.0, "direction": 1.0}
         if action == "reverse":

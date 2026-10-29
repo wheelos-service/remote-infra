@@ -123,6 +123,13 @@ test('console wires topics, vehicle destination, monitoring and reconnect contro
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(sender.commands.at(-1).action, 'emergency_stop');
     assert.equal([...intervals.values()].filter(timer => timer.delay === 100).length, 0);
+    context.window.requestVehicleAction('auto_enter');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sender.commands.at(-1).action, 'auto_enter');
+    assert.match(element('vehicle-action-status').textContent, /进入自动驾驶.*底盘/);
+    context.window.requestVehicleAction('gear_neutral');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sender.commands.at(-1).action, 'gear_neutral');
     context.window.beginHighLevel('forward', pointer);
     await new Promise(resolve => setImmediate(resolve));
     room.handlers.get('reconnecting')();
@@ -134,6 +141,7 @@ test('console wires topics, vehicle destination, monitoring and reconnect contro
     assert.match(element('hud').textContent, /reacquire control/);
     const count = sender.commands.length;
     vm.runInContext("controlInput.setKeyboardEnabled(true); controlInput.keyDown('KeyW')", context);
+    context.window.requestVehicleAction('auto_enter');
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(sender.commands.length, count);
     await context.window.stopTeleop();

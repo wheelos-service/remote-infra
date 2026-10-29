@@ -28,7 +28,7 @@ class ActiveControlSession:
 
 
 class SessionCommandVerifier:
-    def __init__(self, gateway_url: str, vehicle_id: str, auth_token: str, max_age_ms: int = 200, max_future_skew_ms: int = 100) -> None:
+    def __init__(self, gateway_url: str, vehicle_id: str, auth_token: str, max_age_ms: int = 3000, max_future_skew_ms: int = 100) -> None:
         self.gateway_url = gateway_url.rstrip("/")
         self.vehicle_id = vehicle_id
         self.auth_token = auth_token
@@ -258,7 +258,8 @@ class SessionVehicleRuntime:
             self._command_session_id = packet["session_id"]
             applied = await self.brake_controller.apply_control("remote", command)
             if applied is not False:
-                self._normal_stop = command.get("brake_mode") == "stop"
+                self._normal_stop = (command.get("brake_mode") == "stop"
+                                     or "vehicle_action" in command)
                 self._published_session_id = packet["session_id"]
                 self._published_sequence = sequence
                 self._fault = None

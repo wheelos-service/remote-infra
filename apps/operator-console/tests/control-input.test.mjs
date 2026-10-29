@@ -49,6 +49,59 @@ test('unavailable observers and unarmed controllers cannot send keyboard command
     assert.equal(h.timers.size, 0);
 });
 
+test('gear and mode keys send once, cancel motion and do not change driving key bindings', async t => {
+    const h = setup(t);
+    await h.arm();
+    h.input.keyDown('KeyW');
+    await settle();
+    for (const [key, action] of Object.entries({
+        Digit1: 'gear_park', Digit2: 'gear_neutral', Digit3: 'gear_drive', Digit4: 'gear_reverse',
+        KeyE: 'auto_enter', KeyQ: 'auto_exit',
+    })) {
+        h.input.keyDown(key);
+        await settle();
+        assert.equal(h.actions().at(-1), action);
+        const count = h.sent.length;
+        h.input.keyDown(key, true);
+        h.input.keyDown(key);
+        h.tick();
+        h.input.keyUp(key);
+        await settle();
+        assert.equal(h.sent.length, count);
+        assert.equal(h.timers.size, 0);
+    }
+    h.input.keyDown('KeyW', true);
+    await settle();
+    assert.equal(h.actions().at(-1), 'auto_exit');
+    // A new directional press/release still stops even while an action key is held.
+    h.input.keyDown('Digit3');
+    h.input.keyDown('KeyD');
+    await settle();
+    assert.equal(h.actions().at(-1), 'right');
+    h.input.keyUp('KeyD');
+    await settle();
+    assert.equal(h.actions().at(-1), 'stop');
+});
+
+test('pointer vehicle actions require control availability and disarm other inputs', async t => {
+    const h = setup(t);
+    h.input.vehicleAction('auto_enter', true);
+    await settle();
+    assert.deepEqual(h.actions(), []);
+    await h.arm();
+    h.input.keyDown('KeyW');
+    await settle();
+    h.input.vehicleAction('gear_neutral', true);
+    await settle();
+    assert.equal(h.actions().at(-1), 'gear_neutral');
+    assert.equal(h.timers.size, 0);
+    assert.equal(h.input.isKeyboardEnabled, false);
+    assert.equal(h.input.isGamepadEnabled, false);
+    h.input.keyDown('KeyW', true);
+    await settle();
+    assert.equal(h.actions().at(-1), 'gear_neutral');
+});
+
 test('all eight direction keys map to the existing high-level commands', async t => {
     const h = setup(t);
     await h.arm();

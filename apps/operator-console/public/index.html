@@ -109,6 +109,21 @@
         </div>
 
         <pre id="vehicle-state" class="vehicle-state">MONITOR: OFFLINE</pre>
+        <div class="controls keyboard-controls">
+            <strong>挡位与自动驾驶模式</strong>
+            <div class="controls">
+                <button class="btn-steer ctrl-btn" disabled onclick="requestVehicleAction('gear_park')">P 驻车挡（1）</button>
+                <button class="btn-steer ctrl-btn" disabled onclick="requestVehicleAction('gear_neutral')">N 空挡（2）</button>
+                <button class="btn-steer ctrl-btn" disabled onclick="requestVehicleAction('gear_drive')">D 前进挡（3）</button>
+                <button class="btn-steer ctrl-btn" disabled onclick="requestVehicleAction('gear_reverse')">R 倒挡（4）</button>
+            </div>
+            <div class="controls">
+                <button class="btn-steer ctrl-btn" disabled onclick="requestVehicleAction('auto_enter')">进入自动驾驶（E）</button>
+                <button class="btn-brake ctrl-btn" disabled onclick="requestVehicleAction('auto_exit')">退出自动驾驶（Q）</button>
+            </div>
+            <p>进入自动驾驶和换挡前请停车；换挡需已处于自动驾驶模式。每次操作仅发送一次请求，请查看上方底盘反馈确认；未确认时可重新操作。</p>
+            <p id="vehicle-action-status" role="status" aria-live="polite">控制不可用</p>
+        </div>
         <div class="controls">
             <label class="command-mode">Command mode:
                 <select id="command-mode" onchange="setCommandMode(this.value)" disabled>
@@ -120,6 +135,7 @@
         <div class="controls keyboard-controls">
             <label><input id="keyboard-enabled" type="checkbox" disabled> 启用键盘控制</label>
             <p>W / ↑ 前进 · S / ↓ 后退 · A / ← 左转 · D / → 右转 · 空格急停</p>
+            <p>1 / 2 / 3 / 4：P / N / D / R 挡 · E 进入自动驾驶 · Q 退出自动驾驶（按一次触发）</p>
             <p>按住发送，松开停止；一次只支持一个方向。切换窗口后需重新启用。</p>
             <p id="keyboard-status" role="status" aria-live="polite">控制不可用</p>
         </div>
@@ -141,6 +157,12 @@
                 <label>后退按钮 <input id="gamepad-downButton" data-gamepad-mapping="downButton" type="number" min="-1" step="1" value="13"></label>
                 <label>左转按钮 <input id="gamepad-leftButton" data-gamepad-mapping="leftButton" type="number" min="-1" step="1" value="14"></label>
                 <label>右转按钮 <input id="gamepad-rightButton" data-gamepad-mapping="rightButton" type="number" min="-1" step="1" value="15"></label>
+                <label>P 挡按钮 <input data-gamepad-mapping="parkButton" type="number" min="-1" step="1" value="0"></label>
+                <label>N 挡按钮 <input data-gamepad-mapping="neutralButton" type="number" min="-1" step="1" value="2"></label>
+                <label>D 挡按钮 <input data-gamepad-mapping="driveButton" type="number" min="-1" step="1" value="3"></label>
+                <label>R 挡按钮 <input data-gamepad-mapping="reverseButton" type="number" min="-1" step="1" value="5"></label>
+                <label>进入自动驾驶按钮 <input data-gamepad-mapping="autoEnterButton" type="number" min="-1" step="1" value="9"></label>
+                <label>退出自动驾驶按钮 <input data-gamepad-mapping="autoExitButton" type="number" min="-1" step="1" value="8"></label>
                 <label><input id="gamepad-invertX" data-gamepad-mapping="invertX" type="checkbox"> 左右轴反向</label>
                 <label><input id="gamepad-invertY" data-gamepad-mapping="invertY" type="checkbox"> 前后轴反向</label>
                 </div>
@@ -150,6 +172,7 @@
             <label><input id="gamepad-enabled" type="checkbox" disabled> 启用手柄控制（关闭键盘控制）</label>
             <p>启用后先回中并松开使能键，再按住使能键：右摇杆前后控制油门，左摇杆左右控制转向，两根摇杆可同时操作。松开使能键或回中即停止。</p>
             <p>中心死区 15%；仅横向操作时保持挡位并制动。方向冲突或前后反向需松开使能键并回中；断连、失焦、切换输入或急停后需重新启用。</p>
+            <p>挡位/模式：回中并按住 LB 使能，再按 A(0)=P、X(2)=N、Y(3)=D、RB(5)=R、Start(9)=进入自动驾驶、Back(8)=退出。每次操作后松开操作按钮和使能键再继续；编号以检测结果为准，可调整或填 -1 禁用。</p>
             <p id="gamepad-status" role="status" aria-live="polite">手柄控制未启用</p>
         </div>
         <div id="high-level-controls" class="controls command-group active">
@@ -210,6 +233,9 @@
                 keyboardToggle.disabled = !state.available;
                 keyboardToggle.checked = state.keyboardEnabled;
                 keyboardStatus.textContent = state.message;
+                if (!state.available || state.message.startsWith('已发送请求：')) {
+                    document.getElementById('vehicle-action-status').textContent = state.message;
+                }
                 gamepadToggle.disabled = !state.available || !gamepadReady;
                 gamepadToggle.checked = state.gamepadEnabled;
             },
@@ -219,6 +245,7 @@
             },
         });
         bindKeyboardInput(controlInput, window, document, keyboardToggle, gamepadToggle);
+        window.requestVehicleAction = action => controlInput.vehicleAction(action, true);
         keyboardToggle.addEventListener('change', () => {
             if (document.hidden || !document.hasFocus()) {
                 controlInput.suspend();

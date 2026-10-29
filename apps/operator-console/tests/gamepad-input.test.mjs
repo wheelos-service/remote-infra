@@ -67,12 +67,53 @@ test('inspection is read-only and exposes device, axes, button values and mappin
     assert.equal(h.input.isGamepadEnabled, false);
 });
 
+test('vehicle buttons require enable, neutral sticks and release between single requests', async t => {
+    const h = setup(t);
+    await h.arm();
+    for (const [button, action] of [[0, 'gear_park'], [2, 'gear_neutral'], [3, 'gear_drive'],
+        [5, 'gear_reverse'], [9, 'auto_enter'], [8, 'auto_exit']]) {
+        h.button(4, true);
+        h.button(button, true);
+        h.poll();
+        await settle();
+        assert.equal(h.actions().at(-1), action);
+        const count = h.sent.length;
+        h.poll(); h.tick();
+        await settle();
+        assert.equal(h.sent.length, count);
+        h.button(button, false);
+        h.button(4, false);
+        h.poll();
+    }
+});
+
+test('vehicle buttons cannot switch while moving, without enable or with conflicting buttons', async t => {
+    const h = setup(t);
+    await h.arm();
+    h.button(9, true); h.poll();
+    await settle();
+    assert.deepEqual(h.actions(), []);
+    h.button(9, false); h.poll();
+    h.button(4, true); h.button(0, true); h.button(2, true); h.poll();
+    await settle();
+    assert.deepEqual(h.actions(), []);
+    h.button(4, false); h.button(0, false); h.button(2, false); h.poll();
+    h.button(4, true); h.device.axes[3] = -1; h.poll();
+    await settle();
+    assert.equal(h.actions().at(-1), 'forward');
+    h.button(9, true); h.poll();
+    await settle();
+    assert.equal(h.actions().at(-1), 'stop');
+    assert.equal(h.actions().includes('auto_enter'), false);
+    assert.equal(h.timers.size, 0);
+});
+
 test('mapping rejects out-of-range, repeated and missing direction controls', () => {
     const device = pad();
     assert.equal(validateMapping(defaultGamepadMapping, device), '');
     for (const change of [
         {axisX: 4}, {enableButton: 20}, {emergencyButton: 4}, {leftButton: 4},
-        {axisX: 0.5}, {upButton: NaN}, {axisY: 0},
+        {axisX: 0.5}, {upButton: NaN}, {axisY: 0}, {parkButton: 4}, {autoEnterButton: 16},
         {axisX: -1, axisY: -1, upButton: -1, downButton: -1, leftButton: -1, rightButton: -1},
     ]) assert.ok(validateMapping({...defaultGamepadMapping, ...change}, device));
 });

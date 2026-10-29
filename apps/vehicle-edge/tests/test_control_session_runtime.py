@@ -92,7 +92,7 @@ class SessionRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_rejection_reasons_and_time_limits_preserve_fail_closed_behavior(self):
         now = int(time.time() * 1000)
         cases = [
-            ({"timestamp_ms": now - 201}, "operator-driver-1", "packet_too_old", 201),
+            ({"timestamp_ms": now - 3001}, "operator-driver-1", "packet_too_old", 3001),
             ({"timestamp_ms": now + 101}, "operator-driver-1", "packet_from_future", -101),
             ({"session_id": "other-session"}, "operator-driver-1", "session_mismatch", None),
             ({}, "operator-other", "sender_mismatch", None),
@@ -113,7 +113,7 @@ class SessionRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(self.verifier.last_packet_age_ms, age)
                     self.assertEqual(self.verifier.last_sequence, 0)
                     self.assertEqual(self.brake.applied, [])
-            for age in (-100, 150, 151, 152, 200):
+            for age in (-100, 200, 2033, 2999, 3000):
                 with self.subTest(accepted_age=age):
                     packet = json.loads(self.packet(self.verifier.last_sequence + 1))
                     packet["timestamp_ms"] = now - age

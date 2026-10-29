@@ -324,6 +324,35 @@ emergency braking. Motion silence still triggers the existing 300 ms watchdog.
 Emergency braking can retain the last observed valid gear when chassis data is
 stale and is not reduced by throttle/steering/normal-brake caps.
 
+Additional signed `high_level` actions are `gear_park`, `gear_neutral`,
+`gear_drive`, `gear_reverse`, `auto_enter`, and `auto_exit`. They use the existing
+session, sender identity, timestamp, sequence and signature validation, with
+canonical signing text ending in `high_level|<action>`. No new unsigned actuator
+fields are accepted. Deploy the matching operator console and vehicle agent.
+
+Explicit gear requests require fresh valid chassis feedback in
+`COMPLETE_AUTO_DRIVE`, no chassis faults or parking brake, and speed at or below
+`--cyber-shift-speed-mps`. The bridge requests the selected gear with zero
+steering/throttle and normal braking. The normal-stop watchdog repeats that
+target until a newer chassis callback confirms it, or `--cyber-shift-timeout-s`
+expires and emergency braking takes over. Motion arriving before confirmation
+continues braking. Normal stop cancels the explicit request; stop is required
+after a shift timeout before retry, as with existing direction changes.
+
+`auto_enter` requires fresh valid speed/gear feedback, stopped speed and no
+reported chassis error code/mask; it intentionally allows manual driving mode.
+It publishes the selected runtime's `ControlCommand.pad_msg.action=START`.
+`auto_exit` publishes `RESET`, including during movement or feedback staleness,
+provided an observed valid gear is available. Both request zero steering/throttle
+and normal braking while retaining observed gear. Actions are published on the
+configured control channel, using the canbus controller's embedded pad-message
+interface. Subsequent watchdog braking does not repeat START/RESET. Neither
+request changes the bridge's original motion guard: fresh feedback must report
+`COMPLETE_AUTO_DRIVE` before motion is accepted. Publication status confirms only
+middleware acceptance; use chassis `driving_mode`/`gear_location` to confirm the
+vehicle transition. An old/incompatible runtime without pad actions rejects the
+mode request. The existing lossy transport may require a manual request retry.
+
 Throttle increases and steering changes are rate-limited using elapsed monotonic
 time; idle gaps contribute at most 0.2 seconds of slew budget. Throttle reduction,
 normal stop, emergency braking, and shift-hold braking bypass the motion rise
@@ -487,7 +516,7 @@ Reasons distinguish `no_active_session`, `session_mismatch`, `sender_mismatch`,
 `invalid_envelope`, and `malformed_packet`. A positive packet age means the
 packet timestamp is behind the vehicle clock; it includes clock offset and
 transport delay, and does not alone measure network latency. A negative age
-means the browser timestamp is ahead. The default maximum packet age is 200 ms;
+means the browser timestamp is ahead. The default maximum packet age is 3000 ms;
 the future-skew limit is 100 ms. Rejected-packet metadata is diagnostic and unverified.
 No packet bodies, keys, signatures or session identifiers are included.
 Restart the vehicle process to enable these diagnostics;

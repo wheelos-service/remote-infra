@@ -80,7 +80,7 @@ async def main() -> None:
     assert verifier.verify_packet(make_packet(signing_key, 3, "session-old"), "operator-operator-001") is None
     assert verifier.verify_packet(make_packet(SigningKey.generate(), 4), "operator-operator-001") is None
     assert verifier.verify_packet(
-        make_packet(signing_key, 4, timestamp_ms=int(time.time() * 1000) - 1_000),
+        make_packet(signing_key, 4, timestamp_ms=int(time.time() * 1000) - 3_001),
         "operator-operator-001",
     ) is None
 

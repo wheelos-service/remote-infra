@@ -72,6 +72,8 @@ mode selector:
 | A / Arrow Left | Left |
 | D / Arrow Right | Right |
 | Space | Emergency stop |
+| 1 / 2 / 3 / 4 | Request P / N / D / R gear |
+| E / Q | Request entering / exiting autonomous mode |
 
 Hold a direction to send immediately and approximately every 100 ms; releasing
 it sends `stop`. Different simultaneous directions send `stop` and require all
@@ -93,6 +95,52 @@ control; reconnect to retry.
 Stop messages use the existing lossy data channel and may not be delivered on
 disconnect. The vehicle watchdog remains the fallback. Keyboard changes do not
 add physical actuation or a vehicle-side latched emergency stop.
+
+Gear and autonomous mode requests
+-------------------------------
+
+The **挡位与自动驾驶模式** panel, the new keyboard keys, and gamepad buttons
+send signed, single high-level requests through the existing Controller session.
+Keyboard requests require keyboard control to be enabled; holding a request key
+does not repeat it. A request cancels repeating movement. Clicking a panel button
+also disables keyboard/gamepad input. Original W/A/S/D, arrows, Space, joystick
+motion, normal-stop and emergency behavior are retained.
+
+| Operation | Keyboard | Default standard gamepad (hold LB/button 4) |
+| --- | --- | --- |
+| P / N / D / R | 1 / 2 / 3 / 4 | A(0) / X(2) / Y(3) / RB(5) |
+| Enter autonomous mode | E | Start(9) |
+| Exit autonomous mode | Q | Back(8) |
+
+For gamepad requests, first confirm the mapping and enable gamepad control,
+then center the sticks and release direction buttons. Hold enable and press one
+request button. Release both buttons and recenter before another request or
+movement. Multiple request buttons, displaced sticks, or a missing enable press
+cannot issue a mode/gear request. New button mappings are editable and accept -1
+to disable an operation; they cannot overlap existing controls.
+
+Use the upgraded vehicle edge agent with this frontend. Entering autonomous
+mode requires fresh valid chassis feedback, no reported chassis faults, and
+speed within the configured stopped threshold. Gear changes additionally require
+`COMPLETE_AUTO_DRIVE` and the existing chassis fault/parking-brake guards. They
+request zero throttle and normal braking until new feedback confirms the gear;
+failure to confirm within the shift timeout triggers emergency braking. Exiting
+autonomous mode requests manual mode and zero throttle with normal braking,
+using the last observed valid gear; it is allowed during movement. Mode changes
+use `ControlCommand.pad_msg` START/RESET on the existing control channel.
+
+The status reports requests, not execution. Check the **CHASSIS** gear and mode
+feedback above the panel. The existing lossy channel can drop single requests;
+retry manually if no confirmation appears. One-shot requests maintain normal
+braking after input silence while feedback is valid; session/transport loss,
+stale feedback and publication failures retain the existing emergency handling.
+The original requirement that motion must observe `COMPLETE_AUTO_DRIVE` remains.
+
+Validate in simulation: enter auto from manual and confirm feedback; request each
+gear while stopped; check rejection while moving; check an unconfirmed gear
+timeout, Q/Back exit, and held/conflicting buttons. Rebuild and deploy the entire
+frontend `dist/` and the updated vehicle edge together. Existing production
+calibration and competing-control-publisher restrictions still apply.
 
 Build and validate the frontend (Node.js 22+ recommended for the test runner):
 

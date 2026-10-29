@@ -1,4 +1,13 @@
-import type {ControlCommand} from './secure-control-sender.js';
+import type {ControlCommand, VehicleAction} from './secure-control-sender.js';
+
+export const vehicleActionKeys: Readonly<Record<string, VehicleAction>> = {
+    Digit1: 'gear_park', Digit2: 'gear_neutral', Digit3: 'gear_drive', Digit4: 'gear_reverse',
+    KeyE: 'auto_enter', KeyQ: 'auto_exit',
+};
+export const vehicleActionLabels: Record<VehicleAction, string> = {
+    gear_park: 'P 驻车挡', gear_neutral: 'N 空挡', gear_drive: 'D 前进挡', gear_reverse: 'R 倒挡',
+    auto_enter: '进入自动驾驶', auto_exit: '退出自动驾驶',
+};
 
 const directions: Record<string, string> = {
     KeyW: 'forward', ArrowUp: 'forward',
@@ -7,7 +16,7 @@ const directions: Record<string, string> = {
     KeyD: 'right', ArrowRight: 'right',
 };
 
-export const isControlKey = (code: string): boolean => code === 'Space' || code in directions;
+export const isControlKey = (code: string): boolean => code === 'Space' || code in directions || code in vehicleActionKeys;
 
 export function isEditableTarget(target: EventTarget | null): boolean {
     return Boolean((target as Element | null)?.closest?.(
@@ -30,6 +39,7 @@ export class ControlInput {
     private gamepadActive = false;
     private gamepadSampleAt = 0;
     private pressed = new Set<string>();
+    private actionPressed = new Set<string>();
     private blocked = false;
     private pointerActive = false;
     private timer?: ReturnType<typeof setInterval>;
@@ -97,6 +107,7 @@ export class ControlInput {
     setAvailable(available: boolean): void {
         this.clearMovement();
         this.pressed.clear();
+        this.actionPressed.clear();
         this.blocked = false;
         this.keyboardEnabled = false;
         this.gamepadEnabled = false;
@@ -108,6 +119,7 @@ export class ControlInput {
         if (!this.available) return;
         this.clearMovement();
         this.pressed.clear();
+        this.actionPressed.clear();
         this.blocked = false;
         this.keyboardEnabled = enabled;
         this.gamepadEnabled = false;
@@ -121,6 +133,7 @@ export class ControlInput {
             ? this.pending : undefined;
         this.clearMovement();
         this.pressed.clear();
+        this.actionPressed.clear();
         this.blocked = false;
         this.keyboardEnabled = false;
         this.gamepadEnabled = false;
@@ -158,7 +171,13 @@ export class ControlInput {
     }
 
     keyDown(code: string, repeat = false): void {
-        if (!this.available || !this.keyboardEnabled || !isControlKey(code) || repeat || this.pressed.has(code)) return;
+        if (!this.available || !this.keyboardEnabled || !isControlKey(code) || repeat || this.pressed.has(code)
+            || this.actionPressed.has(code)) return;
+        if (code in vehicleActionKeys) {
+            this.vehicleAction(vehicleActionKeys[code]);
+            this.actionPressed.add(code);
+            return;
+        }
         this.pressed.add(code);
         if (code === 'Space') {
             this.emergencyStop();
@@ -177,6 +196,10 @@ export class ControlInput {
     }
 
     keyUp(code: string): void {
+        if (code in vehicleActionKeys) {
+            this.actionPressed.delete(code);
+            return;
+        }
         if (!this.pressed.delete(code)) return;
         if (this.blocked) {
             if (this.pressed.size === 0) {
@@ -201,6 +224,19 @@ export class ControlInput {
         this.blocked = false;
         this.start(command);
         this.pointerActive = true;
+    }
+
+    vehicleAction(action: VehicleAction, pointer = false): void {
+        if (!this.available || !(action in vehicleActionLabels)) return;
+        this.clearMovement();
+        this.pressed.clear();
+        this.blocked = false;
+        if (pointer) {
+            this.keyboardEnabled = false;
+            this.gamepadEnabled = false;
+        }
+        this.dispatch({mode: 'high_level', action});
+        this.report(`已发送请求：${vehicleActionLabels[action]}；以底盘挡位/模式反馈为准`);
     }
 
     endPointer(): void {
