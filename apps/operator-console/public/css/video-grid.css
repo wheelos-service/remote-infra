@@ -135,3 +135,94 @@
     text-shadow: 1px 1px 2px black;
     pointer-events: none;
 }
+
+/* Monitoring workspace */
+:root { color-scheme: dark; font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; background: #10151d; color: #e4eaf2; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 20px 24px; }
+button, input, select { font: inherit; }
+button, select, input[type="text"] { border: 1px solid #39485c; border-radius: 7px; padding: 9px 12px; background: #202d3e; color: inherit; }
+button { cursor: pointer; font-weight: 600; }
+button:hover:enabled { background: #30435c; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid #67b5ff; outline-offset: 3px; }
+[hidden] { display: none !important; }
+.header { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #2a3747; padding-bottom: 14px; }
+h2 { font-size: 21px; margin: 0; }
+h3 { margin: 0 0 10px; font-size: 16px; }
+.dashboard { display: none; flex-direction: column; gap: 16px; margin-top: 18px; }
+.connection-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.workspace { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+.monitor-panel { min-width: 0; }
+.operation-panel { display: flex; flex-direction: column; position: sticky; top: 16px; max-height: calc(100dvh - 180px); overflow: hidden; border: 1px solid #2a3747; border-radius: 12px; padding: 16px; background: #16202c; }
+.control-access { flex-shrink: 0; }
+.control-access small, .emergency-bar small { display: block; color: #a9b7c9; margin-top: 10px; line-height: 1.6; }
+.btn-connect { background: #2168c1; border-color: #3789ec; }
+.btn-brake { background: #b83242; border-color: #ef7180; color: white; }
+.btn-brake:hover:enabled { background: #d13c4e; }
+#video-container, #video-container.single-camera, #video-container.center-focused { width: 100%; }
+#video-container { aspect-ratio: 16 / 7; box-shadow: none; border-color: #2a3747; }
+.camera-view-controls { width: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+#camera-view-status { flex-basis: 100%; }
+.hud-overlay { top: 40px; left: 12px; color: #e4eaf2; background: #10151dcc; padding: 5px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; }
+.telemetry-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.telemetry-summary > div { background: #192432; padding: 14px; border: 1px solid #2a3747; border-radius: 8px; }
+.telemetry-summary span { display: block; font-size: 12px; color: #a9b7c9; margin-bottom: 8px; }
+.telemetry-summary strong { display: block; font-size: clamp(14px, 1.5vw, 22px); overflow-wrap: anywhere; }
+.status-line { font-size: 13px; color: #bed0e7; line-height: 1.6; }
+.safety-line { color: #ffbd72; white-space: pre-wrap; line-height: 1.6; }
+.safety-line:empty { display: none; }
+.diagnostics { border-top: 1px solid #2a3747; padding-top: 12px; }
+summary { cursor: pointer; color: #afc2dc; font-size: 13px; line-height: 1.6; }
+@font-face {
+    font-family: 'Diagnostic Latin';
+    src: local('Cascadia Mono'), local('Consolas'), local('Menlo'), local('DejaVu Sans Mono'), local('Liberation Mono');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+    unicode-range: U+0020-007E;
+}
+.vehicle-state {
+    font-family: 'Diagnostic Latin', 'Cascadia Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', 'Noto Sans Mono CJK SC', 'Microsoft YaHei', monospace;
+    font-size: 14px;
+    font-weight: 400;
+    font-variant-numeric: lining-nums tabular-nums slashed-zero;
+    font-variant-ligatures: none;
+    line-height: 1.85;
+    color: #d5e0ef;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    background: #0c1119;
+    padding: 16px;
+    border-radius: 8px;
+}
+.controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+.controls .controls { margin: 0; width: 100%; }
+.controls p { margin: 0; font-size: 12px; line-height: 1.7; color: #a9b7c9; }
+.pointer-controls, .keyboard-controls, .gamepad-controls { flex-direction: column; align-items: stretch; padding-top: 12px; border-top: 1px solid #2a3747; }
+.pointer-controls .action-buttons { display: grid; grid-template-columns: 1fr 1fr; }
+#driving-controls { margin-top: 16px; overflow-y: auto; min-height: 0; scrollbar-gutter: stable; padding-right: 4px; }
+.input-choice { display: flex; justify-content: space-between; align-items: center; }
+.gamepad-controls pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.gamepad-controls select { max-width: 100%; }
+.gamepad-mapping { display: grid; gap: 8px; margin: 10px 0; }
+.gamepad-mapping label { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.gamepad-mapping input[type="number"] { width: 64px; }
+#gamepad-validation, #keyboard-status, #gamepad-status { color: #f8c97b; }
+.command-group { display: none; }
+.command-group.active { display: grid; grid-template-columns: 1fr 1fr; }
+.command-mode { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.emergency-bar { flex-shrink: 0; background: #16202c; padding: 14px 0 6px; border-top: 1px solid #2a3747; margin-top: 14px; }
+.emergency-bar button { width: 100%; padding: 14px; }
+.alert-box { display: none; padding: 10px; background: #25364d; border-radius: 7px; margin-bottom: 12px; }
+@media (min-width: 1500px) { .workspace { grid-template-columns: minmax(0, 1fr) 380px; } }
+@media (max-width: 900px) {
+    body { padding: 14px; }
+    .workspace { grid-template-columns: minmax(0, 1fr); }
+    .operation-panel { position: static; max-height: none; overflow: visible; }
+    .operation-panel { padding-bottom: 110px; }
+    #driving-controls { overflow: visible; }
+    .emergency-bar { position: fixed; bottom: 0; left: 14px; right: 14px; z-index: 10; padding: 12px 16px; border-radius: 8px 8px 0 0; }
+    .header { flex-wrap: wrap; }
+    .telemetry-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -130,3 +130,55 @@ test('camera view receives only validated fresh gear and is notified of expiry a
     assert.equal(gears.at(-1), undefined);
     receiver.close(); assert.equal(gears.at(-1), undefined);
 });
+
+test('summary shows actual chassis values and clears expired and disconnected feedback', t => {
+    let now = 100;
+    t.mock.method(performance, 'now', () => now);
+    t.mock.timers.enable({apis: ['setInterval']});
+    const fields = new Map();
+    const getElementById = id => {
+        if (!fields.has(id)) fields.set(id, {textContent: ''});
+        return fields.get(id);
+    };
+    const receiver = new VehicleStateMonitor({textContent: ''}, 'car-1', undefined, {getElementById});
+    t.after(() => receiver.close());
+    const receive = state => receiver.receive(new TextEncoder().encode(JSON.stringify(state)),
+        {identity: 'vehicle-car-1'}, 'vehicle.state');
+    assert.equal(getElementById('state-speed').textContent, '—');
+    const live = packet();
+    live.chassis.message.battery_soc_percentage = 75;
+    assert.ok(receive(live));
+    assert.equal(getElementById('state-speed').textContent, '9.0 km/h');
+    assert.equal(getElementById('state-gear').textContent, 'D 前进');
+    assert.equal(getElementById('state-mode').textContent, '自动驾驶');
+    assert.equal(getElementById('state-battery').textContent, '75 %');
+    assert.match(getElementById('state-health').textContent, /不代表车辆已执行/);
+    now += 1100;
+    t.mock.timers.tick(250);
+    for (const field of ['speed', 'gear', 'mode', 'battery']) {
+        assert.equal(getElementById(`state-${field}`).textContent, '—');
+    }
+    assert.match(getElementById('state-health').textContent, /已过期/);
+    receiver.close();
+    assert.equal(getElementById('state-health').textContent, '未连接');
+});
+
+test('summary keeps safety faults visible and does not promote stale source feedback', t => {
+    const fields = new Map();
+    const getElementById = id => {
+        if (!fields.has(id)) fields.set(id, {textContent: ''});
+        return fields.get(id);
+    };
+    const receiver = new VehicleStateMonitor({textContent: ''}, 'car-1', undefined, {getElementById});
+    t.after(() => receiver.close());
+    const state = packet({
+        chassis: {stale: true, age_ms: 0, message: {speed_mps: 10, gear_location: 'GEAR_DRIVE', error_code: 'CHASSIS_ERROR'}},
+        control: {fault: '<img src=x>', safety_reason: 'watchdog'},
+    });
+    assert.ok(receiver.receive(new TextEncoder().encode(JSON.stringify(state)), {identity: 'vehicle-car-1'}, 'vehicle.state'));
+    assert.equal(getElementById('state-speed').textContent, '—');
+    assert.equal(getElementById('state-gear').textContent, '—');
+    assert.match(getElementById('state-health').textContent, /底盘反馈已过期/);
+    assert.match(getElementById('state-safety').textContent, /CHASSIS_ERROR.*watchdog.*<img src=x>/);
+    assert.equal(getElementById('state-safety').innerHTML, undefined);
+});

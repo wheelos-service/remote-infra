@@ -24,7 +24,7 @@ export class VehicleStateMonitor {
     private readonly timer: ReturnType<typeof setInterval>;
 
     constructor(private readonly element: HTMLElement, private readonly vehicleId: string,
-        private readonly onGear?: (gear?: string) => void) {
+        private readonly onGear?: (gear?: string) => void, private readonly summary?: Pick<Document, 'getElementById'>) {
         this.timer = setInterval(() => this.render(), 250);
         this.render();
     }
@@ -83,8 +83,20 @@ export class VehicleStateMonitor {
         return true;
     }
 
+    private setSummary(id: string, text: string): void {
+        const element = this.summary?.getElementById(id);
+        if (element) element.textContent = text;
+    }
+
+    private clearSummary(message: string): void {
+        for (const field of ['speed', 'gear', 'mode', 'battery']) this.setSummary(`state-${field}`, '—');
+        this.setSummary('state-health', message);
+        this.setSummary('state-safety', '');
+    }
+
     private render(): void {
         if (!this.packet) {
+            this.clearSummary(this.vehiclePresent === false ? '目标车辆未加入，等待车辆上线' : '等待车辆状态');
             this.onGear?.(undefined);
             this.element.textContent = [
                 'MONITOR: WAITING FOR VEHICLE STATE',
@@ -109,6 +121,26 @@ export class VehicleStateMonitor {
         const control = record(this.packet.control);
         this.onGear?.(freshness(chassis) === 'LIVE' && typeof vehicle.gear_location === 'string'
             ? vehicle.gear_location : undefined);
+        const chassisLive = freshness(chassis) === 'LIVE';
+        const translations: Record<string, string> = {
+            GEAR_PARKING: 'P 驻车', GEAR_NEUTRAL: 'N 空挡', GEAR_DRIVE: 'D 前进',
+            GEAR_REVERSE: 'R 倒车', GEAR_LOW: '低速挡', GEAR_NONE: '无挡位',
+            COMPLETE_AUTO_DRIVE: '自动驾驶', COMPLETE_MANUAL: '手动驾驶',
+            AUTO_STEER_ONLY: '自动转向', AUTO_SPEED_ONLY: '自动纵向', EMERGENCY_MODE: '紧急模式',
+        };
+        const display = (value: unknown) => typeof value === 'string' ? translations[value] || value : '—';
+        this.setSummary('state-speed', chassisLive ? `${number(typeof vehicle.speed_mps === 'number' ? vehicle.speed_mps * 3.6 : undefined, 1)} km/h` : '—');
+        this.setSummary('state-gear', chassisLive ? display(vehicle.gear_location) : '—');
+        this.setSummary('state-mode', chassisLive ? display(vehicle.driving_mode) : '—');
+        this.setSummary('state-battery', chassisLive ? `${number(vehicle.battery_soc_percentage, 0)} %` : '—');
+        this.setSummary('state-health', elapsed > 1000 ? '车辆状态已过期，请勿依据旧数据操作'
+            : !chassisLive ? '底盘反馈已过期或不可用' : '底盘反馈实时 · 控制请求不代表车辆已执行');
+        const warnings: string[] = [];
+        if (vehicle.error_code && vehicle.error_code !== 'NO_ERROR') warnings.push(`底盘故障：${label(vehicle.error_code)}`);
+        if (typeof vehicle.chassis_error_mask === 'number' && vehicle.chassis_error_mask !== 0) warnings.push(`底盘故障掩码：${vehicle.chassis_error_mask}`);
+        if (control.safety_reason) warnings.push(`安全提示：${label(control.safety_reason)}`);
+        if (control.fault) warnings.push(`控制发布故障：${label(control.fault)}`);
+        this.setSummary('state-safety', warnings.join('；'));
         this.element.textContent = [
             `MONITOR: ${elapsed > 1000 ? 'STALE' : 'LIVE'}`,
             `POSITION [${freshness(localization)}] ENU(m): ${number(position.x)}, ${number(position.y)}, ${number(position.z)} | heading(rad): ${number(pose.heading)}`,
@@ -126,5 +158,6 @@ export class VehicleStateMonitor {
         this.retiredStreams.clear();
         this.onGear?.(undefined);
         this.element.textContent = 'MONITOR: OFFLINE';
+        this.clearSummary('未连接');
     }
 }

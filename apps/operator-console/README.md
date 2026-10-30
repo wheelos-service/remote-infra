@@ -22,7 +22,7 @@ packets, `vehicle.state` packet count and the last rejection reason. This helps
 distinguish missing publication/delivery from rejected identity, topic or envelope.
 Rebuild and hard-refresh the served `dist` page to load these diagnostics;
 a page showing only the waiting heading is an older build or cached module.
-RTC reconnect releases control; disconnect/connect to explicitly reacquire it.
+RTC reconnect releases control; click **申请控制权** to explicitly reacquire it.
 
 Run `npm test` to build and exercise monitoring and command-signing behavior
 with Node's built-in test runner (Node 22 or newer).
@@ -57,11 +57,42 @@ Query parameters
 The operator application must use authorization code + PKCE with redirect URI
 `http://127.0.0.1:8000/` for this local static-server test. Do not put a client secret in the URL.
 
+Monitoring and control workflow
+-------------------------------
+
+**连接监看** always requests Observer access, including URLs with the legacy
+`access=controller` parameter. The page shows video and actual chassis feedback
+without acquiring a control lease. Click **申请控制权** to acquire a Controller
+session; **释放控制权** returns to Observer access. Each change reconnects RTC
+with the appropriate token, so video briefly interrupts and input is disabled.
+If acquiring control fails, the page disconnects; click **连接监看** to resume
+observation. Vehicle selection is locked until disconnection.
+
+The desktop workspace places video and speed (km/h), actual gear, driving mode
+and battery beside the operation panel. Expired chassis values are replaced by
+placeholders. Safety reasons and publication faults remain visible outside the
+collapsed **诊断详情**, which retains raw coordinates, actuator values, packet
+counters and session/publication fields. Feedback describes middleware
+publication and chassis observations, not actuator acknowledgement.
+
+Select **手柄 / 屏幕按钮** to show one input panel. **手柄** is selected by
+default, but is not automatically enabled. Keyboard selection and its panel are
+hidden. Changing the selection stops movement and disarms input. Gamepad mapping
+confirmation and explicit enabling are still required. Raw axes/buttons and editable
+mappings are under the gamepad settings. In **屏幕按钮**, the mouse high/low-level
+selector appears first, followed by movement, gear and driving-mode buttons in
+one compact operation area with shared instructions and request status; gamepad gear/mode bindings remain available in
+**手柄**. The emergency request remains visible in the operation panel
+and is enabled only while control is available. View switching, stale-video
+covers, loss-of-focus handling and reconnect disarming retain their behavior.
+
 Keyboard control
 ----------------
 
-After connecting as a Controller, check **启用键盘控制**. The checkbox is
-disabled for Observers and until the control connection is ready. Keyboard input
+The keyboard implementation is retained for development and tests, but its
+selector option and panel are hidden in the current UI. The following describes
+the retained behavior when explicitly enabled during development. The checkbox
+is disabled for Observers and until the control connection is ready. Keyboard input
 always sends the existing high-level actions, independently of the mouse control
 mode selector:
 
@@ -87,7 +118,7 @@ field, changing the command mode, or disabling the checkbox stops motion and
 disarms keyboard input. Re-enable it explicitly after returning. A pointer press
 on a direction button takes ownership and disarms the keyboard; keyboard and
 pointer share one sending scheduler. Pointer release/cancellation stops motion,
-including when released outside the original button. RTC reconnection releases the control session and disables input; disconnect/connect
+including when released outside the original button. RTC reconnection releases the control session and disables input; click **申请控制权**
 to reacquire control, then explicitly enable keyboard or gamepad control again.
 RTC disconnect, a command send failure, or lease renewal failure also disables
 control; reconnect to retry.
@@ -158,7 +189,7 @@ should resume a held direction without explicit rearming/new input.
 Gamepad detection and proportional control
 ------------------------------------------
 
-Use HTTPS or localhost and press a controller button to allow Gamepad API
+Select **手柄** as the input method. Use HTTPS or localhost and press a controller button to allow Gamepad API
 inspection. Select the intended device, check axes/buttons, confirm the mapping,
 then enable **手柄识别与比例控制**. Defaults: left-stick horizontal axis 0 for steering, right-stick vertical axis 3
 for forward/reverse throttle, LB/button 4

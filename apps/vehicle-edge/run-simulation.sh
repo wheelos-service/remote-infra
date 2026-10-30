@@ -13,11 +13,11 @@ exec bash ./run-apollo.sh run \
   --camera-layout six \
   --camera-width 1920 --camera-height 1080 --camera-fps 30 \
   --video-width 640 --video-height 360 \
-  --cyber-max-forward-throttle-pct 20 \
-  --cyber-max-reverse-throttle-pct 10 \
+  --cyber-max-forward-throttle-pct 80 \
+  --cyber-max-reverse-throttle-pct 40 \
   --cyber-max-steering-pct 40 \
-  --cyber-max-speed-mps 4 \
-  --cyber-stop-brake-pct 30 \
+  --cyber-max-speed-mps 10 \
+  --cyber-stop-brake-pct 10 \
   --cyber-emergency-brake-pct 100 \
   --cyber-chassis-timeout-s 0.5 \
   --cyber-shift-speed-mps 0.05 \

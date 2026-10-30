@@ -9,13 +9,18 @@ test('console wires topics, vehicle destination, monitoring and reconnect contro
     const elements = new Map();
     const element = id => {
         if (!elements.has(id)) elements.set(id, {
-            value: id === 'target-vehicle' ? 'car-1' : '',
+            value: id === 'target-vehicle' ? 'car-1' : id === 'input-device' ? 'gamepad' : '',
             style: {}, disabled: false, textContent: '', innerHTML: '',
-            addEventListener() {}, blur() {}, replaceChildren() {}, add() {},
+            handlers: new Map(),
+            addEventListener(name, callback) { this.handlers.set(name, callback); },
+            blur() {}, replaceChildren() {}, add() {},
         });
         return elements.get(id);
     };
-    const rooms = [], senders = [], monitors = [], intervals = new Map();
+    const rooms = [], senders = [], monitors = [], requests = [], intervals = new Map();
+    let rejectAcquire = false;
+    const alerts = [];
+    const panels = ['pointer', 'keyboard', 'gamepad'].map(inputPanel => ({dataset: {inputPanel}, hidden: inputPanel !== 'gamepad'}));
     let intervalId = 0;
     t.mock.method(globalThis, 'setInterval', (callback, delay) => {
         intervals.set(++intervalId, {callback, delay}); return intervalId;
@@ -39,7 +44,10 @@ test('console wires topics, vehicle destination, monitoring and reconnect contro
         released = false;
         constructor() { senders.push(this); }
         async createKeyPair() {}
-        async acquireSession() { return {token: 'test-room-token'}; }
+        async acquireSession() {
+            if (rejectAcquire) throw new Error('control conflict');
+            return {token: 'test-room-token'};
+        }
         setPublishData(publish) { this.publish = publish; }
         startRenewal() {}
         async release() { this.released = true; }
@@ -56,15 +64,16 @@ test('console wires topics, vehicle destination, monitoring and reconnect contro
     const views = [], gears = [], videos = [];
     const handlers = new Map();
     const context = vm.createContext({
-        URLSearchParams, TextEncoder, console, setTimeout, clearTimeout,
+        URLSearchParams, TextEncoder, console: {info() {}, error() {}, warn() {}}, setTimeout, clearTimeout,
+        fetch: async url => { requests.push(url); return {ok: true, json: async () => ({token: 'observer-token'})}; },
         setInterval: callback => { intervals.set(++intervalId, callback); return intervalId; },
         clearInterval: id => intervals.delete(id),
-        document: {getElementById: element, querySelectorAll: () => [],
+        document: {getElementById: element, querySelectorAll: selector => selector === '[data-input-panel]' ? panels : [],
             addEventListener() {}, hasFocus: () => true, hidden: false},
         navigator: {getGamepads: () => []}, Option: class {},
         ControlInput, bindKeyboardInput, GamepadInput, bindGamepadInput,
         window: {
-            location: {search: '?dev=1', origin: 'http://console', pathname: '/'},
+            location: {search: '?dev=1&access=controller', origin: 'http://console', pathname: '/'},
             addEventListener: (name, callback) => handlers.set(name, callback),
         },
         SecureControlSender: Sender, VehicleStateMonitor: Monitor,
@@ -76,15 +85,29 @@ test('console wires topics, vehicle destination, monitoring and reconnect contro
             DataReceived: 'dataReceived',
             ParticipantConnected: 'participantConnected', ParticipantDisconnected: 'participantDisconnected',
         }},
-        alert: message => { throw new Error(message); },
+        alert: message => alerts.push(message),
     });
     const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
     const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
         .replace(/^\s*import .+ from .+;$/gm, '');
     vm.runInContext(script, context);
     vm.runInContext("accessToken = 'test-token'", context);
+    await context.window.startTeleop('controller');
+    assert.equal(senders.length, 0, 'control requires an existing monitoring connection');
     await context.window.startTeleop();
-    const room = rooms[0], sender = senders[0], monitor = monitors[0];
+    assert.equal(senders.length, 0, 'default connection is observer even with legacy controller URL');
+    assert.match(requests[0], /access=observer/);
+    assert.equal(element('acquire-control').disabled, false);
+    assert.equal(element('target-vehicle').disabled, true);
+    assert.equal(element('driving-controls').hidden, true);
+    await Promise.all([context.window.startTeleop('controller'), context.window.startTeleop('controller')]);
+    assert.equal(senders.length, 1, 'duplicate acquisition is ignored while connecting');
+    assert.equal(monitors[0].closed, true);
+    assert.equal(element('driving-controls').hidden, false);
+    assert.equal(element('release-control').disabled, false);
+    assert.equal(element('keyboard-enabled').checked, false);
+    assert.match(element('hud').textContent, /已取得控制权/);
+    const room = rooms[1], sender = senders[0], monitor = monitors[1];
     assert.equal(monitor.vehiclePresent, false);
     room.remoteParticipants.set('vehicle', {identity: 'vehicle-car-1'});
     room.handlers.get('participantConnected')();
@@ -130,6 +153,13 @@ test('console wires topics, vehicle destination, monitoring and reconnect contro
     context.window.requestVehicleAction('gear_neutral');
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(sender.commands.at(-1).action, 'gear_neutral');
+    vm.runInContext("controlInput.setKeyboardEnabled(true); controlInput.keyDown('KeyW')", context);
+    element('input-device').value = 'pointer';
+    element('input-device').handlers.get('change')({target: element('input-device')});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sender.commands.at(-1).action, 'stop');
+    assert.equal(element('keyboard-enabled').checked, false);
+    assert.deepEqual(panels.map(panel => panel.hidden), [false, true, true]);
     context.window.beginHighLevel('forward', pointer);
     await new Promise(resolve => setImmediate(resolve));
     room.handlers.get('reconnecting')();
@@ -137,13 +167,32 @@ test('console wires topics, vehicle destination, monitoring and reconnect contro
     assert.equal([...intervals.values()].filter(timer => timer.delay === 100).length, 0);
     assert.equal(element('keyboard-enabled').disabled, true);
     assert.equal(element('gamepad-enabled').disabled, true);
+    assert.equal(element('acquire-control').disabled, true);
     room.handlers.get('reconnected')();
-    assert.match(element('hud').textContent, /reacquire control/);
+    assert.match(element('hud').textContent, /重新申请控制权/);
+    assert.equal(element('acquire-control').disabled, false);
     const count = sender.commands.length;
     vm.runInContext("controlInput.setKeyboardEnabled(true); controlInput.keyDown('KeyW')", context);
     context.window.requestVehicleAction('auto_enter');
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(sender.commands.length, count);
+    await context.window.startTeleop('controller');
+    const secondSender = senders[1];
+    assert.equal(element('keyboard-enabled').checked, false);
+    await context.window.startTeleop('observer');
+    assert.equal(secondSender.released, true);
+    assert.equal(element('driving-controls').hidden, true);
+    assert.equal(element('keyboard-enabled').disabled, true);
+    assert.equal(element('gamepad-enabled').disabled, true);
+    assert.equal(senders.length, 2, 'release returns to observer without creating a sender');
+    rejectAcquire = true;
+    await context.window.startTeleop('controller');
+    assert.equal(senders[2].released, true, 'failed acquisition cleans up the sender');
+    assert.equal(element('driving-controls').hidden, true);
+    assert.equal(element('acquire-control').disabled, true);
+    assert.equal(element('connect-btn').disabled, false);
+    assert.equal(element('target-vehicle').disabled, false);
+    assert.match(alerts.at(-1), /control conflict/);
     await context.window.stopTeleop();
     assert.equal(monitor.closed, true);
 });

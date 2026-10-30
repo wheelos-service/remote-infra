@@ -28,7 +28,7 @@ class ActiveControlSession:
 
 
 class SessionCommandVerifier:
-    def __init__(self, gateway_url: str, vehicle_id: str, auth_token: str, max_age_ms: int = 3000, max_future_skew_ms: int = 100) -> None:
+    def __init__(self, gateway_url: str, vehicle_id: str, auth_token: str, max_age_ms: int = 100, max_future_skew_ms: int = 100) -> None:
         self.gateway_url = gateway_url.rstrip("/")
         self.vehicle_id = vehicle_id
         self.auth_token = auth_token
@@ -243,9 +243,10 @@ class SessionVehicleRuntime:
         now = time.monotonic()
         if kind != self._last_control_log_kind or now - self._last_control_log_at >= 1:
             logging.info(
-                "[CONTROL_ACCEPT] seq=%s mode=%s action=%s steering=%.3f throttle=%.3f "
+                "[CONTROL_ACCEPT] seq=%s packet_age_ms=%s mode=%s action=%s steering=%.3f throttle=%.3f "
                 "brake=%.3f direction=%s brake_mode=%s normalized=true",
-                sequence, original.get("mode", "legacy"), original.get("action", "analog"),
+                sequence, self.verifier.last_packet_age_ms,
+                original.get("mode", "legacy"), original.get("action", "analog"),
                 command["steering"], command["throttle"], command["brake"],
                 command["direction"], command.get("brake_mode", "normal"),
             )

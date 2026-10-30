@@ -501,7 +501,8 @@ Camera open failures are independent of state publication. For simulation
 without cameras, append `--camera-layout off` to `./run-simulation.sh`.
 
 Default INFO logging prints `[CONTROL_ACCEPT]` after session/signature validation:
-sequence, command mode/action, normalized steering/throttle/brake and direction.
+sequence, `packet_age_ms` at validation, command mode/action, normalized
+steering/throttle/brake and direction.
 `[CYBER_TX]` is emitted only after a successful Cyber writer call and reports the
 control topic, publication sequence, gear enum number, steering/throttle/brake
 percentages after scaling and rate limits. This is middleware acceptance, not
@@ -516,7 +517,7 @@ Reasons distinguish `no_active_session`, `session_mismatch`, `sender_mismatch`,
 `invalid_envelope`, and `malformed_packet`. A positive packet age means the
 packet timestamp is behind the vehicle clock; it includes clock offset and
 transport delay, and does not alone measure network latency. A negative age
-means the browser timestamp is ahead. The default maximum packet age is 3000 ms;
+means the browser timestamp is ahead. The default maximum packet age is 100 ms;
 the future-skew limit is 100 ms. Rejected-packet metadata is diagnostic and unverified.
 No packet bodies, keys, signatures or session identifiers are included.
 Restart the vehicle process to enable these diagnostics;
