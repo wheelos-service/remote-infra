@@ -304,3 +304,49 @@ Room/token/视频存在均不代表驾驶授权；断网或凭证恢复不能自
    执行器及物理交接台架证据；生产控制开关仍关闭。
 3. 保留身份安全轮换/恢复演练、通知升级与检索工作流、地理投影/完整回放、
    共享数据库扩展及生产升级/回滚验收。当前提供诊断、导出与备份流程，不自动清库。
+
+## cyber-apollo-base 合并落地
+
+以 `afb6320` 保存当前 React/Go/C++ SDK 和运营数据基线，再合入
+`origin/cyber-apollo-base` 的 `a996f89`。不替换 C++ 主实现，不引入 Python
+到 SDK 安装包；不提交旧 `frontend/dist`。用户的 `docs/todo.md` 不在本次提交范围。
+
+已落地：
+
+- React 经纯状态机适配复用键盘、按住按钮、标准手柄（映射确认、LB 使能及回中）
+  和前后视角选择；不引入旧 v1 sender。严格归一化输入转 v2 整数，
+  拒绝非有限/越界/同时油门制动，挡位/模式不降级。
+- 失焦/隐藏释放，卸载清理键鼠/手柄监听及定时器；单车控制锁覆盖 pending，
+  目录暂失不卸载仍占有控制的面板。离开/登出提示覆盖模拟控制会话。
+- 前后各三路、单前视兼容、手动覆盖、中心放大、真实解码帧过期提示；
+  自动方向意图不会被旧挡位反转。目录挡位仅作新鲜性受限的辅助显示。
+  仅挂接可见组，保留 adaptiveStream；不承诺隐藏画面即停止车端上行。
+- Gateway token 两侧测试均保留。旧 v1 控制台遇 `202 PENDING` 或丢失释放响应
+  显式阻止再次获取控制，不把 middleware 写成功当物理 ACK。
+  Python 启动示例改为 loopback/只监看，无远端测试身份或默认 Cyber 控制写入。
+- 当前架构及旧参考边界同步至前端、SDK、Python/旧控制台和架构/测试文档。
+
+验证（软件模拟；不是实车验收）：
+
+- `cd frontend && npm test`：56/56；`npm run build`：类型检查和生产构建通过。
+- `cd apps/operator-console && npm test`：69/69，使用现有 frontend TypeScript
+  工具链；含 pending/丢失释放响应与监听器卸载回归。
+- Gateway `go test ./...` 及
+  `go test -race ./internal/gateway -run "TestControl|TestVehicleToken|TestViewing" -count=1`
+  在 `golang:1.24` 容器通过。
+- `PYTHONPATH=apps/vehicle-edge/src <隔离环境>/bin/python -m pytest -q apps/vehicle-edge/tests`：
+  76 通过、26 subtests 通过、1 native Cyber 用例跳过；缺 OpenCV 后仅在隔离环境安装。
+- `ctest --test-dir apps/vehicle-edge-cpp/build --output-on-failure`：7/7 通过，
+  含包独立交付；前端 WebCrypto 到 C++ Ed25519 向量通过。
+- `python3 tests/control-chain.py`：实际 Gateway/LiveKit/C++ IPC 链路通过，
+  包括共享输入转换的前进/转向、倒车、停止、重放/篡改拒绝、看门狗、
+  模拟权威交接和单车切换。首次运行遇反馈超时，补充最后反馈诊断并使篡改包
+  时间戳在发送时保持新鲜，随后链路通过；未放宽命令/看门狗时限。
+- `bash tests/data-chain.sh`：实际 C++ diagnostics/health/events/tasks ->
+  Gateway HTTP -> 前端严格解析/导出回归通过。
+- shell 语法、C++ clang-format、Git whitespace/conflict 检查通过。
+
+未改变前述生产门槛：v1 无当前交接确认、Python 无当前观看需求调度，
+C++ 不因本次合并自动具备真实六相机来源、挡位/模式仲裁或物理控制资格。
+`CONTROL_HANDOVER_ACK_ENABLED=false` 和默认关闭的模拟车辆白名单保持不变。
+未部署、推送或连接实车。

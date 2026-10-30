@@ -1,9 +1,16 @@
+---
+name: review
+description: Review repository code, refactoring, and cross-component behavior changes for regressions, security boundaries, deployment contracts, and test gaps.
+---
+
 # Review
 
 ## When
+
 Read this file when performing code review, refactoring, or assessing cross-component behavior changes.
 
 ## Rules
+
 - Check behavior regressions, security boundaries, error handling, concurrency/lease semantics, and test gaps before style issues.
 - Report reproducible findings by severity with the file path and concrete impact.
 - Verify identity, scopes, Vehicle ACLs, control sessions, signatures, replay protection, token TTLs, and auditing.
@@ -11,11 +18,13 @@ Read this file when performing code review, refactoring, or assessing cross-comp
 - Refactoring must preserve existing APIs, configuration, and deployment contracts unless the requirement explicitly changes them.
 
 ## Do NOTs
+
 - Do not treat code that looks reasonable as proof of security or protocol correctness.
 - Do not bury real risks under formatting, naming preferences, or unrelated refactoring.
 - Do not ignore missing tests, stale documentation, or inconsistent production deployment configuration.
 
 ## Sources (SSOT)
+
 - Security requirements: `docs/spec.md` and `docs/operations.md`
 - Architecture boundaries: `docs/architecture.md`
 - Deployment configuration: `docker-compose.yml`, `docker-compose.no-domain.yml`, `infra/local-dev/Caddyfile`

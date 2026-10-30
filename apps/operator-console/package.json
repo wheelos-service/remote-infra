@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p . && cp public/index.html dist/index.html && mkdir -p dist/css && cp public/css/video-grid.css dist/css/video-grid.css",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "watch": "tsc -p . -w"
   },
   "devDependencies": {

@@ -6,7 +6,7 @@ export const controlCommandSchema = z.object({
   steering: integer.min(-1000).max(1000),
   throttle: integer.min(0).max(1000),
   brake: integer.min(0).max(1000),
-  direction: integer.min(-1).max(1),
+  direction: z.union([z.literal(-1), z.literal(0), z.literal(1)]),
 }).strict().refine((value) => !(value.throttle && value.brake), 'Conflicting pedals')
 export type ControlCommand = z.infer<typeof controlCommandSchema>
 export const neutralCommand: ControlCommand = { steering: 0, throttle: 0, brake: 0, direction: 0 }

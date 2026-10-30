@@ -50,6 +50,40 @@ class FakeParticipant:
 
 
 class LiveKitVideoPublisherTest(unittest.IsolatedAsyncioTestCase):
+    async def test_output_dimensions_determine_source_and_bitrate(self):
+        participant = FakeParticipant()
+        publisher = LiveKitVideoPublisher(FakeRTC, participant)
+        camera = FakeCamera()
+        formats = []
+
+        async def hold_camera(source, active_camera, capture_format, video_format):
+            formats.append((capture_format, video_format))
+            try:
+                await asyncio.Event().wait()
+            finally:
+                active_camera.release()
+
+        publisher._publish_frames = hold_camera
+        with patch("vehicle_edge.video_publisher.open_configured_camera", return_value=(
+            camera, CameraFormat(1920, 1080, 30),
+        )):
+            await publisher.start(CameraOptions(
+                layout=CameraLayout.SINGLE, width=1920, height=1080,
+                fps=30, video_width=640, video_height=360,
+            ))
+        await asyncio.sleep(0)
+        try:
+            track, options = participant.published_tracks[0]
+            self.assertEqual((track.source.width, track.source.height), (640, 360))
+            self.assertEqual(options["video_encoding"]["max_bitrate"], 562500)
+            self.assertEqual(options["video_encoding"]["max_framerate"], 30)
+            self.assertEqual(formats, [(
+                CameraFormat(1920, 1080, 30), CameraFormat(640, 360, 30),
+            )])
+        finally:
+            await publisher.close()
+        self.assertTrue(camera.released)
+
     async def test_failed_camera_does_not_block_other_tracks(self):
         cameras = {}
         participant = FakeParticipant()
@@ -63,7 +97,7 @@ class LiveKitVideoPublisherTest(unittest.IsolatedAsyncioTestCase):
             cameras[index] = camera
             return camera, CameraFormat(640, 480, 20)
 
-        async def hold_camera(source, camera, camera_format):
+        async def hold_camera(source, camera, camera_format, video_format):
             try:
                 await stopped.wait()
             finally:
@@ -90,7 +124,7 @@ class LiveKitVideoPublisherTest(unittest.IsolatedAsyncioTestCase):
         def open_camera(index, width, height, fps):
             return camera, CameraFormat(640, 480, 20)
 
-        async def fail_after_start(source, active_camera, camera_format):
+        async def fail_after_start(source, active_camera, camera_format, video_format):
             try:
                 await stop_camera.wait()
                 raise RuntimeError("camera stopped")

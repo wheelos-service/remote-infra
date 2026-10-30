@@ -2,106 +2,216 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Remote Supervision Console</title>
+    <title>远程车辆监控</title>
     <!-- Casdoor & LiveKit CDN (kept online for dev) -->
     <script src="https://cdn.jsdelivr.net/npm/casdoor-js-sdk@1.0.1/lib/casdoor.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="./css/video-grid.css">
-    <style>
-        body { background: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
-        .header { width: 100%; max-width: 1000px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
-        .dashboard { display: none; width: 100%; max-width: 1000px; flex-direction: column; align-items: center; }
-        .controls { display: flex; gap: 15px; margin-top: 20px; width: min(960px, calc(100vw - 48px)); justify-content: center; background: #1e1e1e; padding: 15px; border-radius: 8px; }
-        button { padding: 12px 24px; cursor: pointer; border: none; border-radius: 6px; font-weight: bold; transition: 0.2s; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .btn-connect { background: #0d6efd; color: white; }
-        .btn-steer { background: #444; color: white; }
-        .btn-brake { background: #dc3545; color: white; }
-        .command-mode { margin-top: 20px; }
-        .command-group { display: none; }
-        .command-group.active { display: flex; }
-        .alert-box { margin-top: 15px; padding: 10px 20px; border-radius: 4px; display: none; width: min(960px, calc(100vw - 48px)); text-align: center; }
-        .alert-shadow { background: #ffc107; color: #000; display: block; }
-    </style>
+
 </head>
 <body>
 
     <div class="header">
-        <h2>Remote Vehicle Fleet</h2>
+        <h2>远程车辆监控</h2>
         <div>
-            <span id="user-info" style="margin-right: 15px;">Signed out</span>
-            <button id="auth-btn" onclick="handleAuth()">Sign in (SSO)</button>
+            <span id="user-info" style="margin-right: 15px;">未登录</span>
+            <button id="auth-btn" onclick="handleAuth()">企业账号登录</button>
         </div>
     </div>
 
     <div id="welcome-screen" style="text-align: center; margin-top: 100px;">
-        <h3>Sign in with your enterprise account to access a vehicle</h3>
+        <h3>登录后连接车辆，查看实时视频和车辆状态</h3>
     </div>
 
     <div id="dashboard" class="dashboard">
-        <div class="controls" style="margin-bottom: 15px;">
-            <input type="text" id="target-vehicle" placeholder="Vehicle ID (for example, car-001)" value="car-001" style="padding: 10px; border-radius: 4px; border: 1px solid #444; background: #222; color: white;">
-            <button class="btn-connect" id="connect-btn" onclick="startTeleop()">Connect</button>
-            <button id="disconnect-btn" onclick="stopTeleop()" disabled>Disconnect</button>
+        <div class="connection-bar">
+            <input type="text" id="target-vehicle" aria-label="车辆 ID" placeholder="车辆 ID，例如 car-001" value="car-001" >
+            <button class="btn-connect" id="connect-btn" onclick="startTeleop()">连接监看</button>
+            <button id="disconnect-btn" onclick="stopTeleop()" disabled>断开连接</button>
         </div>
 
-        <div id="alert-banner" class="alert-box"></div>
+        <div class="workspace">
+            <main class="monitor-panel" aria-label="实时监控">
+            <div id="alert-banner" class="alert-box"></div>
 
-        <div id="video-container">
-            <div id="video-grid" class="video-grid">
-                <div class="video-slot" data-camera="left">
-                    <div class="camera-label">左侧相机</div>
-                    <div class="camera-feed"></div>
-                </div>
-                <div class="video-slot" data-camera="center">
-                    <div class="camera-label">中间相机<button class="camera-focus" id="camera-focus" type="button">放大中间</button></div>
-                    <div class="camera-feed"></div>
-                </div>
-                <div class="video-slot" data-camera="right">
-                    <div class="camera-label">右侧相机</div>
-                    <div class="camera-feed"></div>
-                </div>
-                <div class="video-slot" data-camera="front">
-                    <div class="camera-label">前方相机</div>
-                    <div class="camera-feed"></div>
-                </div>
+            <div class="controls camera-view-controls">
+                <label>画面视角 <select id="camera-view">
+                    <option value="auto">自动（跟随前进／倒车）</option>
+                    <option value="front">前方</option>
+                    <option value="rear">后方</option>
+                </select></label>
+                <button id="camera-focus" type="button" disabled>放大中间</button>
+                <span id="camera-view-status" role="status" aria-live="polite"></span>
             </div>
-            <div class="hud-overlay" id="hud">STATE: OFFLINE<br>LATENCY: -- ms</div>
-        </div>
+            <div id="video-container">
+                <div id="video-grid" class="video-grid">
+                    <div class="video-slot" data-camera="left" data-position="left">
+                        <div class="camera-label">前左相机</div>
+                        <div class="camera-feed"></div>
+                        <div class="camera-empty">前左无实时视频</div>
+                    </div>
+                    <div class="video-slot" data-camera="center" data-position="center">
+                        <div class="camera-label">前中相机</div>
+                        <div class="camera-feed"></div>
+                        <div class="camera-empty">前中无实时视频</div>
+                    </div>
+                    <div class="video-slot" data-camera="right" data-position="right">
+                        <div class="camera-label">前右相机</div>
+                        <div class="camera-feed"></div>
+                        <div class="camera-empty">前右无实时视频</div>
+                    </div>
+                    <div class="video-slot" data-camera="rear-left" data-position="left">
+                        <div class="camera-label">后左相机</div>
+                        <div class="camera-feed"></div>
+                        <div class="camera-empty">后左无实时视频</div>
+                    </div>
+                    <div class="video-slot" data-camera="rear-center" data-position="center">
+                        <div class="camera-label">后中相机</div>
+                        <div class="camera-feed"></div>
+                        <div class="camera-empty">后中无实时视频</div>
+                    </div>
+                    <div class="video-slot" data-camera="rear-right" data-position="right">
+                        <div class="camera-label">后右相机</div>
+                        <div class="camera-feed"></div>
+                        <div class="camera-empty">后右无实时视频</div>
+                    </div>
+                    <div class="video-slot" data-camera="front" data-position="center">
+                        <div class="camera-label">前方相机</div>
+                        <div class="camera-feed"></div>
+                        <div class="camera-empty">前方无实时视频</div>
+                    </div>
+                </div>
+                <div class="hud-overlay" id="hud">未连接</div>
+            </div>
 
-        <div class="controls">
-            <label class="command-mode">Command mode:
-                <select id="command-mode" onchange="setCommandMode(this.value)" disabled>
-                    <option value="high_level">High-level intent</option>
-                    <option value="low_level">Low-level control</option>
-                </select>
-            </label>
-        </div>
-        <div id="high-level-controls" class="controls command-group active">
-            <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('forward')" onmouseup="endCommand()">Forward</button>
-            <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('reverse')" onmouseup="endCommand()">Reverse</button>
-            <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('left')" onmouseup="endCommand()">◀ Left</button>
-            <button class="btn-steer ctrl-btn" disabled onmousedown="beginHighLevel('right')" onmouseup="endCommand()">Right ▶</button>
-            <button class="btn-brake ctrl-btn" disabled onclick="sendHighLevel('emergency_stop')">Emergency stop</button>
-        </div>
-        <div id="low-level-controls" class="controls command-group">
-            <button class="btn-steer ctrl-btn" disabled onmousedown="beginLowLevel(-1, 0, 0)" onmouseup="endCommand()">◀ Steer</button>
-            <button class="btn-steer ctrl-btn" disabled onmousedown="beginLowLevel(1, 0, 0)" onmouseup="endCommand()">Steer ▶</button>
-            <button class="btn-brake ctrl-btn" disabled onclick="sendLowLevel(0, 0, 1)">Emergency brake</button>
+            <div class="telemetry-summary" aria-label="车辆实际状态">
+                <div><span>车速</span><strong id="state-speed">—</strong></div>
+                <div><span>实际挡位</span><strong id="state-gear">—</strong></div>
+                <div><span>驾驶模式</span><strong id="state-mode">—</strong></div>
+                <div><span>电量</span><strong id="state-battery">—</strong></div>
+            </div>
+            <p id="state-health" class="status-line" role="status">等待车辆状态</p>
+            <p id="state-safety" class="safety-line" role="status"></p>
+            <details class="diagnostics">
+                <summary>诊断详情</summary>
+                <pre id="vehicle-state" class="vehicle-state">MONITOR: OFFLINE</pre>
+            </details>
+        </main>
+            <aside class="operation-panel" aria-label="车辆操作">
+            <section class="control-access">
+                <h3>控制权</h3>
+                <p id="access-status" role="status">连接后可申请控制权</p>
+                <button id="acquire-control" class="btn-connect" disabled onclick="startTeleop('controller')">申请控制权</button>
+                <button id="release-control" disabled onclick="startTeleop('observer')">释放控制权</button>
+                <small>申请或释放将重新连接；连接完成后需重新启用输入。</small>
+            </section>
+            <div id="driving-controls" hidden>
+            <label class="input-choice">输入方式 <select id="input-device">
+                <option value="gamepad" selected>手柄</option>
+                <option value="pointer">屏幕按钮</option>
+            </select></label>
+            <p id="input-status" class="status-line" role="status">控制不可用</p>
+            <div class="controls keyboard-controls" data-input-panel="keyboard" hidden>
+                <label><input id="keyboard-enabled" type="checkbox" disabled> 启用键盘控制</label>
+                <p>W / ↑ 前进 · S / ↓ 后退 · A / ← 左转 · D / → 右转 · 空格急停</p>
+                <p>1 / 2 / 3 / 4：P / N / D / R 挡 · E 进入自动驾驶 · Q 退出自动驾驶（按一次触发）</p>
+                <p>按住发送，松开停止；一次只支持一个方向。切换窗口后需重新启用。</p>
+                <p id="keyboard-status" role="status" aria-live="polite">控制不可用</p>
+            </div>
+            <div class="controls gamepad-controls" data-input-panel="gamepad">
+                <strong>手柄识别与比例控制</strong>
+                <label>选择手柄 <select id="gamepad-select"><option value="">尚未发现手柄</option></select></label>
+                <p id="gamepad-device">连接手柄后按一下按钮；网页需使用 HTTPS 或 localhost。</p>
+                <details>
+                    <summary>检测与调整映射（标准布局默认：左摇杆转向、右摇杆前后、LB使能、B急停、十字键）</summary>
+                <pre id="gamepad-axes">轴值：—</pre>
+                <pre id="gamepad-buttons">按钮：—</pre>
+                    <p>先观察轴值与按钮编号，编号从0开始；不用的轴或方向按钮填 -1。</p>
+                    <div class="gamepad-mapping">
+                    <label>左摇杆左右轴 <input id="gamepad-axisX" data-gamepad-mapping="axisX" type="number" min="-1" step="1" value="0"></label>
+                    <label>右摇杆前后轴 <input id="gamepad-axisY" data-gamepad-mapping="axisY" type="number" min="-1" step="1" value="3"></label>
+                    <label>使能按钮 <input id="gamepad-enableButton" data-gamepad-mapping="enableButton" type="number" min="0" step="1" value="4"></label>
+                    <label>急停按钮 <input id="gamepad-emergencyButton" data-gamepad-mapping="emergencyButton" type="number" min="0" step="1" value="1"></label>
+                    <label>前进按钮 <input id="gamepad-upButton" data-gamepad-mapping="upButton" type="number" min="-1" step="1" value="12"></label>
+                    <label>后退按钮 <input id="gamepad-downButton" data-gamepad-mapping="downButton" type="number" min="-1" step="1" value="13"></label>
+                    <label>左转按钮 <input id="gamepad-leftButton" data-gamepad-mapping="leftButton" type="number" min="-1" step="1" value="14"></label>
+                    <label>右转按钮 <input id="gamepad-rightButton" data-gamepad-mapping="rightButton" type="number" min="-1" step="1" value="15"></label>
+                    <label>P 挡按钮 <input data-gamepad-mapping="parkButton" type="number" min="-1" step="1" value="0"></label>
+                    <label>N 挡按钮 <input data-gamepad-mapping="neutralButton" type="number" min="-1" step="1" value="2"></label>
+                    <label>D 挡按钮 <input data-gamepad-mapping="driveButton" type="number" min="-1" step="1" value="3"></label>
+                    <label>R 挡按钮 <input data-gamepad-mapping="reverseButton" type="number" min="-1" step="1" value="5"></label>
+                    <label>进入自动驾驶按钮 <input data-gamepad-mapping="autoEnterButton" type="number" min="-1" step="1" value="9"></label>
+                    <label>退出自动驾驶按钮 <input data-gamepad-mapping="autoExitButton" type="number" min="-1" step="1" value="8"></label>
+                    <label><input id="gamepad-invertX" data-gamepad-mapping="invertX" type="checkbox"> 左右轴反向</label>
+                    <label><input id="gamepad-invertY" data-gamepad-mapping="invertY" type="checkbox"> 前后轴反向</label>
+                    </div>
+                </details>
+                <p id="gamepad-validation"></p>
+                <label><input id="gamepad-confirmed" type="checkbox" disabled> 已检测并确认方向、使能、急停映射正确</label>
+                <label><input id="gamepad-enabled" type="checkbox" disabled> 启用手柄控制</label>
+                <details><summary>手柄操作帮助</summary>
+                <p>启用后先回中并松开使能键，再按住使能键：右摇杆前后控制油门，左摇杆左右控制转向，两根摇杆可同时操作。松开使能键或回中即停止。</p>
+                <p>中心死区 15%；仅横向操作时保持挡位并制动。方向冲突或前后反向需松开使能键并回中；断连、失焦、切换输入或急停后需重新启用。</p>
+                <p>挡位/模式：回中并按住 LB 使能，再按 A(0)=P、X(2)=N、Y(3)=D、RB(5)=R、Start(9)=进入自动驾驶、Back(8)=退出。每次操作后松开操作按钮和使能键再继续；编号以检测结果为准，可调整或填 -1 禁用。</p>
+                </details>
+                <p id="gamepad-status" role="status" aria-live="polite">手柄控制未启用</p>
+            </div>
+            <section class="controls pointer-controls" data-input-panel="pointer" hidden>
+                <label class="command-mode" for="command-mode">鼠标指令模式
+                    <select id="command-mode" onchange="setCommandMode(this.value)" disabled>
+                        <option value="high_level">方向指令</option>
+                        <option value="low_level">底层转向测试</option>
+                    </select>
+                </label>
+            <div id="high-level-controls" class="controls command-group active">
+                <button class="btn-steer ctrl-btn" disabled onpointerdown="beginHighLevel('forward', event)">前进</button>
+                <button class="btn-steer ctrl-btn" disabled onpointerdown="beginHighLevel('reverse', event)">后退</button>
+                <button class="btn-steer ctrl-btn" disabled onpointerdown="beginHighLevel('left', event)">◀ 左转</button>
+                <button class="btn-steer ctrl-btn" disabled onpointerdown="beginHighLevel('right', event)">右转 ▶</button>
+            </div>
+            <div id="low-level-controls" class="controls command-group">
+                <button class="btn-steer ctrl-btn" disabled onpointerdown="beginLowLevel(-1, 0, 0, event)">◀ 转向</button>
+                <button class="btn-steer ctrl-btn" disabled onpointerdown="beginLowLevel(1, 0, 0, event)">转向 ▶</button>
+            </div>
+                <strong>挡位与自动驾驶</strong>
+                <div class="controls action-buttons">
+                    <button class="btn-steer ctrl-btn" disabled onclick="requestVehicleAction('gear_park')">P 驻车</button>
+                    <button class="btn-steer ctrl-btn" disabled onclick="requestVehicleAction('gear_neutral')">N 空挡</button>
+                    <button class="btn-steer ctrl-btn" disabled onclick="requestVehicleAction('gear_drive')">D 前进</button>
+                    <button class="btn-steer ctrl-btn" disabled onclick="requestVehicleAction('gear_reverse')">R 倒车</button>
+                </div>
+                <div class="controls action-buttons">
+                    <button class="btn-steer ctrl-btn" disabled onclick="requestVehicleAction('auto_enter')">进入自动驾驶</button>
+                    <button class="btn-brake ctrl-btn" disabled onclick="requestVehicleAction('auto_exit')">退出自动驾驶</button>
+                </div>
+                <p>按住方向按钮操作，松开停止。停车后进入自动驾驶再换挡；请求结果请核对实际挡位和模式。</p>
+                <p id="vehicle-action-status" role="status" aria-live="polite">控制不可用</p>
+            </section>
+            </div>
+            <div class="emergency-bar">
+                <button class="btn-brake ctrl-btn" disabled onclick="emergencyStop()">发送急停请求</button>
+                <small>远程请求不代表车辆已执行，请核对车辆反馈。</small>
+            </div>
+        </aside>
         </div>
     </div>
 
     <script type="module">
         import {SecureControlSender} from './lib/secure-control-sender.js';
         import {createVideoGrid} from './lib/video-grid.js';
+        import {VehicleStateMonitor} from './lib/vehicle-state.js';
+        import {ControlInput, bindKeyboardInput} from './lib/control-input.js';
+        import {GamepadInput, bindGamepadInput} from './lib/gamepad-input.js';
 
         // Runtime configuration via URL query parameters.
         const params = new URLSearchParams(window.location.search);
         const GO_BACKEND_URL = params.get('backend') || 'https://gateway.wheelos.cn';
         const configuredLivekitUrl = params.get('livekit') || 'wss://rtc.wheelos.cn';
         const LIVEKIT_URL = configuredLivekitUrl;
-        const REQUESTED_ACCESS = params.get('access') || 'controller';
+        let connectionBusy = false;
+        let connectedVehicle = null;
+        let roomReady = false;
         const CASDOOR_URL = params.get('casdoor') || 'https://casdoor.wheelos.cn';
         const CASDOOR_CLIENT_ID = params.get('clientId') || 'cfeff3105319b0ac309b';
         const CASDOOR_ORG = params.get('org') || 'SF-Express';
@@ -112,28 +222,146 @@
 
         let currentRoom = null;
         let canControl = false;
+        let handoverPending = false;
         let secureSender = null;
         let accessToken = null;
         let operatorName = null;
-        let activeCommandTimer = null;
-        let activeCommand = null;
-        const videoGrid = createVideoGrid(() => {
-            document.getElementById('hud').innerHTML =
-                `STATE: ${canControl ? 'DRIVING' : 'MONITORING'}<br>VID: ${document.getElementById('target-vehicle').value}`;
+        let stateMonitor = null;
+        const keyboardToggle = document.getElementById('keyboard-enabled');
+        const keyboardStatus = document.getElementById('keyboard-status');
+        const gamepadToggle = document.getElementById('gamepad-enabled');
+        const gamepadSelect = document.getElementById('gamepad-select');
+        const gamepadConfirmed = document.getElementById('gamepad-confirmed');
+        let gamepadReady = false;
+        const controlInput = new ControlInput({
+            send: async command => {
+                const sender = secureSender;
+                if (!canControl || !sender || !currentRoom) throw new Error('Control connection unavailable');
+                videoGrid.noteCommand(command);
+                await sender.sendCommand(command);
+            },
+            onChange: state => {
+                keyboardToggle.disabled = !state.available;
+                keyboardToggle.checked = state.keyboardEnabled;
+                keyboardStatus.textContent = state.message;
+                document.getElementById('input-status').textContent = state.available && state.message === '键盘控制未启用'
+                    ? '手柄需确认映射并启用；屏幕按钮可按住操作' : state.message;
+                if (!state.available || state.message.startsWith('已发送请求：')) {
+                    document.getElementById('vehicle-action-status').textContent = state.message;
+                }
+                gamepadToggle.disabled = !state.available || !gamepadReady;
+                gamepadToggle.checked = state.gamepadEnabled;
+            },
+            onError: error => {
+                console.error('Command send failed:', error);
+                void stopTeleop();
+            },
+        });
+        bindKeyboardInput(controlInput, window, document, keyboardToggle, gamepadToggle);
+        window.requestVehicleAction = action => controlInput.vehicleAction(action, true);
+        keyboardToggle.addEventListener('change', () => {
+            if (document.hidden || !document.hasFocus()) {
+                controlInput.suspend();
+                return;
+            }
+            controlInput.setKeyboardEnabled(keyboardToggle.checked);
+            keyboardToggle.blur();
+        });
+        function setGamepadText(id, text) {
+            const element = document.getElementById(id);
+            if (element.textContent !== text) element.textContent = text;
+        }
+        let deviceListKey = '';
+        const gamepadInput = new GamepadInput(controlInput, view => {
+            const listKey = JSON.stringify([view.devices, view.selectedIndex]);
+            if (deviceListKey !== listKey) {
+                gamepadSelect.replaceChildren(new Option('请选择手柄', ''));
+                for (const device of view.devices) {
+                    gamepadSelect.add(new Option(`${device.index}: ${device.id}`, String(device.index)));
+                }
+                gamepadSelect.value = view.selectedIndex === null ? '' : String(view.selectedIndex);
+                deviceListKey = listKey;
+            }
+            setGamepadText('gamepad-device', view.pad
+                ? `已连接：${view.pad.id}；映射：${view.pad.mapping || '非标准，请手动核对'}；使能键：${view.enableHeld ? '按住' : '松开'}`
+                : '未发现所选手柄；请连接设备并按一下手柄按钮');
+            setGamepadText('gamepad-axes', '轴值：' + (view.pad
+                ? view.pad.axes.map((value, index) => `${index}:${value.toFixed(3)}`).join('  ') : '—'));
+            setGamepadText('gamepad-buttons', '按钮：' + (view.pad
+                ? view.pad.buttons.map((button, index) => `${index}:${button.value.toFixed(2)}${button.pressed ? '↓' : ''}`).join('  ') : '—'));
+            setGamepadText('gamepad-validation', view.validation);
+            setGamepadText('gamepad-status', view.message);
+            if (controlInput.isGamepadEnabled) setGamepadText('input-status', view.message);
+            gamepadConfirmed.checked = view.confirmed;
+            gamepadConfirmed.disabled = !view.pad || Boolean(view.validation);
+            gamepadReady = view.canEnable;
+            gamepadToggle.disabled = !gamepadReady;
+            gamepadToggle.checked = controlInput.isGamepadEnabled;
+        });
+        gamepadSelect.addEventListener('change', () => {
+            gamepadInput.select(gamepadSelect.value === '' ? null : Number(gamepadSelect.value));
+            gamepadSelect.blur();
+        });
+        document.querySelectorAll('[data-gamepad-mapping]').forEach(field => {
+            field.addEventListener('input', () => {
+                const mapping = {};
+                document.querySelectorAll('[data-gamepad-mapping]').forEach(input => {
+                    mapping[input.dataset.gamepadMapping] = input.type === 'checkbox'
+                        ? input.checked : input.value === '' ? NaN : Number(input.value);
+                });
+                gamepadInput.setMapping(mapping);
+            });
+        });
+        gamepadConfirmed.addEventListener('change', () => {
+            gamepadInput.confirmMapping(gamepadConfirmed.checked);
+            gamepadConfirmed.blur();
+        });
+        gamepadToggle.addEventListener('change', () => {
+            if (document.hidden || !document.hasFocus()) {
+                controlInput.suspend();
+                return;
+            }
+            gamepadInput.setEnabled(gamepadToggle.checked);
+            gamepadToggle.blur();
+        });
+        bindGamepadInput(gamepadInput, window, document, navigator, [keyboardToggle, gamepadToggle]);
+        function updateConnectionUi(connected = Boolean(connectedVehicle) && roomReady) {
+            document.getElementById('auth-btn').disabled = connectionBusy;
+            document.getElementById('connect-btn').disabled = connectionBusy || Boolean(currentRoom);
+            document.getElementById('target-vehicle').disabled = Boolean(currentRoom) || connectionBusy;
+            document.getElementById('acquire-control').disabled = !connected || canControl || connectionBusy || handoverPending;
+            document.getElementById('release-control').disabled = !connected || !canControl || connectionBusy;
+            document.getElementById('driving-controls').hidden = !canControl;
+            document.getElementById('access-status').textContent = handoverPending
+                ? '交接待确认 · 旧 v1 控制已禁用' : canControl
+                ? '已取得控制权 · 输入需单独启用' : connected ? '仅监看 · 未取得控制权' : '连接后可申请控制权';
+        }
+        const videoGrid = createVideoGrid(() => {});
+        document.getElementById('input-device').addEventListener('change', event => {
+            controlInput.suspend('输入方式已切换，请重新启用');
+            document.querySelectorAll('[data-input-panel]').forEach(panel => {
+                panel.hidden = panel.dataset.inputPanel !== event.target.value;
+            });
+            document.getElementById('input-device').blur();
         });
 
         async function stopControlSession() {
+            controlInput.suspend();
+            controlInput.setAvailable(false);
             const sender = secureSender;
             secureSender = null;
             canControl = false;
-            if (activeCommandTimer) clearInterval(activeCommandTimer);
-            activeCommandTimer = null;
-            activeCommand = null;
+            updateConnectionUi();
             if (!sender) return;
             try {
                 await sender.release();
             } catch (error) {
                 console.warn('Failed to release control session:', error);
+                handoverPending = true;
+                const banner = document.getElementById('alert-banner');
+                banner.textContent = '控制释放/交接尚未确认，禁止再次申请控制权。旧 v1 车端不支持当前权威交接；请使用 v2 模拟链路，勿绕过服务端栅栏。';
+                banner.style.display = 'block';
+                updateConnectionUi();
             }
         }
 
@@ -143,7 +371,7 @@
                     await completeOidcRedirect();
                 } catch (error) {
                     console.error('OIDC callback failed:', error);
-                    alert('Sign-in failed: ' + error.message);
+                    alert('登录失败：' + error.message);
                 }
             }
             await checkLoginState();
@@ -164,8 +392,8 @@
                 }
             }
             if (accessToken) {
-                document.getElementById('user-info').innerText = `Operator: ${operatorName}`;
-                document.getElementById('auth-btn').innerText = 'Sign out';
+                document.getElementById('user-info').innerText = `操作员：${operatorName}`;
+                document.getElementById('auth-btn').innerText = '退出登录';
                 document.getElementById('welcome-screen').style.display = 'none';
                 document.getElementById('dashboard').style.display = 'flex';
             } else {
@@ -178,12 +406,14 @@
             if (accessToken) {
                 accessToken = null;
                 operatorName = null;
-                stopControlSession();
+                void stopTeleop();
+                document.getElementById('user-info').textContent = '未登录';
+                document.getElementById('auth-btn').textContent = '企业账号登录';
                 checkLoginState();
                 return;
             }
             if (params.get('dev') === '1') {
-                const token = window.prompt('Enter the development Bearer token');
+                const token = window.prompt('请输入开发环境访问令牌');
                 if (!token) return;
                 accessToken = token;
                 checkLoginState();
@@ -193,19 +423,27 @@
         }
 
         function resetConnectionUi() {
+            controlInput.setAvailable(false);
             document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = true);
             document.getElementById('command-mode').disabled = true;
             document.getElementById('connect-btn').disabled = false;
             document.getElementById('disconnect-btn').disabled = true;
+            updateConnectionUi(false);
         }
 
         async function stopTeleop() {
+            controlInput.suspend();
+            controlInput.setAvailable(false);
             const room = currentRoom;
             currentRoom = null;
+            connectedVehicle = null;
+            roomReady = false;
             if (room) room.disconnect();
+            stateMonitor?.close();
+            stateMonitor = null;
             videoGrid.clear();
             await stopControlSession();
-            document.getElementById('hud').innerHTML = 'STATE: OFFLINE<br>LATENCY: -- ms';
+            document.getElementById('hud').innerHTML = '未连接';
             resetConnectionUi();
         }
 
@@ -270,25 +508,50 @@
             return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
         }
 
-        async function startTeleop() {
+        async function startTeleop(access = 'observer') {
+            if (connectionBusy) return;
+            if (access !== 'observer' && access !== 'controller') return;
+            if (access === 'controller' && handoverPending) {
+                alert('车辆交接尚未确认；不能重新申请或切换控制车辆。');
+                return;
+            }
+            if (access === 'controller' && (canControl || !roomReady || !currentRoom || !connectedVehicle)) return;
             const token = accessToken;
-            const vid = document.getElementById('target-vehicle').value;
+            const vid = connectedVehicle || document.getElementById('target-vehicle').value.trim();
             const hud = document.getElementById('hud');
             const alertBanner = document.getElementById('alert-banner');
 
             if (!token) {
-                throw new Error('The sign-in session has expired');
+                alert('登录已过期，请重新登录');
+                return;
             }
 
+            if (!vid) { alert('请输入车辆 ID'); return; }
+            connectionBusy = true;
+            updateConnectionUi();
+            document.getElementById('disconnect-btn').disabled = true;
             try {
-                hud.innerHTML = 'STATE: AUTHENTICATING...';
+                if (currentRoom) await stopTeleop();
+                document.getElementById('connect-btn').disabled = true;
+                stateMonitor?.close();
+                stateMonitor = new VehicleStateMonitor(document.getElementById('vehicle-state'), vid,
+                    gear => videoGrid.noteGear(gear), document);
+                hud.textContent = '正在验证权限…';
                 let data;
-                if (REQUESTED_ACCESS === 'controller') {
-                    secureSender = new SecureControlSender({
+                if (access === 'controller') {
+                    const sender = new SecureControlSender({
                         gatewayBaseUrl: GO_BACKEND_URL,
                         vehicleId: vid,
                         authToken: token,
+                        onRenewalError: error => {
+                            if (secureSender !== sender) return;
+                            console.error('Control lease lost:', error);
+                            controlInput.suspend('控制会话续租失败');
+                            controlInput.setAvailable(false);
+                            void stopTeleop();
+                        },
                     });
+                    secureSender = sender;
                     await secureSender.createKeyPair();
                     data = await secureSender.acquireSession();
                     canControl = true;
@@ -301,39 +564,98 @@
                     canControl = false;
                 }
                 alertBanner.innerText = data.msg || '';
-                alertBanner.style.display = 'block';
+                alertBanner.style.display = data.msg ? 'block' : 'none';
                 alertBanner.className = 'alert-box';
                 document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = true);
 
-                hud.innerHTML = 'STATE: CONNECTING WEBRTC...';
-                currentRoom = new LivekitClient.Room();
+                hud.textContent = '正在连接视频与状态通道…';
+                const room = new LivekitClient.Room({adaptiveStream: false});
+                currentRoom = room;
+                let statePacketLogged = false;
+                const updateVehiclePresence = () => {
+                    if (currentRoom !== room) return;
+                    stateMonitor?.noteVehiclePresent(Array.from(
+                        room.remoteParticipants?.values() || [],
+                    ).some(participant => participant.identity === `vehicle-${vid}`));
+                };
+                room.on(LivekitClient.RoomEvent.ParticipantConnected, updateVehiclePresence);
+                room.on(LivekitClient.RoomEvent.ParticipantDisconnected, updateVehiclePresence);
 
-                currentRoom.on(LivekitClient.RoomEvent.Disconnected, () => {
+                room.on(LivekitClient.RoomEvent.Disconnected, () => {
+                    if (currentRoom !== room) return;
                     stopControlSession();
+                    stateMonitor?.close();
+                    stateMonitor = null;
                     videoGrid.clear();
                     currentRoom = null;
                     resetConnectionUi();
-                    hud.innerHTML = 'STATE: DISCONNECTED';
+                    connectedVehicle = null;
+                    hud.textContent = '连接已断开';
                 });
 
+                room.on(LivekitClient.RoomEvent.Reconnecting, () => {
+                    if (currentRoom !== room) return;
+                    roomReady = false;
+                    stopControlSession();
+                    document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = true);
+                    document.getElementById('command-mode').disabled = true;
+                    updateConnectionUi(false);
+                    hud.textContent = '正在重连 · 控制权已释放';
+                });
+                room.on(LivekitClient.RoomEvent.Reconnected, () => {
+                    if (currentRoom !== room) return;
+                    roomReady = true;
+                    updateVehiclePresence();
+                    updateConnectionUi();
+                    hud.textContent = '监看中 · 请重新申请控制权';
+                });
+                room.on(LivekitClient.RoomEvent.DataReceived,
+                    (data, participant, kind, topic) => {
+                        if (currentRoom !== room) return;
+                        const accepted = stateMonitor?.receive(data, participant, topic);
+                        if (topic === 'vehicle.state' && !statePacketLogged) {
+                            statePacketLogged = true;
+                            console.info('[STATE_RX]', {
+                                topic, sender: participant?.identity, bytes: data.byteLength,
+                                expectedSender: `vehicle-${vid}`, accepted,
+                            });
+                        }
+                    });
+
                 currentRoom.on(LivekitClient.RoomEvent.TrackSubscribed,
-                    (track, publication) => videoGrid.subscribe(track, publication));
+                    (track, publication, participant) => {
+                        if (currentRoom === room && participant?.identity === `vehicle-${vid}`) {
+                            videoGrid.subscribe(track, publication);
+                        }
+                    });
                 currentRoom.on(
                     LivekitClient.RoomEvent.TrackUnsubscribed,
-                    track => videoGrid.unsubscribe(track));
+                    track => { if (currentRoom === room) videoGrid.unsubscribe(track); });
 
-                await withTimeout(currentRoom.connect(LIVEKIT_URL, data.token), 15000, `LiveKit connection to ${LIVEKIT_URL}`);
-                hud.innerHTML = `STATE: WEBRTC CONNECTED<br>VID: ${vid}<br>WAITING FOR VIDEO...`;
+                await withTimeout(room.connect(LIVEKIT_URL, data.token, {autoSubscribe: true}), 15000, `LiveKit connection to ${LIVEKIT_URL}`);
+                if (currentRoom !== room) return;
+                updateVehiclePresence();
+                console.info('[STATE_ROOM]', {
+                    vehicle: vid, livekit: LIVEKIT_URL,
+                    participants: Array.from(room.remoteParticipants?.values() || [], p => p.identity),
+                });
+                connectedVehicle = vid;
+                roomReady = true;
+                hud.textContent = `${vid} · ${canControl ? '已取得控制权' : '监看中'}`;
                 if (canControl) {
-                    secureSender.setPublishData((message) => currentRoom.localParticipant.publishData(
-                        new TextEncoder().encode(message), {reliable: false}));
+                    secureSender.setPublishData((message) => room.localParticipant.publishData(
+                        new TextEncoder().encode(message), {reliable: false, topic: 'vehicle.control',
+                            destinationIdentities: [`vehicle-${vid}`]}));
                     secureSender.startRenewal();
+                    controlInput.setAvailable(true);
                     document.querySelectorAll('.ctrl-btn').forEach(btn => btn.disabled = false);
                     document.getElementById('command-mode').disabled = false;
                 }
                 document.getElementById('connect-btn').disabled = true;
                 document.getElementById('disconnect-btn').disabled = false;
             } catch (e) {
+                stateMonitor?.close();
+                stateMonitor = null;
                 await stopControlSession();
                 if (currentRoom) {
                     try {
@@ -343,53 +665,39 @@
                 }
                 videoGrid.clear();
                 resetConnectionUi();
-                hud.innerHTML = 'STATE: ERROR';
-                alert('Connection failed: ' + e.message);
+                connectedVehicle = null;
+                hud.textContent = '连接失败';
+                alert('连接失败：' + e.message);
+            } finally {
+                connectionBusy = false;
+                updateConnectionUi();
             }
         }
 
-        async function sendCommand(command) {
-            if (!canControl || !secureSender) return;
-            try {
-                await secureSender.sendCommand(command);
-            } catch (e) {
-                console.error('Command send failed:', e);
+        function preparePointer(event) {
+            if (event.button !== 0) return false;
+            event.preventDefault();
+            event.currentTarget.setPointerCapture(event.pointerId);
+            return true;
+        }
+
+        function beginHighLevel(action, event) {
+            if (preparePointer(event)) controlInput.beginPointer({mode: 'high_level', action});
+        }
+
+        function beginLowLevel(steering, throttle, brake, event) {
+            if (preparePointer(event)) {
+                controlInput.beginPointer({mode: 'low_level', steering, throttle, brake, direction: 1});
             }
         }
 
-        function sendHighLevel(action) {
-            return sendCommand({mode: 'high_level', action});
-        }
-
-        function sendLowLevel(steering, throttle, brake, direction = 1) {
-            return sendCommand({mode: 'low_level', steering, throttle, brake, direction});
-        }
-
-        function beginCommand(command) {
-            endCommand();
-            activeCommand = command;
-            sendCommand(command);
-            activeCommandTimer = setInterval(() => sendCommand(activeCommand), 100);
-        }
-
-        function beginHighLevel(action) {
-            beginCommand({mode: 'high_level', action});
-        }
-
-        function beginLowLevel(steering, throttle, brake, direction = 1) {
-            beginCommand({mode: 'low_level', steering, throttle, brake, direction});
-        }
-
-        function endCommand() {
-            if (activeCommandTimer) clearInterval(activeCommandTimer);
-            activeCommandTimer = null;
-            activeCommand = null;
-            sendHighLevel('stop');
+        function emergencyStop() {
+            controlInput.emergencyStop();
         }
 
         function setCommandMode(mode) {
             if (mode !== 'high_level' && mode !== 'low_level') return;
-            if (activeCommandTimer) endCommand();
+            controlInput.suspend('控制模式已切换；输入已停用');
             document.querySelectorAll('.command-group').forEach(group => group.classList.remove('active'));
             document.getElementById(`${mode.replace('_', '-')}-controls`).classList.add('active');
         }
@@ -397,16 +705,13 @@
         window.addEventListener('pagehide', () => {
             if (secureSender) stopControlSession();
         });
-
         // Inline handlers in the static HTML resolve functions from window.
         window.handleAuth = handleAuth;
         window.startTeleop = startTeleop;
         window.stopTeleop = stopTeleop;
-        window.sendHighLevel = sendHighLevel;
-        window.sendLowLevel = sendLowLevel;
+        window.emergencyStop = emergencyStop;
         window.beginHighLevel = beginHighLevel;
         window.beginLowLevel = beginLowLevel;
-        window.endCommand = endCommand;
         window.setCommandMode = setCommandMode;
     </script>
 </body>

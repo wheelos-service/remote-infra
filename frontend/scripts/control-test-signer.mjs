@@ -8,11 +8,13 @@ import { build } from 'esbuild'
 
 globalThis.crypto ??= webcrypto
 const result = await build({
-  entryPoints: ['src/lib/control-protocol.ts'], bundle: true, write: false,
-  format: 'esm', platform: 'node',
+  entryPoints: ['src/lib/control-protocol.ts', 'src/lib/simulation-input.ts'], bundle: true, write: false,
+  outdir: 'test-build', format: 'esm', platform: 'node',
 })
 const { signControl, base64, controlFeedbackSchema } = await import(
-  `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].contents).toString('base64')}`)
+  `data:text/javascript;base64,${Buffer.from(result.outputFiles.find(file => file.path.endsWith('control-protocol.js')).contents).toString('base64')}`)
+const { simulationCommand } = await import(
+  `data:text/javascript;base64,${Buffer.from(result.outputFiles.find(file => file.path.endsWith('simulation-input.js')).contents).toString('base64')}`)
 const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify'])
 const publicKey = base64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey)))
 
@@ -36,7 +38,7 @@ if (process.argv[2] === '--vector') {
         version: 2, type: 'control', vehicle_id: 'car-test', session_id: session.session_id,
         client_instance_id: 'browser-test', receiver_instance_id: feedback.receiver_instance_id,
         revision: 1, sequence: 1, timestamp_ms: 1700000000000,
-        command: { steering: -1000, throttle: 1000, brake: 0, direction: -1 },
+        command: simulationCommand({ mode: 'low_level', steering: -1, throttle: 1, brake: 0, direction: -1 }),
       }) + '\n')
     } else if (feedback.status !== 'APPLIED') throw new Error('SDK rejected frontend signature')
   }
@@ -50,7 +52,7 @@ if (process.argv[2] === '--vector') {
         response.end(JSON.stringify({ public_key_b64: publicKey }))
         return
       }
-      if (request.method !== 'POST' || request.url !== '/sign') {
+      if (request.method !== 'POST' || !['/sign', '/sign-input'].includes(request.url)) {
         response.writeHead(404).end()
         return
       }
@@ -59,7 +61,11 @@ if (process.argv[2] === '--vector') {
         body += chunk
         if (body.length > 2048) throw new Error('oversize')
       }
-      response.end(await signControl(pair.privateKey, JSON.parse(body)))
+      const payload = JSON.parse(body)
+      if (request.url === '/sign-input') {
+        payload.command = simulationCommand(payload.command)
+      }
+      response.end(await signControl(pair.privateKey, payload))
     } catch {
       response.writeHead(400).end('invalid test payload')
     }

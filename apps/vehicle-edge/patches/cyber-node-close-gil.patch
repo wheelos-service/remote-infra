@@ -1,0 +1,11 @@
+diff --git a/cyber/python/internal/node_bindings.cc b/cyber/python/internal/node_bindings.cc
+--- a/cyber/python/internal/node_bindings.cc
++++ b/cyber/python/internal/node_bindings.cc
+@@ -374,5 +374,6 @@
+   py::class_<NodeBinding, std::shared_ptr<NodeBinding>>(m, "Node")
+       .def(py::init<const std::string&>())
+-      .def("close", &NodeBinding::close)
++      .def("close", &NodeBinding::close,
++           py::call_guard<py::gil_scoped_release>())
+       .def("register_message", &NodeBinding::register_message)
+       .def("create_writer", &NodeBinding::create_writer, py::arg("channel_name"),

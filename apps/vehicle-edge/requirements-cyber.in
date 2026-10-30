@@ -1,0 +1,6 @@
+aiohttp
+livekit
+opencv-python
+protobuf>=5.29,<6
+pynacl
+pyyaml

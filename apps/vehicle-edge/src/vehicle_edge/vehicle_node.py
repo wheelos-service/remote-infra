@@ -1,18 +1,4 @@
-"""vehicle_node.py
-
-Single-file runnable vehicle agent that wires together:
-- `SessionCommandVerifier` and `SessionVehicleRuntime` over LiveKit
-
-Behaviour:
-- periodically refresh the active control session from gateway in LiveKit mode
-- connect to LiveKit and deliver DataPackets to the runtime for verification
-- runs the safety watchdog and reconnect logic
-
-Usage example:
-        python -m vehicle_edge.vehicle_node --gateway http://127.0.0.1:8080 \
-            --vehicle-id car-001 --livekit-url ws://127.0.0.1:7880 \
-            --device-config /etc/teleop/device.yaml
-"""
+"""Vehicle agent configuration, task orchestration and lifecycle."""
 
 from __future__ import annotations
 
@@ -27,15 +13,18 @@ import aiohttp
 
 from .camera_config import CameraLayout, CameraOptions
 from .control_session_receiver import SessionCommandVerifier, SessionVehicleRuntime
+from .cyber_bridge import CyberBridge, CyberOptions
 from .device_credentials import FileDeviceCredentialProvider, VehicleTokenManager
+from .livekit_transport import LiveKitTransport
 from .secure_receiver import EmergencyBrakeController
+from .state_publisher import StatePublisher
 from .video_publisher import LiveKitVideoPublisher
 
 
-async def _periodic_session_refresh(verifier: SessionCommandVerifier, session: aiohttp.ClientSession, interval_s: int = 1) -> None:
+async def _periodic_session_refresh(runtime: SessionVehicleRuntime, session: aiohttp.ClientSession, interval_s: int = 1) -> None:
     while True:
         try:
-            await verifier.refresh_session(session)
+            await runtime.refresh_session(session)
         except Exception as exc:
             logging.warning("[SESSION_REFRESH] failed: %s", exc)
         await asyncio.sleep(interval_s)
@@ -54,55 +43,38 @@ async def request_livekit_token(session: aiohttp.ClientSession, backend_url: str
         return token
 
 
-async def livekit_connect_loop(
-    runtime: Any,
-    lk_url: str,
-    lk_token: str,
+async def _serve_room(
+    participant: Any,
     camera_options: CameraOptions,
+    state_publisher: Optional[StatePublisher],
+    transport: LiveKitTransport,
 ) -> None:
-    try:
-        from livekit import rtc
-    except Exception as exc:
-        logging.error("[LIVEKIT] livekit.rtc not available: %s", exc)
-        return
-
-    room = rtc.Room()
     video_publisher = None
-
-    def _on_data(data, participant, kind=None):
-        try:
-            # LiveKit Python delivers a DataPacket; tests and older clients may
-            # provide raw bytes instead.
-            packet_data = getattr(data, "data", data)
-            raw = packet_data.decode("utf-8") if isinstance(
-                packet_data, (bytes, bytearray)) else str(packet_data)
-            identity = str(getattr(participant, "identity", ""))
-            asyncio.create_task(runtime.on_datachannel_message(raw, identity))
-        except Exception as e:
-            logging.exception("[LIVEKIT] on_data handler error: %s", e)
-
-    room.on("data_received", _on_data)
+    tasks = []
 
     try:
-        await room.connect(lk_url, lk_token, rtc.RoomOptions(dynacast=True))
-        logging.info("[LIVEKIT] connected to %s", lk_url)
+        if state_publisher is not None:
+            tasks.append(asyncio.create_task(state_publisher.run(transport.send)))
         if camera_options.layout is not CameraLayout.OFF:
-            video_publisher = LiveKitVideoPublisher(rtc, room.local_participant)
+            from livekit import rtc
+
+            video_publisher = LiveKitVideoPublisher(rtc, participant)
             await video_publisher.start(camera_options)
 
-        # keep running until disconnected
-        while True:
-            if video_publisher is not None:
-                await video_publisher.collect_finished()
-            await asyncio.sleep(1)
+        async def collect_video():
+            while True:
+                if video_publisher is not None:
+                    await video_publisher.collect_finished()
+                await asyncio.sleep(1)
 
+        tasks.append(asyncio.create_task(collect_video()))
+        await asyncio.gather(*tasks)
     finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if video_publisher is not None:
             await video_publisher.close()
-        try:
-            await room.disconnect()
-        except Exception:
-            pass
 
 
 async def run_agent(
@@ -113,39 +85,35 @@ async def run_agent(
     livekit_url: Optional[str] = None,
     auth_token: Optional[str] = None,
     camera_options: CameraOptions = CameraOptions(),
+    cyber_options: CyberOptions = CyberOptions(),
 ) -> None:
-    brake = EmergencyBrakeController()
+    if cyber_options.control_enabled and not cyber_options.enabled:
+        raise ValueError("Cyber control requires Cyber monitoring to be enabled")
+    cyber_bridge = CyberBridge(cyber_options) if cyber_options.enabled else None
+    brake = cyber_bridge if cyber_bridge is not None else EmergencyBrakeController()
     verifier = SessionCommandVerifier(gateway, vehicle_id, "")
-    runtime = SessionVehicleRuntime(verifier, brake)
+    runtime = SessionVehicleRuntime(
+        verifier, brake, control_enabled=cyber_bridge is None or cyber_options.control_enabled)
+    runtime.connected = False
 
     async with aiohttp.ClientSession() as session:
         token_manager: Optional[VehicleTokenManager] = None
         try:
             if auth_token:
                 verifier.auth_token = auth_token
-                token_endpoint = backend_token_url or (
-                    gateway.rstrip("/") + "/api/token/vehicle")
-                lk_token = await request_livekit_token(
-                    session, token_endpoint, verifier.auth_token, vehicle_id)
-                logging.info("[GATEWAY] obtained LiveKit token (direct/dev auth)")
             else:
                 credentials = FileDeviceCredentialProvider(device_config).load()
                 if credentials.vehicle_id != vehicle_id:
                     raise RuntimeError("device credential vehicle_id does not match --vehicle-id")
                 token_manager = VehicleTokenManager(credentials)
                 verifier.auth_token = await token_manager.refresh(session)
-                token_endpoint = backend_token_url or (
-                    gateway.rstrip("/") + "/api/token/vehicle")
-                lk_token = await request_livekit_token(
-                    session, token_endpoint, verifier.auth_token, vehicle_id)
-                logging.info("[GATEWAY] obtained LiveKit token")
         except Exception as exc:
             logging.error("[INIT] failed to obtain vehicle credentials: %s", exc)
             return
 
         # Session expiry is locally enforced even while refresh retries.
         try:
-            await verifier.refresh_session(session)
+            await runtime.refresh_session(session)
             logging.info("[INIT] active control session loaded")
         except Exception as exc:
             logging.warning("[INIT] initial session refresh failed: %s", exc)
@@ -153,8 +121,25 @@ async def run_agent(
         async def _replace_auth_token(refreshed_token: str) -> None:
             verifier.auth_token = refreshed_token
 
+        async def token_provider() -> str:
+            return await request_livekit_token(
+                session, backend_token_url or gateway.rstrip("/") + "/api/token/vehicle",
+                verifier.auth_token, vehicle_id)
+
+        transport = LiveKitTransport(
+            livekit_url or "", token_provider, runtime.on_datachannel_message,
+            runtime.transport_lost, runtime.transport_ready)
+        state_publisher = (
+            StatePublisher(cyber_bridge, runtime.control_status, vehicle_id)
+            if cyber_bridge is not None else None)
+
+        async def serve(participant: Any) -> None:
+            await _serve_room(participant, camera_options, state_publisher, transport)
+
+        if cyber_bridge is not None:
+            cyber_bridge.start()
         tasks = [
-            asyncio.create_task(_periodic_session_refresh(verifier, session)),
+            asyncio.create_task(_periodic_session_refresh(runtime, session)),
         ]
         if token_manager is not None:
             tasks.append(asyncio.create_task(token_manager.refresh_loop(session, _replace_auth_token)))
@@ -164,8 +149,7 @@ async def run_agent(
         tasks.append(asyncio.create_task(
             runtime.telemetry_loop(gateway, vehicle_id, session)))
         tasks.append(asyncio.create_task(runtime.audit_loop(gateway, session)))
-        tasks.append(asyncio.create_task(livekit_connect_loop(
-            runtime, livekit_url or "", lk_token, camera_options)))
+        tasks.append(asyncio.create_task(transport.run(serve)))
 
         # run until cancelled
         try:
@@ -176,6 +160,9 @@ async def run_agent(
             runtime.running = False
             for t in tasks:
                 t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if cyber_bridge is not None:
+                cyber_bridge.close()
 
 
 def _parse_args() -> argparse.Namespace:
@@ -193,14 +180,61 @@ def _parse_args() -> argparse.Namespace:
                    help="LiveKit websocket URL")
     p.add_argument("--camera-layout", choices=tuple(layout.value for layout in CameraLayout),
                    default=os.environ.get("CAMERA_LAYOUT", CameraLayout.OFF.value),
-                   help="Camera publishing mode: off, single front camera, or three cameras")
+                   help="Camera publishing mode: off, single, three front cameras, or six front/rear cameras")
+    p.add_argument("--camera-indices", type=int, nargs="+", default=None,
+                   help="Distinct capture indices in layout order; six: front left/center/right, rear left/center/right")
     p.add_argument("--camera-width", type=int, default=0,
                    help="Camera width; 0 keeps the driver's default mode")
     p.add_argument("--camera-height", type=int, default=0,
                    help="Camera height; 0 keeps the driver's default mode")
     p.add_argument("--camera-fps", type=int, default=0,
                    help="Camera FPS; 0 uses the ACTIVE profile FPS")
-    return p.parse_args()
+    p.add_argument("--cyber", action="store_true",
+                   help="Subscribe to WheelOS localization/chassis and publish vehicle.state")
+    p.add_argument("--cyber-control", action="store_true",
+                   help="Enable verified control_cmd publishing (requires --cyber)")
+    p.add_argument("--cyber-node-name", default="teleop_vehicle")
+    p.add_argument("--cyber-localization-channel", default="/apollo/localization/pose")
+    p.add_argument("--cyber-chassis-channel", default="/apollo/canbus/chassis")
+    p.add_argument("--cyber-control-channel", default="/apollo/control")
+    p.add_argument("--video-width", type=int, default=0,
+                   help="Published video width; set with --video-height to fit the full capture")
+    p.add_argument("--video-height", type=int, default=0,
+                   help="Published video height; 0 with video width 0 keeps the capture size")
+    p.add_argument("--cyber-max-forward-throttle-pct", type=float, default=CyberOptions().max_forward_throttle_pct)
+    p.add_argument("--cyber-max-reverse-throttle-pct", type=float, default=CyberOptions().max_reverse_throttle_pct)
+    p.add_argument("--cyber-max-steering-pct", type=float, default=CyberOptions().max_steering_pct)
+    p.add_argument("--cyber-stop-brake-pct", type=float, default=CyberOptions().stop_brake_pct)
+    p.add_argument("--cyber-emergency-brake-pct", type=float, default=CyberOptions().emergency_brake_pct)
+    p.add_argument("--cyber-max-speed-mps", type=float, default=CyberOptions().max_speed_mps)
+    p.add_argument("--cyber-chassis-timeout-s", type=float, default=CyberOptions().chassis_timeout_s)
+    p.add_argument("--cyber-shift-speed-mps", type=float, default=CyberOptions().shift_speed_mps)
+    p.add_argument("--cyber-shift-timeout-s", type=float, default=CyberOptions().shift_timeout_s)
+    p.add_argument("--cyber-throttle-rise-pct-s", type=float, default=CyberOptions().throttle_rise_pct_s)
+    p.add_argument("--cyber-steering-rate-pct-s", type=float, default=CyberOptions().steering_rate_pct_s)
+    args = p.parse_args()
+    if args.cyber_control and not args.cyber:
+        p.error("--cyber-control requires --cyber")
+    try:
+        CameraOptions(layout=CameraLayout(args.camera_layout),
+                      indices=tuple(args.camera_indices) if args.camera_indices is not None else None,
+                      video_width=args.video_width, video_height=args.video_height)
+        CyberOptions(
+            max_forward_throttle_pct=args.cyber_max_forward_throttle_pct,
+            max_reverse_throttle_pct=args.cyber_max_reverse_throttle_pct,
+            max_steering_pct=args.cyber_max_steering_pct,
+            stop_brake_pct=args.cyber_stop_brake_pct,
+            emergency_brake_pct=args.cyber_emergency_brake_pct,
+            max_speed_mps=args.cyber_max_speed_mps,
+            chassis_timeout_s=args.cyber_chassis_timeout_s,
+            shift_speed_mps=args.cyber_shift_speed_mps,
+            shift_timeout_s=args.cyber_shift_timeout_s,
+            throttle_rise_pct_s=args.cyber_throttle_rise_pct_s,
+            steering_rate_pct_s=args.cyber_steering_rate_pct_s,
+        )
+    except ValueError as exc:
+        p.error(str(exc))
+    return args
 
 
 def main() -> None:
@@ -233,9 +267,31 @@ def main() -> None:
                 auth_token=args.auth_token,
                 camera_options=CameraOptions(
                     layout=CameraLayout(args.camera_layout),
+                    indices=tuple(args.camera_indices) if args.camera_indices is not None else None,
                     width=args.camera_width,
                     height=args.camera_height,
                     fps=args.camera_fps,
+                    video_width=args.video_width,
+                    video_height=args.video_height,
+                ),
+                cyber_options=CyberOptions(
+                    enabled=args.cyber,
+                    control_enabled=args.cyber_control,
+                    node_name=args.cyber_node_name,
+                    localization_channel=args.cyber_localization_channel,
+                    chassis_channel=args.cyber_chassis_channel,
+                    control_channel=args.cyber_control_channel,
+                    max_forward_throttle_pct=args.cyber_max_forward_throttle_pct,
+                    max_reverse_throttle_pct=args.cyber_max_reverse_throttle_pct,
+                    max_steering_pct=args.cyber_max_steering_pct,
+                    stop_brake_pct=args.cyber_stop_brake_pct,
+                    emergency_brake_pct=args.cyber_emergency_brake_pct,
+                    max_speed_mps=args.cyber_max_speed_mps,
+                    chassis_timeout_s=args.cyber_chassis_timeout_s,
+                    shift_speed_mps=args.cyber_shift_speed_mps,
+                    shift_timeout_s=args.cyber_shift_timeout_s,
+                    throttle_rise_pct_s=args.cyber_throttle_rise_pct_s,
+                    steering_rate_pct_s=args.cyber_steering_rate_pct_s,
                 ),
             )
         )

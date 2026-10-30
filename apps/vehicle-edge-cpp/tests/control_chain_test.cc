@@ -44,7 +44,9 @@ struct Controller : livekit::RoomDelegate {
       }
       std::this_thread::sleep_for(10ms);
     }
-    throw std::runtime_error("control feedback timeout");
+    std::lock_guard<std::mutex> lock(mutex);
+    throw std::runtime_error("control feedback timeout; last feedback: " +
+                             vehicle_edge::EncodeJSON(feedback));
   }
 };
 
@@ -118,14 +120,15 @@ int main(int argc, char **argv) {
     payload["revision"] = ready["revision"];
     payload["sequence"] = 1;
     payload["timestamp_ms"] = Json::Int64(vehicle_edge::UnixMilliseconds());
-    payload["command"]["steering"] = 100;
-    payload["command"]["throttle"] = 100;
+    payload["command"]["mode"] = "low_level";
+    payload["command"]["steering"] = 0.1;
+    payload["command"]["throttle"] = 0.1;
     payload["command"]["brake"] = 0;
     payload["command"]["direction"] = 1;
     const auto sign = [&] {
       payload["timestamp_ms"] = Json::Int64(vehicle_edge::UnixMilliseconds());
       const auto response =
-          http.Post(signer + "/sign", "application/json",
+          http.Post(signer + "/sign-input", "application/json",
                     vehicle_edge::EncodeJSON(payload), "", true);
       Require(response.status == 200, "frontend signing failed");
       return response.body;
@@ -137,6 +140,7 @@ int main(int argc, char **argv) {
     const auto signed_body = sign();
     auto tampered = vehicle_edge::ParseHTTPJSON(signed_body);
     tampered["command"]["throttle"] = 200;
+    tampered["timestamp_ms"] = Json::Int64(vehicle_edge::UnixMilliseconds());
     publish(vehicle_edge::EncodeJSON(tampered));
     delegate.Wait([](const Json::Value &v) {
       return v["last_rejection"] == "invalid_signature";
@@ -144,22 +148,45 @@ int main(int argc, char **argv) {
     // Refresh the timestamp after waiting for the rejection feedback.
     const auto fresh_signed_body = sign();
     publish(fresh_signed_body);
-    delegate.Wait([](const Json::Value &v) {
+    const auto applied = delegate.Wait([](const Json::Value &v) {
       return v["status"] == "APPLIED" && v["accepted_sequence"] == 1;
     });
+    Require(applied["command"]["steering"].asInt() == 100 &&
+                applied["command"]["throttle"].asInt() == 100,
+            "normalized frontend input was not mapped to v2 integer units");
     publish(sign());
     delegate.Wait(
         [](const Json::Value &v) { return v["last_rejection"] == "replay"; });
+    payload["sequence"] = 2;
+    payload["command"] = Json::Value(Json::objectValue);
+    payload["command"]["mode"] = "high_level";
+    payload["command"]["action"] = "reverse";
+    publish(sign());
+    const auto reverse = delegate.Wait([](const Json::Value &v) {
+      return v["status"] == "APPLIED" && v["accepted_sequence"] == 2;
+    });
+    Require(reverse["command"]["direction"].asInt() == -1 &&
+                reverse["command"]["throttle"].asInt() == 1000,
+            "reverse input was not mapped to the signed simulator command");
+    payload["sequence"] = 3;
+    payload["command"]["action"] = "stop";
+    publish(sign());
+    const auto braking = delegate.Wait([](const Json::Value &v) {
+      return v["status"] == "APPLIED" && v["accepted_sequence"] == 3;
+    });
+    Require(braking["command"]["throttle"].asInt() == 0 &&
+                braking["command"]["brake"].asInt() == 1000,
+            "release/stop input did not clear simulated propulsion");
     const auto stopped = delegate.Wait(
         [](const Json::Value &v) { return v["status"] == "LOCKED"; });
     Require(stopped["command"].isNull() &&
                 stopped["reason"] == "command_timeout",
             "watchdog did not clear simulated execution");
-    payload["sequence"] = 2;
+    payload["sequence"] = 4;
     publish(sign());
     delegate.Wait([](const Json::Value &v) {
       return v["last_rejection"] == "not_authorized" &&
-             v["accepted_sequence"] == 1;
+             v["accepted_sequence"] == 3;
     });
     post("/api/control/" + session["session"]["session_id"].asString() +
              "/release",

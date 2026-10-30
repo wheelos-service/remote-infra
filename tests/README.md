@@ -40,15 +40,16 @@ otherwise it uses the ignored C++ build directory. This is a **simulator-only**
 acceptance test, not a physical vehicle test.
 
 The chain uses real Gateway HTTP handlers and Redis Lua semantics (miniredis),
-actual frontend WebCrypto signing, real loopback LiveKit, production C++
+actual shared input conversion and frontend WebCrypto signing, real loopback LiveKit, production C++
 supervision/IPC/verifier and a simulated execution endpoint. It covers session
-identity, cross-language signature validation, tamper/replay rejection,
+identity, normalized forward/turn/reverse/stop conversion, cross-language signature validation, tamper/replay rejection,
 watchdog/no automatic rearm, operator singleton, simulated handover and switching.
 Only fixture identities and execution are synthetic. Test-only worker config
 loading is not shipped. All owned temporary services/files are cleaned on exit.
 
 `cd frontend && npm test` additionally covers controller cancellation, stalled
-requests/publication, receiver changes and feedback expiry. Manual browser
+requests/publication, receiver changes and feedback expiry, input capability
+gates, gamepad-to-v2 conversion and camera group/pending-intent semantics. Manual browser
 steps and the v2 signature contract are in
 [`apps/vehicle-edge-cpp/README.md`](../apps/vehicle-edge-cpp/README.md#testable-v2-control-loop).
 
@@ -63,6 +64,19 @@ The tests are grouped by scope:
 
 The component unit tests remain next to their implementations under
 `apps/teleop-gateway/internal/gateway/` and `apps/vehicle-edge/tests/`.
+
+The merged legacy console also tests the shared input/view modules and their
+listener cleanup with `cd apps/operator-console && npm test`. For Python
+reference tests use an environment with `apps/vehicle-edge/docker/requirements.txt`
+and pytest installed, then run from repository root:
+
+```bash
+PYTHONPATH=apps/vehicle-edge/src python3 -m pytest -q apps/vehicle-edge/tests
+```
+
+The native Cyber test is opt-in and skipped without its runtime. Camera tests
+use synthetic OpenCV images, not physical camera hardware. No production service,
+vehicle endpoint or actuator is used by these automated merge regressions.
 
 ## Platform mock contracts
 

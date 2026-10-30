@@ -14,7 +14,7 @@
           "type": "object",
           "properties": {
             "mode": { "const": "high_level" },
-            "action": { "enum": ["forward", "reverse", "left", "right", "stop", "emergency_stop"] }
+            "action": { "enum": ["forward", "reverse", "left", "right", "stop", "emergency_stop", "gear_park", "gear_neutral", "gear_drive", "gear_reverse", "auto_enter", "auto_exit"] }
           },
           "required": ["mode", "action"],
           "additionalProperties": false

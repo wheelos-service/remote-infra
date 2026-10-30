@@ -11,7 +11,7 @@ import {
 import { useAuth } from '../app/AuthProvider'
 import { useVehicles } from '../hooks/use-vehicles'
 import { createPreviewVehicles, selectedPreviewScenario } from '../lib/preview-vehicles'
-import { directoryControl } from '../lib/vehicle-telemetry'
+import { directoryControl, getSampleFreshness } from '../lib/vehicle-telemetry'
 import LiveFleetPage from './LiveFleetPage'
 import TeleopWorkbench from './TeleopWorkbench'
 import VehicleBusinessPage from './VehicleBusinessPage'
@@ -38,6 +38,9 @@ const HomePage: React.FC = () => {
     () => vehicles.entries.map((entry) => ({
       id: entry.vehicle_id,
       name: entry.name || entry.vehicle_id,
+      gear: !vehicles.requestFailed &&
+        getSampleFreshness(entry.state?.chassis, entry, performance.now()).state === 'fresh'
+          ? entry.state?.chassis.message?.gear_location ?? undefined : undefined,
       occupancy: directoryControl(
         entry,
         vehicles.requestFailed,
@@ -53,14 +56,14 @@ const HomePage: React.FC = () => {
 
   const handleChangeSection = (section: MainSection) => {
     if (activeSection === 'drive' && section !== 'drive' && teleopActiveCount > 0) {
-      if (!window.confirm('仍有只读视频会话连接。离开将关闭全部监看面板并释放观看租约，确定继续吗？')) return
+      if (!window.confirm('仍有视频或模拟控制会话。离开将关闭监看并释放会话；设备交接可能仍待确认，确定继续吗？')) return
     }
     setActiveSection(section)
   }
 
   const handleSignOut = () => {
     if (teleopActiveCount > 0 &&
-        !window.confirm('仍有只读视频会话连接。退出登录将关闭全部监看面板，确定继续吗？')) return
+        !window.confirm('仍有视频或模拟控制会话。退出将关闭连接并请求释放；设备交接可能仍待确认，确定继续吗？')) return
     auth.signOut()
   }
 

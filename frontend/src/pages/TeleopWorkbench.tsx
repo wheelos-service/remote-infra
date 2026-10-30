@@ -7,8 +7,9 @@ import { teleopConfig } from '../lib/teleop-config'
 import { isVehicleVideoSender, newViewingId } from '../lib/viewing-api'
 import { ViewingLifecycle } from '../lib/viewing-lifecycle'
 import { SimulationControlPanel } from './SimulationControlPanel'
+import { CameraView, trackCameraName, visibleCameras, type CameraName, type ViewMode } from '../lib/camera-view'
+import type { ControlCommand } from '../lib/control-protocol'
 
-type CameraName = 'front' | 'left' | 'center' | 'right'
 type ObserverStatus = 'connecting' | 'waiting-video' | 'watching' | 'error'
 const MAX_OBSERVERS = 4
 const previewMode = new URLSearchParams(window.location.search).get('preview') === '1'
@@ -17,27 +18,13 @@ interface WorkbenchVehicle {
   id: string
   name: string
   occupancy: 'free' | 'occupied' | 'unknown'
+  gear?: string
 }
 
 interface TeleopWorkbenchProps {
   vehicles: WorkbenchVehicle[]
   directoryReady: boolean
-  onActiveChange?: (activeViewCount: number) => void
-}
-
-const cameras: { name: CameraName; label: string }[] = [
-  { name: 'front', label: '前视' },
-  { name: 'left', label: '左侧' },
-  { name: 'center', label: '中间' },
-  { name: 'right', label: '右侧' },
-]
-
-function trackCameraName(trackName: string): CameraName | undefined {
-  const normalized = trackName === 'camera' || trackName === 'camera0'
-    ? 'front' : trackName.replace(/^camera-/, '')
-  return cameras.some((camera) => camera.name === normalized)
-    ? normalized as CameraName
-    : undefined
+  onActiveChange?: (activeSessionCount: number) => void
 }
 
 const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({ vehicles, directoryReady, onActiveChange }) => {
@@ -47,6 +34,10 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({ vehicles, directoryRe
   const [observerIds, setObserverIds] = useState<string[]>([])
   const [activeCount, setActiveCount] = useState(0)
   const [controlBusy, setControlBusy] = useState(false)
+  const [controlIntent, setControlIntent] = useState<{ vehicleId: string; command: ControlCommand }>()
+  const noteIntent = useCallback((vehicleId: string, command?: ControlCommand) => {
+    setControlIntent(command ? { vehicleId, command } : undefined)
+  }, [])
   const [observerBearer, setObserverBearer] = useState(accessToken)
   const activeObserversRef = useRef(new Set<string>())
   const clientInstanceId = useRef(newViewingId())
@@ -56,8 +47,12 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({ vehicles, directoryRe
     else activeObserversRef.current.delete(vehicleId)
     const count = activeObserversRef.current.size
     setActiveCount(count)
-    onActiveChange?.(count)
-  }, [onActiveChange])
+  }, [])
+
+  useEffect(() => {
+    onActiveChange?.(activeCount + Number(controlBusy))
+  }, [activeCount, controlBusy, onActiveChange])
+  useEffect(() => () => onActiveChange?.(0), [onActiveChange])
 
   useEffect(() => {
     if (!vehicles.some((vehicle) => vehicle.id === selectedVehicleId)) {
@@ -66,28 +61,29 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({ vehicles, directoryRe
   }, [selectedVehicleId, vehicles])
 
   useEffect(() => {
+    if (controlBusy) return
     if (directoryReady && !vehicles.some((vehicle) => vehicle.id === focusedVehicleId)) {
       setFocusedVehicleId('')
     }
-  }, [directoryReady, focusedVehicleId, vehicles])
+  }, [controlBusy, directoryReady, focusedVehicleId, vehicles])
 
   useEffect(() => {
     if (!accessToken && !previewMode) {
       setObserverIds([])
       activeObserversRef.current.clear()
       setActiveCount(0)
-      onActiveChange?.(0)
     }
   }, [accessToken, onActiveChange])
 
   useEffect(() => {
     if (observerBearer === accessToken) return
     setFocusedVehicleId('')
+    setControlBusy(false)
+    setControlIntent(undefined)
     setObserverIds([])
     activeObserversRef.current.clear()
     setActiveCount(0)
     setObserverBearer(accessToken)
-    onActiveChange?.(0)
   }, [accessToken, observerBearer, onActiveChange])
 
   useEffect(() => {
@@ -213,8 +209,8 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({ vehicles, directoryRe
       </section>
 
       {teleopConfig.simulationControl && !previewMode && focusedVehicleId && accessToken && (
-        <SimulationControlPanel key={focusedVehicleId}
-          vehicleId={focusedVehicleId} bearer={accessToken} onBusyChange={setControlBusy} />
+        <SimulationControlPanel key={`${focusedVehicleId}:${accessToken}`}
+          vehicleId={focusedVehicleId} bearer={accessToken} onBusyChange={setControlBusy} onIntent={noteIntent} />
       )}
 
       {previewMode && (
@@ -233,6 +229,8 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({ vehicles, directoryRe
                 vehicleId={id}
                 vehicleName={vehicle?.name || id}
                 occupancy={vehicle?.occupancy ?? 'unknown'}
+                gear={vehicle?.gear}
+                intent={controlIntent?.vehicleId === id ? controlIntent.command : undefined}
                 bearer={accessToken}
                 clientInstanceId={clientInstanceId.current}
                 preview={previewMode}
@@ -257,7 +255,7 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({ vehicles, directoryRe
       <section className="flex items-start gap-2 rounded-xl border border-amber-800/60 bg-amber-950/20 p-3 text-xs text-amber-100/80">
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
         <p>
-          当前仅提供操作目标选择和只读监看。切换目标不转移驾驶权；控制会话、驾驶输入及任务指令保持关闭。
+          实车控制与模式切换保持关闭。显式启用的 v2 模拟输入不连接执行器；切换目标不转移驾驶权，必须等待原车交接确认。
         </p>
       </section>
     </div>
@@ -268,12 +266,14 @@ const ObserverPanel: React.FC<{
   vehicleId: string
   vehicleName: string
   occupancy: WorkbenchVehicle['occupancy']
+  gear?: string
+  intent?: ControlCommand
   bearer?: string
   clientInstanceId: string
   preview: boolean
   onActiveChange(vehicleId: string, active: boolean): void
   onClose(): void
-}> = ({ vehicleId, vehicleName, occupancy, bearer, clientInstanceId, preview, onActiveChange, onClose }) => {
+}> = ({ vehicleId, vehicleName, occupancy, gear, intent, bearer, clientInstanceId, preview, onActiveChange, onClose }) => {
   const [status, setStatus] = useState<ObserverStatus>(preview ? 'waiting-video' : 'connecting')
   const [message, setMessage] = useState<string>()
   const [tracks, setTracks] = useState<Partial<Record<CameraName, LiveKitTrack>>>({})
@@ -281,6 +281,23 @@ const ObserverPanel: React.FC<{
   const lifecycleRef = useRef<ViewingLifecycle | undefined>(undefined)
   const videoAreaRef = useRef<HTMLDivElement | null>(null)
   const mountedRef = useRef(true)
+  const cameraView = useRef(new CameraView())
+  const [, updateView] = useState(0)
+  const [centerFocused, setCenterFocused] = useState(false)
+  const [viewMode, setViewMode] = useState<ViewMode>('auto')
+
+  useEffect(() => {
+    const view = cameraView.current
+    const previous = view.group
+    if (intent) view.command({
+      mode: 'low_level', steering: intent.steering / 1000, throttle: intent.throttle / 1000,
+      brake: intent.brake / 1000, direction: intent.direction,
+    })
+    else view.clearIntent()
+    view.gear(gear)
+    if (previous !== view.group) setCenterFocused(false)
+    updateView((value) => value + 1)
+  }, [gear, intent])
 
   useEffect(() => {
     mountedRef.current = true
@@ -381,7 +398,11 @@ const ObserverPanel: React.FC<{
     }
   }, [bearer, clientInstanceId, onActiveChange, preview, vehicleId])
 
-  const visibleTracks = cameras.filter(({ name }) => tracks[name])
+  const groupCameras = visibleCameras(cameraView.current.group, tracks)
+  const centerName = cameraView.current.group === 'rear' ? 'rear-center' : 'center'
+  const visibleTracks = centerFocused && tracks[centerName]
+    ? groupCameras.filter(({ name }) => name === centerName) : groupCameras
+  const hasVisibleVideo = visibleTracks.some(({ name }) => tracks[name])
   const occupancyText = occupancyLabel(occupancy)
 
   return (
@@ -401,6 +422,22 @@ const ObserverPanel: React.FC<{
         </span>
         <span className="text-slate-500">操作占用：{occupancyText}</span>
       </div>
+      <div className="flex flex-wrap gap-2 px-3 pb-2 text-[10px] text-slate-300">
+        <select aria-label={`${vehicleName} 摄像头视角`} value={viewMode}
+          onChange={(event) => {
+            const mode = event.target.value
+            if (mode !== 'auto' && mode !== 'front' && mode !== 'rear') return
+            cameraView.current.setMode(mode)
+            setViewMode(mode)
+            setCenterFocused(false)
+            updateView((value) => value + 1)
+          }} className="rounded border border-slate-700 bg-slate-950 p-1">
+          <option value="auto">自动前后视角</option><option value="front">前方</option><option value="rear">后方</option>
+        </select>
+        <button type="button" disabled={!tracks[centerName]} onClick={() => setCenterFocused((value) => !value)}
+          className="rounded border border-slate-700 px-2 disabled:opacity-40">{centerFocused ? '恢复三路' : '放大中间'}</button>
+        <span>{cameraView.current.status}（运营快照仅辅助选视角，不证明执行）</span>
+      </div>
       <div ref={videoAreaRef} className="relative min-h-[210px] flex-1 bg-black">
         {preview ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-slate-950 p-4 text-center">
@@ -408,8 +445,8 @@ const ObserverPanel: React.FC<{
             <p className="text-xs text-slate-300">{vehicleName}</p>
             <p className="text-[10px] text-slate-500">固定预览场景，不会连接车辆。</p>
           </div>
-        ) : visibleTracks.length ? (
-          <div className={`grid h-full min-h-[210px] ${visibleTracks.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+        ) : hasVisibleVideo ? (
+          <div className={`grid h-full min-h-[210px] ${visibleTracks.length > 1 ? 'grid-cols-3' : 'grid-cols-1'}`}>
             {visibleTracks.map(({ name, label }) => (
               <VideoTile key={name} track={tracks[name]} label={label} />
             ))}
@@ -421,10 +458,10 @@ const ObserverPanel: React.FC<{
             {message && <p className="text-[10px] text-slate-500">{message}</p>}
           </div>
         )}
-        {message && visibleTracks.length > 0 && (
+        {message && hasVisibleVideo && (
           <p className="absolute inset-x-0 bottom-0 bg-slate-950/85 px-2 py-1 text-[10px] text-amber-200">{message}</p>
         )}
-        {!preview && visibleTracks.length > 0 && (
+        {!preview && hasVisibleVideo && (
           <button
             type="button"
             onClick={() => void videoAreaRef.current?.requestFullscreen().catch(() => setMessage('无法进入全屏'))}
@@ -436,7 +473,7 @@ const ObserverPanel: React.FC<{
         )}
       </div>
       <footer className="border-t border-slate-800 px-3 py-2 text-[10px] text-slate-500">
-        独立观看租约 · 只读 · 不包含控制权限
+        独立观看租约 · 只读 · 仅挂接当前视角，保留 adaptiveStream；不承诺隐藏轨道即停止车端上行
       </footer>
     </section>
   )
@@ -444,12 +481,45 @@ const ObserverPanel: React.FC<{
 
 const VideoTile: React.FC<{ track?: LiveKitTrack; label: string }> = ({ track, label }) => {
   const containerRef = useRef<HTMLDivElement>(null)
+  const [frameState, setFrameState] = useState('等待解码帧')
   useEffect(() => {
+    setFrameState('等待解码帧')
     if (!track || !containerRef.current) return
     const element = track.attach()
+    element.muted = true
+    element.autoplay = true
+    const video = element instanceof HTMLVideoElement ? element : undefined
+    if (video) video.playsInline = true
+    let active = true
+    let lastFrame = Number.NEGATIVE_INFINITY
+    let frameId: number | undefined
+    const fresh = () => {
+      if (!active) return
+      lastFrame = performance.now()
+      setFrameState('已解码画面（非延迟保证）')
+    }
+    const frames = Boolean(video && typeof video.requestVideoFrameCallback === 'function')
+    const frame = () => {
+      fresh()
+      if (active && video) frameId = video.requestVideoFrameCallback(frame)
+    }
+    const progress = () => { if (!frames && element.readyState >= 2) fresh() }
+    const stalled = () => { if (active) setFrameState('画面停止 / 不可用') }
+    element.addEventListener('timeupdate', progress)
+    element.addEventListener('loadeddata', progress)
+    const events = ['waiting', 'stalled', 'ended', 'error', 'emptied']
+    for (const event of events) element.addEventListener(event, stalled)
+    if (frames && video) frameId = video.requestVideoFrameCallback(frame)
+    const timer = setInterval(() => { if (performance.now() - lastFrame > 2000) stalled() }, 500)
     element.className = 'h-full w-full bg-black object-contain'
     containerRef.current.replaceChildren(element)
     return () => {
+      active = false
+      clearInterval(timer)
+      if (frameId !== undefined && video) video.cancelVideoFrameCallback(frameId)
+      element.removeEventListener('timeupdate', progress)
+      element.removeEventListener('loadeddata', progress)
+      for (const event of events) element.removeEventListener(event, stalled)
       track.detach(element)
       element.remove()
     }
@@ -457,7 +527,9 @@ const VideoTile: React.FC<{ track?: LiveKitTrack; label: string }> = ({ track, l
   return (
     <div className="relative min-h-[210px] overflow-hidden border border-slate-800 bg-black">
       <div ref={containerRef} className="absolute inset-0" />
+      {!track && <p className="p-3 text-xs text-slate-500">尚无此路视频</p>}
       <span className="absolute left-2 top-2 rounded bg-slate-950/80 px-2 py-1 text-[10px] text-slate-200">{label}</span>
+      {track && <span className="absolute inset-x-0 bottom-0 bg-slate-950/80 px-2 py-1 text-[10px] text-amber-200">{frameState}</span>}
     </div>
   )
 }

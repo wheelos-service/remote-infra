@@ -8,7 +8,9 @@ PROTOCOL_VERSION = 1
 CONTROL_TYPE = "control"
 HIGH_LEVEL_MODE = "high_level"
 LOW_LEVEL_MODE = "low_level"
-HIGH_LEVEL_ACTIONS = frozenset({"forward", "reverse", "left", "right", "stop", "emergency_stop"})
+VEHICLE_ACTIONS = frozenset({"gear_park", "gear_neutral", "gear_drive", "gear_reverse",
+                             "auto_enter", "auto_exit"})
+HIGH_LEVEL_ACTIONS = frozenset({"forward", "reverse", "left", "right", "stop", "emergency_stop"}) | VEHICLE_ACTIONS
 
 
 def build_sign_message(packet: Mapping[str, Any]) -> str:
@@ -62,19 +64,23 @@ def valid_command(command: Any) -> bool:
     return -1 <= steering <= 1 and 0 <= throttle <= 1 and 0 <= brake <= 1 and direction in {-1, 0, 1}
 
 
-def resolve_command(command: Mapping[str, Any]) -> dict[str, float]:
+def resolve_command(command: Mapping[str, Any]) -> dict[str, float | str]:
     """Map a high-level intent or low-level command to actuator values."""
     if command.get("mode") == HIGH_LEVEL_MODE:
         action = command["action"]
+        if action in VEHICLE_ACTIONS:
+            return {"steering": 0.0, "throttle": 0.0, "brake": 1.0, "direction": 0.0,
+                    "vehicle_action": action}
         if action == "forward":
             return {"steering": 0.0, "throttle": 1.0, "brake": 0.0, "direction": 1.0}
         if action == "reverse":
             return {"steering": 0.0, "throttle": 1.0, "brake": 0.0, "direction": -1.0}
         if action == "left":
-            return {"steering": -1.0, "throttle": 0.0, "brake": 0.0, "direction": 1.0}
+            return {"steering": -1.0, "throttle": 0.0, "brake": 0.0, "direction": 0.0}
         if action == "right":
-            return {"steering": 1.0, "throttle": 0.0, "brake": 0.0, "direction": 1.0}
-        return {"steering": 0.0, "throttle": 0.0, "brake": 1.0, "direction": 0.0}
+            return {"steering": 1.0, "throttle": 0.0, "brake": 0.0, "direction": 0.0}
+        return {"steering": 0.0, "throttle": 0.0, "brake": 1.0, "direction": 0.0,
+                "brake_mode": "stop" if action == "stop" else "emergency"}
     return {
         "steering": float(command["steering"]),
         "throttle": float(command["throttle"]),

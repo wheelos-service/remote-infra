@@ -1,6 +1,8 @@
-type ControlCommand = {
+export type VehicleAction = 'gear_park' | 'gear_neutral' | 'gear_drive' | 'gear_reverse' | 'auto_enter' | 'auto_exit';
+
+export type ControlCommand = {
     mode: 'high_level' | 'low_level';
-    action?: 'forward' | 'reverse' | 'left' | 'right' | 'stop' | 'emergency_stop';
+    action?: 'forward' | 'reverse' | 'left' | 'right' | 'stop' | 'emergency_stop' | VehicleAction;
     steering?: number;
     throttle?: number;
     brake?: number;
@@ -11,6 +13,7 @@ type SenderOptions = {
     gatewayBaseUrl: string;
     vehicleId: string;
     authToken: string;
+    onRenewalError?: (error: unknown) => void;
 };
 
 function toBase64(buffer: ArrayBuffer): string {
@@ -37,14 +40,18 @@ export class SecureControlSender {
     private renewTimer?: ReturnType<typeof setInterval>;
     private publishData?: (message: string) => Promise<void>;
     private sequence = 0;
+    private sending = false;
+    private handoverPending = false;
     private readonly gatewayBaseUrl: string;
     private readonly vehicleId: string;
     private readonly authToken: string;
+    private readonly onRenewalError?: (error: unknown) => void;
 
-    constructor({gatewayBaseUrl, vehicleId, authToken}: SenderOptions) {
+    constructor({gatewayBaseUrl, vehicleId, authToken, onRenewalError}: SenderOptions) {
         this.gatewayBaseUrl = gatewayBaseUrl.replace(/\/$/, '');
         this.vehicleId = vehicleId;
         this.authToken = authToken;
+        this.onRenewalError = onRenewalError;
     }
 
     async createKeyPair(): Promise<void> {
@@ -55,6 +62,7 @@ export class SecureControlSender {
     }
 
     async acquireSession(): Promise<{session: {session_id: string}; renew_after_ms: number}> {
+        if (this.handoverPending) throw new Error('Vehicle handover is pending; control reacquisition is blocked');
         const response = await fetch(`${this.gatewayBaseUrl}/api/vehicles/${encodeURIComponent(this.vehicleId)}/control/acquire`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json', Authorization: `Bearer ${this.authToken}`},
@@ -73,7 +81,11 @@ export class SecureControlSender {
 
     startRenewal(): void {
         this.stopRenewal();
-        this.renewTimer = setInterval(() => this.renew().catch(console.error), this.renewAfterMs);
+        this.renewTimer = setInterval(() => this.renew().catch(error => {
+            this.stopRenewal();
+            console.error('Control session renewal failed:', error);
+            this.onRenewalError?.(error);
+        }), this.renewAfterMs);
     }
 
     stopRenewal(): void {
@@ -95,28 +107,40 @@ export class SecureControlSender {
         if (!this.sessionId) return;
         const sessionId = this.sessionId;
         this.sessionId = undefined;
+        this.handoverPending = true;
         const response = await fetch(`${this.gatewayBaseUrl}/api/control/${encodeURIComponent(sessionId)}/release`, {
             method: 'POST',
             headers: {Authorization: `Bearer ${this.authToken}`},
             keepalive: true,
         });
         if (!response.ok && response.status !== 404) throw new Error(`control session release failed: ${response.status}`);
+        if (response.status === 202) {
+            throw new Error('Control release accepted; vehicle handover is NOT confirmed. Legacy v1 cannot confirm physical handover.');
+        }
+        this.handoverPending = false;
     }
 
     async sendCommand(command: ControlCommand): Promise<void> {
         if (!this.privateKey || !this.sessionId || !this.publishData) {
             throw new Error('secure control sender is not initialized');
         }
-        const payload = {
-            version: 1,
-            type: 'control',
-            session_id: this.sessionId,
-            sequence: ++this.sequence,
-            timestamp_ms: Date.now(),
-            command,
-        };
-        const signature = await crypto.subtle.sign(
-            'Ed25519', this.privateKey, new TextEncoder().encode(signMessage(payload)));
-        await this.publishData(JSON.stringify({...payload, signature: toBase64(signature)}));
+        if (this.sending) return;
+        this.sending = true;
+        try {
+            const payload = {
+                version: 1,
+                type: 'control',
+                session_id: this.sessionId,
+                sequence: ++this.sequence,
+                timestamp_ms: Date.now(),
+                command,
+            };
+            const signature = await crypto.subtle.sign(
+                'Ed25519', this.privateKey, new TextEncoder().encode(signMessage(payload)));
+            if (this.sessionId !== payload.session_id) return;
+            await this.publishData(JSON.stringify({...payload, signature: toBase64(signature)}));
+        } finally {
+            this.sending = false;
+        }
     }
 }

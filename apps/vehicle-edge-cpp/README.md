@@ -278,13 +278,19 @@ subject mapping. Never reuse a physical vehicle ID:
    WebCrypto requires a secure context (localhost or HTTPS).
 4. Open a read-only observer panel for the simulator, choose its operating target,
    request simulation control, wait for READY, hold
-   the simulated-forward button and observe increasing accepted sequence.
+   the forward/reverse/turn buttons and observe increasing accepted sequence.
+   Keyboard WASD/arrows and a confirmed standard gamepad mapping (LB deadman)
+   also pass through the same v2 adapter. Gear/mode actions are rejected.
    Release, wait for confirmed **simulation** handover, then select another car.
 
 The controller's separate Room does not subscribe to video a second time;
 the observer panel displays it (`camera0`, `camera`, or `camera-front` map to front).
+It also recognizes front/rear three-camera groups. Manual camera switching never
+sends a control command; fresh directory gear only assists automatic view
+selection and does not prove execution. Only the selected camera group is
+attached with adaptive streaming; this is not proof of stopped upstream encoding.
 
-The browser sends neutral commands when the button is released; blur/hidden,
+The browser clears propulsion and sends simulated braking when input is released; blur/hidden,
 RTC reconnect/disconnect, renewal/feedback failure or stalled signing locks off
 publication. It does not silently recover or acquire a second vehicle.
 Server-side arbitration remains authoritative across tabs/devices.

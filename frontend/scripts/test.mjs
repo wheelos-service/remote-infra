@@ -21,6 +21,8 @@ const { outputFiles } = await esbuild.build({
     { in: 'src/lib/preview-vehicles.ts', out: 'preview-vehicles' },
     { in: 'src/lib/control-protocol.ts', out: 'control-protocol' },
     { in: 'src/lib/simulation-controller.ts', out: 'simulation-controller' },
+    { in: 'src/lib/simulation-input.ts', out: 'simulation-input' },
+    { in: 'src/lib/camera-view.ts', out: 'camera-view' },
   ],
   outdir: 'test-build',
   bundle: true,
@@ -44,6 +46,110 @@ const dataAPI = await loadBundle('vehicle-data-api')
 const preview = await loadBundle('preview-vehicles')
 const controlProtocol = await loadBundle('control-protocol')
 const { SimulationController } = await loadBundle('simulation-controller')
+const simulationInput = await loadBundle('simulation-input')
+const cameraView = await loadBundle('camera-view')
+
+test('shared input converts normalized intent to v2 integers without enabling legacy actions', () => {
+  const convert = simulationInput.simulationCommand
+  assert.deepEqual(convert({ mode: 'low_level', steering: -0.5, throttle: 0.125, brake: 0, direction: -1 }),
+    { steering: -500, throttle: 125, brake: 0, direction: -1 })
+  for (const action of ['stop', 'emergency_stop']) assert.deepEqual(convert({ mode: 'high_level', action }),
+    { steering: 0, throttle: 0, brake: 1000, direction: 0 })
+  assert.equal(convert({ mode: 'high_level', action: 'reverse' }).direction, -1)
+  assert.equal(convert({ mode: 'high_level', action: 'left' }).throttle, 0)
+  for (const action of ['gear_drive', 'auto_enter', 'auto_exit']) {
+    assert.throws(() => convert({ mode: 'high_level', action }))
+  }
+  for (const value of [NaN, Infinity, 1.01]) {
+    assert.throws(() => convert({ mode: 'low_level', steering: value, throttle: 0, brake: 0, direction: 0 }))
+  }
+  assert.throws(() => convert({ mode: 'low_level', steering: 0, throttle: 0.5, brake: 0.5, direction: 1 }))
+  assert.throws(() => convert({ mode: 'low_level', steering: 0, throttle: 0.0001, brake: 0.0001, direction: 1 }))
+  assert.equal(simulationInput.simulationGamepadMapping.autoEnterButton, -1)
+  assert.equal(simulationInput.simulationGamepadMapping.reverseButton, -1)
+})
+
+test('v2 input capability gate stops held movement instead of passing gear or mode through', async () => {
+  const sent = [], states = []
+  const input = new simulationInput.ControlInput({
+    allowVehicleActions: false, send: async (intent) => { sent.push(simulationInput.simulationCommand(intent)) },
+    onChange: (value) => states.push(value), onError: (error) => { throw error },
+  })
+  try {
+    input.setAvailable(true)
+    input.setKeyboardEnabled(true)
+    await flush()
+    input.keyDown('KeyW')
+    await flush()
+    input.keyDown('KeyE')
+    await flush()
+    assert.deepEqual(sent.at(-1), { steering: 0, throttle: 0, brake: 1000, direction: 0 })
+    assert.equal(input.isKeyboardEnabled, false)
+    assert.match(states.at(-1).message, /未开放/)
+    const count = sent.length
+    input.keyDown('KeyW', true)
+    assert.equal(sent.length, count)
+  } finally { input.setAvailable(false) }
+})
+
+test('shared gamepad uses the v2 adapter and release replaces propulsion with braking', async () => {
+  const sent = []
+  const input = new simulationInput.ControlInput({
+    allowVehicleActions: false, send: async (value) => { sent.push(simulationInput.simulationCommand(value)) },
+    onChange: () => {}, onError: (error) => { throw error },
+  })
+  const monitor = new simulationInput.GamepadInput(input, () => {})
+  const pad = {
+    index: 0, id: 'standard-test-pad', mapping: 'standard', connected: true,
+    axes: [0, 0, 0, 0], buttons: Array.from({ length: 16 }, () => ({ pressed: false, value: 0 })),
+  }
+  try {
+    input.setAvailable(true)
+    monitor.setMapping(simulationInput.simulationGamepadMapping)
+    monitor.poll([pad], true)
+    monitor.confirmMapping(true)
+    monitor.setEnabled(true)
+    monitor.poll([pad], true)
+    pad.buttons[4].pressed = true
+    pad.axes[0] = 0.575
+    pad.axes[3] = -0.575
+    monitor.poll([pad], true)
+    await flush()
+    assert.deepEqual(sent.at(-1), { steering: 500, throttle: 500, brake: 0, direction: 1 })
+    pad.buttons[4].pressed = false
+    monitor.poll([pad], true)
+    await flush()
+    assert.deepEqual(sent.at(-1), { steering: 0, throttle: 0, brake: 1000, direction: 0 })
+  } finally { input.setAvailable(false) }
+})
+
+test('camera grouping preserves pending direction, manual override and single-track compatibility', () => {
+  const view = new cameraView.CameraView()
+  view.gear('GEAR_DRIVE')
+  view.command({ mode: 'high_level', action: 'reverse' })
+  view.gear('GEAR_DRIVE')
+  assert.equal(view.group, 'rear')
+  assert.match(view.status, /请求中/)
+  view.command({ mode: 'high_level', action: 'stop' })
+  view.gear(undefined)
+  assert.equal(view.group, 'rear')
+  view.setMode('front')
+  view.gear('GEAR_REVERSE')
+  assert.equal(view.group, 'front')
+  view.setMode('auto')
+  assert.equal(view.group, 'rear')
+  view.clearIntent()
+  view.gear('GEAR_DRIVE')
+  assert.equal(view.group, 'front')
+  assert.deepEqual(cameraView.visibleCameras('front', { front: true }).map(value => value.name), ['front'])
+  assert.deepEqual(cameraView.visibleCameras('front', { front: true, center: true }).map(value => value.name),
+    ['left', 'center', 'right'])
+  assert.deepEqual(cameraView.visibleCameras('rear', { front: true }).map(value => value.name),
+    ['rear-left', 'rear-center', 'rear-right'])
+  assert.equal(cameraView.trackCameraName('camera-rear-center'), 'rear-center')
+  assert.equal(cameraView.trackCameraName('camera0'), 'front')
+  assert.equal(cameraView.trackCameraName('unknown'), undefined)
+})
 
 test('Data contracts preserve unknown health, enforce vehicle identity and bounded counters', () => {
   const data = dataAPI.createPreviewData('car-test')
