@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(VehicleAuthSDK @PROJECT_VERSION@ EXACT CONFIG)
+find_dependency(SQLite3)
+include("${CMAKE_CURRENT_LIST_DIR}/VehicleDataSDKTargets.cmake")
+check_required_components(VehicleDataSDK)

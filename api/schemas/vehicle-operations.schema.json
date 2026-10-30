@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vehicle-operations.schema.json",
+  "title": "Read-only vehicle operations; diagnostics are not native SystemStatus",
+  "description": "GET /api/vehicles/{vehicle_id}/operations. History retains up to 1000 snapshots per vehicle, each at most 64 KiB, and returns at most 300. Alerts and missions retain 1000 and return 100 each. Alerts are open-first then newest-first; history and missions are newest-first. Count-based retention has no fixed time horizon. Missing/future source timing is unknown, never healthy. Chassis errors only resolve on explicit fresh error_code=0. Missions are device HTTP snapshots, not native Mission ingestion or dispatch. Coordinates have no inferred geographic projection.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["vehicle_id", "server_time_ms", "diagnostics", "alerts", "missions", "history", "capabilities"],
+  "properties": {
+    "vehicle_id": { "$ref": "#/$defs/identifier" },
+    "server_time_ms": { "$ref": "#/$defs/timestamp" },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "chassis_received", "localization_received", "chassis_age_ms", "localization_age_ms", "source_timestamp_ms", "issues"],
+      "properties": {
+        "source": { "const": "telemetry" },
+        "chassis_received": { "type": "boolean" },
+        "localization_received": { "type": "boolean" },
+        "chassis_age_ms": { "$ref": "#/$defs/nullableAge" },
+        "localization_age_ms": { "$ref": "#/$defs/nullableAge" },
+        "source_timestamp_ms": {
+          "description": "Chassis source timestamp if its message is present, otherwise localization timestamp. Null when unknown; future values are preserved with a clock issue.",
+          "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["code", "severity", "message"],
+            "properties": {
+              "code": { "type": "string" },
+              "severity": { "enum": ["warning", "critical"] },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "alerts": {
+      "type": "array", "maxItems": 100,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["event_id", "occurred_at_ms", "severity", "code", "message", "status", "resolved_at_ms"],
+        "properties": {
+          "event_id": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "occurred_at_ms": { "$ref": "#/$defs/timestamp" },
+          "severity": { "enum": ["info", "warning", "critical"] },
+          "code": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+          "status": { "enum": ["open", "resolved"] },
+          "resolved_at_ms": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 }
+        }
+      }
+    },
+    "missions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/mission" } },
+    "history": {
+      "type": "array", "maxItems": 300,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["stream_id", "sequence", "published_at_ms", "received_at_ms", "chassis", "localization"],
+        "properties": {
+          "stream_id": { "$ref": "#/$defs/identifier" },
+          "sequence": { "$ref": "#/$defs/timestamp" },
+          "published_at_ms": { "$ref": "#/$defs/timestamp" },
+          "received_at_ms": { "$ref": "#/$defs/timestamp" },
+          "chassis": { "oneOf": [{ "type": "null" }, { "$ref": "vehicle-telemetry.schema.json#/$defs/chassis" }] },
+          "localization": { "oneOf": [{ "type": "null" }, { "$ref": "vehicle-telemetry.schema.json#/$defs/localization" }] }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mission_commands", "geographic_projection", "driving"],
+      "properties": {
+        "mission_commands": { "const": false },
+        "geographic_projection": { "const": false },
+        "driving": { "const": false }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$" },
+    "timestamp": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "nullableAge": {
+      "description": "Max(callback age + transport/receipt elapsed, source timestamp age), saturated at the JSON safe-integer limit. Both timing sources must exist and clocks must not be future. Freshness threshold is 10000 ms.",
+      "type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991
+    },
+    "mission": {
+      "description": "POST /api/vehicles/{vehicle_id}/mission-status uses this exact body, with device identity authorization. Equal-time identical retries return 204; older or equal-time conflicting snapshots return 409. Description is limited to 2048 UTF-8 bytes by the server.",
+      "type": "object", "additionalProperties": false,
+      "required": ["mission_id", "status", "updated_at_ms", "description"],
+      "properties": {
+        "mission_id": { "$ref": "#/$defs/identifier" },
+        "status": { "enum": ["unknown", "accepted", "running", "succeeded", "failed", "canceled"] },
+        "updated_at_ms": { "$ref": "#/$defs/timestamp" },
+        "description": { "type": "string", "maxLength": 2048 }
+      }
+    }
+  }
+}

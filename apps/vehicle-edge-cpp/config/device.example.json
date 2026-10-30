@@ -1,0 +1,13 @@
+{
+  "vehicle_id": "car-001",
+  "gateway_url": "https://gateway.example.com",
+  "token_url": "https://identity.example.com/oauth/token",
+  "client_id": "registered-vehicle-client-id",
+  "client_secret": "REPLACE_WITH_DEVICE_SECRET",
+  "chassis_channel": "/apollo/canbus/chassis",
+  "localization_channel": "/apollo/localization/pose",
+  "node_name": "remote_vehicle_telemetry",
+  "upload_interval_ms": 1000,
+  "media_enabled": false,
+  "allow_insecure_localhost": false
+}

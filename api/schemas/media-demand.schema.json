@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Vehicle media demand",
+  "description": "Authenticated device-self response. All deadlines use Redis server milliseconds. No media or control authority is implied beyond valid_until_ms.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "vehicle_id", "epoch", "revision", "rtc_required", "video_required",
+    "viewer_count", "control_required", "server_time_ms", "valid_until_ms",
+    "retry_after_ms"
+  ],
+  "properties": {
+    "vehicle_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$" },
+    "epoch": { "type": "string", "format": "uuid" },
+    "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "rtc_required": { "type": "boolean" },
+    "video_required": { "type": "boolean" },
+    "viewer_count": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "control_required": { "type": "boolean" },
+    "server_time_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "valid_until_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "retry_after_ms": { "const": 1000 }
+  }
+}

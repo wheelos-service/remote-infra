@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "scripts": {
     "dev": "node scripts/build.mjs",
+    "test": "node scripts/test.mjs",
     "typecheck": "tsc -p . --noEmit --incremental false",
     "build": "npm run typecheck && node scripts/build.mjs --production"
   },

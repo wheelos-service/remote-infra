@@ -13,3 +13,4 @@ apps/vehicle-edge/tests/__pycache__/
 apps/vehicle-edge/device.yaml
 tests/__pycache__/
 *.pyc
+apps/teleop-gateway/data/

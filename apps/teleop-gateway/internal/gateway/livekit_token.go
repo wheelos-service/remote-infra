@@ -22,13 +22,22 @@ func issueOperatorToken(vehicleID, operatorID string, access OperatorAccess) (st
 	return token, nil
 }
 
+func issueControlToken(session ControlSession) (string, error) {
+	if session.ProtocolVersion != 2 {
+		return issueOperatorToken(session.VehicleID, session.OperatorID, ControllerAccess)
+	}
+	return auth.NewAccessToken(lkApiKey, lkApiSecret).
+		AddGrant(operatorVideoGrant(session.VehicleID, ControllerAccess)).
+		SetIdentity(session.SenderIdentity).SetValidFor(15 * time.Minute).ToJWT()
+}
+
 func issueVehicleToken(vehicleID string) (string, error) {
 	accessToken := auth.NewAccessToken(lkApiKey, lkApiSecret)
 	accessToken.AddGrant(&auth.VideoGrant{
 		RoomJoin:       true,
 		Room:           "teleop-" + vehicleID,
 		CanPublish:     bp(true),
-		CanPublishData: bp(false),
+		CanPublishData: bp(true),
 		CanSubscribe:   bp(true),
 	}).SetIdentity("vehicle-" + vehicleID).SetValidFor(vehicleLiveKitTokenTTL())
 

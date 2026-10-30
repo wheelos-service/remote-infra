@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Control handover acknowledgement",
+  "description": "Device-self acknowledgement only after native input revocation and an independently validated physical handover policy. HTTP release and lease expiry are never confirmation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id", "revision", "edge_revocation_applied", "vehicle_handover_confirmed"],
+  "properties": {
+    "session_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "edge_revocation_applied": { "const": true },
+    "vehicle_handover_confirmed": { "type": "boolean" }
+  }
+}

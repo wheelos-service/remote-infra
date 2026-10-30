@@ -23,22 +23,38 @@ var (
 	ErrControlLeaseHeld       = errors.New("control lease is already held")
 	ErrControlSessionNotFound = errors.New("control session not found")
 	ErrControlSessionOwner    = errors.New("control session is not owned by operator")
+	ErrControlHandoverPending = errors.New("previous vehicle handover is not confirmed")
 )
 
 type ControlSession struct {
-	SessionID    string               `json:"session_id"`
-	VehicleID    string               `json:"vehicle_id"`
-	OperatorID   string               `json:"operator_id"`
-	PublicKeyB64 string               `json:"public_key_b64"`
-	Status       ControlSessionStatus `json:"status"`
-	CreatedAtMS  int64                `json:"created_at_ms"`
-	ExpiresAtMS  int64                `json:"expires_at_ms"`
+	ProtocolVersion  int                  `json:"protocol_version,omitempty"`
+	ClientInstanceID string               `json:"client_instance_id,omitempty"`
+	SenderIdentity   string               `json:"sender_identity,omitempty"`
+	SessionID        string               `json:"session_id"`
+	VehicleID        string               `json:"vehicle_id"`
+	OperatorID       string               `json:"operator_id"`
+	OperatorTenant   string               `json:"operator_tenant,omitempty"`
+	PublicKeyB64     string               `json:"public_key_b64"`
+	Status           ControlSessionStatus `json:"status"`
+	CreatedAtMS      int64                `json:"created_at_ms"`
+	ExpiresAtMS      int64                `json:"expires_at_ms"`
 }
 
 var acquireControlSessionScript = redis.NewScript(`
 if redis.call('EXISTS', KEYS[1]) == 1 then
   return 0
 end
+-- Guards never expire with a driving lease: expiry is not a physical handover.
+local pending = redis.call('HGET', KEYS[3], 'session')
+if pending or redis.call('EXISTS', KEYS[4]) == 1 then return -1 end
+local revision = tonumber(redis.call('HGET', KEYS[3], 'revision') or '0')
+if not revision or revision >= 9007199254740991 then
+  return redis.error_reply('invalid handover revision')
+end
+redis.call('HSET', KEYS[3], 'revision', revision + 1,
+  'session', ARGV[1], 'operator_key', KEYS[4], 'state', 'ACTIVE',
+  'edge_revocation_applied', '0')
+redis.call('SET', KEYS[4], ARGV[4])
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 redis.call('SET', KEYS[2], ARGV[3], 'PX', ARGV[2])
 return 1
@@ -56,6 +72,8 @@ local session = cjson.decode(raw)
 if session.session_id ~= ARGV[1] or session.operator_id ~= ARGV[2] or session.status ~= 'ACTIVE' then
   return -1
 end
+if redis.call('HGET', KEYS[3], 'state') ~= 'ACTIVE'
+  or redis.call('GET', KEYS[4]) ~= ARGV[1] then return 0 end
 session.expires_at_ms = tonumber(ARGV[3])
 redis.call('SET', KEYS[1], cjson.encode(session), 'XX', 'PX', ARGV[4])
 redis.call('SET', KEYS[2], ARGV[5], 'XX', 'PX', ARGV[4])
@@ -71,11 +89,17 @@ local session = cjson.decode(raw)
 if session.session_id ~= ARGV[1] or session.operator_id ~= ARGV[2] then
   return -1
 end
+redis.call('HSET', KEYS[3], 'state', 'PENDING')
 redis.call('DEL', KEYS[1], KEYS[2])
 return 1
 `)
 
 func (s *ControlLeaseStore) AcquireControlSession(ctx context.Context, session ControlSession) error {
+	if session.VehicleID == "" || session.OperatorID == "" || session.SessionID == "" ||
+		session.Status != ControlSessionActive || session.ExpiresAtMS <= session.CreatedAtMS ||
+		session.CreatedAtMS <= 0 || s.ttl <= 0 {
+		return errors.New("invalid active control session")
+	}
 	payload, err := json.Marshal(session)
 	if err != nil {
 		return fmt.Errorf("marshal control session: %w", err)
@@ -84,16 +108,21 @@ func (s *ControlLeaseStore) AcquireControlSession(ctx context.Context, session C
 	result, err := acquireControlSessionScript.Run(
 		ctx,
 		s.client,
-		[]string{controlLeaseKey(session.VehicleID), controlSessionIndexKey(session.SessionID)},
+		[]string{controlLeaseKey(session.VehicleID), controlSessionIndexKey(session.SessionID),
+			controlHandoverKey(session.VehicleID), operatorControlKey(session.OperatorTenant, session.OperatorID)},
 		payload,
 		s.ttl.Milliseconds(),
 		session.VehicleID,
+		session.SessionID,
 	).Int()
 	if err != nil {
 		return fmt.Errorf("acquire control session: %w", err)
 	}
 	if result == 0 {
 		return ErrControlLeaseHeld
+	}
+	if result < 0 {
+		return ErrControlHandoverPending
 	}
 	return nil
 }
@@ -127,7 +156,8 @@ func (s *ControlLeaseStore) RenewControlSession(ctx context.Context, sessionID, 
 	result, err := renewControlSessionScript.Run(
 		ctx,
 		s.client,
-		[]string{controlLeaseKey(session.VehicleID), controlSessionIndexKey(sessionID)},
+		[]string{controlLeaseKey(session.VehicleID), controlSessionIndexKey(sessionID),
+			controlHandoverKey(session.VehicleID), operatorControlKey(session.OperatorTenant, session.OperatorID)},
 		sessionID,
 		operatorID,
 		expiresAt,
@@ -160,7 +190,7 @@ func (s *ControlLeaseStore) ReleaseControlSession(ctx context.Context, sessionID
 	result, err := releaseControlSessionScript.Run(
 		ctx,
 		s.client,
-		[]string{controlLeaseKey(session.VehicleID), controlSessionIndexKey(sessionID)},
+		[]string{controlLeaseKey(session.VehicleID), controlSessionIndexKey(sessionID), controlHandoverKey(session.VehicleID)},
 		sessionID,
 		operatorID,
 	).Int()

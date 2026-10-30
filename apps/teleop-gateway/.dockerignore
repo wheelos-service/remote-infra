@@ -1,0 +1,6 @@
+data/
+teleop-backend
+*.db
+*.db-*
+.env
+.env.*

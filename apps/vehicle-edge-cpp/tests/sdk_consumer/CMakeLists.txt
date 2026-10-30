@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(vehicle_edge_sdk_consumer LANGUAGES CXX)
+find_package(VehicleEdgeSDK 0.1 CONFIG REQUIRED COMPONENTS auth data runtime)
+add_executable(sdk_consumer main.cc)
+target_link_libraries(sdk_consumer PRIVATE VehicleEdge::auth VehicleEdge::runtime)
+enable_testing()
+add_test(NAME installed_sdk_consumer COMMAND sdk_consumer)

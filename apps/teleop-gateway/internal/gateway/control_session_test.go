@@ -45,6 +45,13 @@ func TestControlSessionLifecycleWithRedis(t *testing.T) {
 	if _, err := store.GetControlSession(ctx, vehicleID); !errors.Is(err, ErrControlSessionNotFound) {
 		t.Fatalf("GetControlSession() error = %v, want ErrControlSessionNotFound", err)
 	}
+	handover, err := store.GetHandover(ctx, vehicleID)
+	if err != nil || handover.State != "PENDING" {
+		t.Fatalf("release must await vehicle confirmation: %#v %v", handover, err)
+	}
+	if err := store.AcknowledgeHandover(ctx, vehicleID, sessionA.SessionID, handover.Revision); err != nil {
+		t.Fatal(err)
+	}
 
 	sessionB := newTestControlSession(vehicleID, "operator-b", "session-b", store.ttl)
 	if err := store.AcquireControlSession(ctx, sessionB); err != nil {
@@ -54,6 +61,13 @@ func TestControlSessionLifecycleWithRedis(t *testing.T) {
 	time.Sleep(250 * time.Millisecond)
 	if _, err := store.GetControlSession(ctx, vehicleID); !errors.Is(err, ErrControlSessionNotFound) {
 		t.Fatalf("GetControlSession() after expiry error = %v, want ErrControlSessionNotFound", err)
+	}
+	expired, err := store.GetHandover(ctx, vehicleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcknowledgeHandover(ctx, vehicleID, sessionB.SessionID, expired.Revision); err != nil {
+		t.Fatal(err)
 	}
 }
 

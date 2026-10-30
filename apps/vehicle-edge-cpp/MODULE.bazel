@@ -1,0 +1,10 @@
+module(name = "remote_vehicle_edge", version = "0.1.0")
+
+bazel_dep(name = "rules_cc", version = "0.2.26")
+bazel_dep(name = "rules_cuda", version = "0.3.0")
+bazel_dep(name = "wheelos_core", version = "1.0.6")
+bazel_dep(name = "wheelos_msgs", version = "0.1.6")
+bazel_dep(name = "jsoncpp", version = "1.9.5")
+
+gstreamer_repository = use_repo_rule("//bazel:gstreamer_repository.bzl", "gstreamer_repository")
+gstreamer_repository(name = "gstreamer")

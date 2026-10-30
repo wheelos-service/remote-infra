@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vehicle-telemetry.schema.json",
+  "title": "Read-only vehicle telemetry, independent of LiveKit vehicle.state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "type", "vehicle_id", "stream_id", "sequence", "published_at_ms", "chassis", "localization"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "type": { "const": "vehicle_telemetry" },
+    "vehicle_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$" },
+    "stream_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$" },
+    "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "published_at_ms": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "chassis": {
+      "allOf": [
+        { "$ref": "#/$defs/sample" },
+        { "properties": { "message": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/chassis" }] } } }
+      ]
+    },
+    "localization": {
+      "allOf": [
+        { "$ref": "#/$defs/sample" },
+        { "properties": { "message": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/localization" }] } } }
+      ]
+    }
+  },
+  "$defs": {
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["age_ms", "source_timestamp_ms", "source_sequence", "message"],
+      "properties": {
+        "age_ms": { "type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991 },
+        "source_timestamp_ms": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+        "source_sequence": { "type": ["integer", "null"], "minimum": 0, "maximum": 4294967295 },
+        "message": {}
+      }
+    },
+    "number": { "type": ["number", "null"] },
+    "chassis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "speed_mps": { "$ref": "#/$defs/number" },
+        "gear_location": { "enum": [null, "GEAR_NEUTRAL", "GEAR_DRIVE", "GEAR_REVERSE", "GEAR_PARKING", "GEAR_LOW", "GEAR_INVALID", "GEAR_NONE"] },
+        "driving_mode": { "enum": [null, "COMPLETE_MANUAL", "COMPLETE_AUTO_DRIVE", "AUTO_STEER_ONLY", "AUTO_SPEED_ONLY", "EMERGENCY_MODE"] },
+        "steering_percentage": { "type": ["number", "null"], "minimum": -100, "maximum": 100 },
+        "throttle_percentage": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "brake_percentage": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "battery_soc_percentage": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "parking_brake": { "type": ["boolean", "null"] },
+        "error_code": { "type": ["integer", "null"], "minimum": 0, "maximum": 9 },
+        "chassis_error_mask": { "type": ["integer", "null"], "minimum": -2147483648, "maximum": 2147483647 }
+      }
+    },
+    "localization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "position": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "x": { "$ref": "#/$defs/number" },
+            "y": { "$ref": "#/$defs/number" },
+            "z": { "$ref": "#/$defs/number" }
+          }
+        },
+        "heading_rad": { "$ref": "#/$defs/number" },
+        "frame_id": { "type": ["string", "null"], "maxLength": 128 }
+      }
+    }
+  }
+}

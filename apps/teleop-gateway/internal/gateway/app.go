@@ -58,6 +58,10 @@ func init() {
 // ==========================================
 func Run() {
 	var err error
+	vehicleRegistry, err := NewVehicleRegistryFromEnvironment()
+	if err != nil {
+		log.Fatalf("configure vehicle registry: %v", err)
+	}
 	authenticator, err = NewAuthenticatorFromEnvironment()
 	if err != nil {
 		log.Fatalf("configure authenticator: %v", err)
@@ -82,16 +86,45 @@ func Run() {
 		log.Fatalf("connect control lease store: %v", err)
 	}
 	videoSessions = NewVideoSessionStore(controlLeases.client, videoGracePeriod())
+	databasePath := os.Getenv("OPERATIONS_DB_PATH")
+	if databasePath == "" {
+		databasePath = "data/operations.db"
+	}
+	if databasePath == ":memory:" {
+		log.Fatal("operations database must be persistent outside tests")
+	}
+	operations, err := OpenOperationsStore(databasePath)
+	if err != nil {
+		log.Fatalf("configure operations database: %v", err)
+	}
+	defer operations.Close()
 
 	mux := http.NewServeMux()
+	telemetryAPI := &VehicleTelemetryAPI{
+		registry: vehicleRegistry, states: NewVehicleTelemetryStore(controlLeases.client, nil),
+		leases: controlLeases, authorizer: vehicleAuthorizer, identities: vehicleIdentities,
+		operations: operations,
+	}
+	telemetryAPI.register(mux)
+	viewingAPI := &ViewingLeaseAPI{
+		store: &ViewingLeaseStore{client: controlLeases.client}, registry: vehicleRegistry,
+		authorizer: vehicleAuthorizer, identities: vehicleIdentities,
+	}
+	viewingAPI.register(mux)
+	registerControlHandover(mux)
+	registerDeviceControl(mux)
+	NewOperationsAPI(operations, vehicleRegistry, telemetryAPI.states,
+		vehicleAuthorizer, vehicleIdentities, nil).register(mux)
+	(&DataAPI{store: operations, registry: vehicleRegistry, authorizer: vehicleAuthorizer,
+		identities: vehicleIdentities}).register(mux)
 
 	// All operator and vehicle endpoints use the same authentication middleware.
 	mux.Handle("/api/token/operator", AuthenticationMiddleware(http.HandlerFunc(handleOperatorConnect)))
 	mux.Handle("/api/token/vehicle", AuthenticationMiddleware(http.HandlerFunc(handleVehicleConnect)))
-	mux.Handle("POST /api/vehicles/{vehicle_id}/control/acquire", AuthenticationMiddleware(http.HandlerFunc(handleAcquireControl)))
-	mux.Handle("GET /api/vehicles/{vehicle_id}/control", AuthenticationMiddleware(http.HandlerFunc(handleGetControl)))
-	mux.Handle("POST /api/control/{session_id}/renew", AuthenticationMiddleware(http.HandlerFunc(handleRenewControl)))
-	mux.Handle("POST /api/control/{session_id}/release", AuthenticationMiddleware(http.HandlerFunc(handleReleaseControl)))
+	mux.Handle("POST /api/vehicles/{vehicle_id}/control/acquire", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleAcquireControl))))
+	mux.Handle("GET /api/vehicles/{vehicle_id}/control", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleGetControl))))
+	mux.Handle("POST /api/control/{session_id}/renew", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleRenewControl))))
+	mux.Handle("POST /api/control/{session_id}/release", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleReleaseControl))))
 	mux.Handle("GET /api/auth/me", AuthenticationMiddleware(http.HandlerFunc(handleAuthMe)))
 	mux.Handle("POST /api/vehicles/{vehicle_id}/video/acquire", AuthenticationMiddleware(http.HandlerFunc(handleAcquireVideo)))
 	mux.Handle("POST /api/video/{session_id}/release", AuthenticationMiddleware(http.HandlerFunc(handleReleaseVideo)))
@@ -108,6 +141,10 @@ func Run() {
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if err := controlLeases.Ping(r.Context()); err != nil {
 			http.Error(w, "control lease store unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := operations.Ping(r.Context()); err != nil {
+			http.Error(w, "operations database unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)

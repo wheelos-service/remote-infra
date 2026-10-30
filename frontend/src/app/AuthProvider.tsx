@@ -76,6 +76,10 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
     let cancelled = false
 
     const initialize = async () => {
+      if (new URLSearchParams(window.location.search).get('preview') === '1') {
+        setLoading(false)
+        return
+      }
       try {
         const callback = new URLSearchParams(window.location.search)
         const oauthError = callback.get('error')
@@ -132,6 +136,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
   }, [])
 
   const signIn = useCallback(async () => {
+    if (new URLSearchParams(window.location.search).get('preview') === '1') return
     setError(undefined)
     try {
       const verifier = randomBase64Url(32)
@@ -154,6 +159,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
   }, [])
 
   const signInWithDevToken = useCallback(async () => {
+    if (new URLSearchParams(window.location.search).get('preview') === '1') return
     if (!isDevLoginAvailable) {
       setError('开发令牌登录仅允许在本机 localhost 且 URL 带 dev=1 时使用')
       return

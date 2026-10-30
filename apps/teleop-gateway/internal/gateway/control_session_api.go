@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -11,7 +12,9 @@ import (
 )
 
 type acquireControlRequest struct {
-	PublicKeyB64 string `json:"public_key_b64"`
+	PublicKeyB64     string `json:"public_key_b64"`
+	ProtocolVersion  int    `json:"protocol_version"`
+	ClientInstanceID string `json:"client_instance_id"`
 }
 
 type controlSessionResponse struct {
@@ -42,7 +45,13 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var request acquireControlRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	raw, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024))
+	var fields map[string]json.RawMessage
+	if readErr != nil || rejectDuplicateJSONFields(raw) != nil ||
+		json.Unmarshal(raw, &request) != nil || json.Unmarshal(raw, &fields) != nil ||
+		fields["public_key_b64"] == nil ||
+		!(len(fields) == 1 || (len(fields) == 3 && request.ProtocolVersion == 2 &&
+			fields["client_instance_id"] != nil && telemetryIdentifier.MatchString(request.ClientInstanceID))) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -53,13 +62,32 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	session := ControlSession{
-		SessionID:    uuid.NewString(),
-		VehicleID:    vehicleID,
-		OperatorID:   claims.Name,
-		PublicKeyB64: request.PublicKeyB64,
-		Status:       ControlSessionActive,
-		CreatedAtMS:  now.UnixMilli(),
-		ExpiresAtMS:  now.Add(controlLeases.ttl).UnixMilli(),
+		SessionID:      uuid.NewString(),
+		VehicleID:      vehicleID,
+		OperatorID:     claims.Name,
+		OperatorTenant: claims.Organization,
+		PublicKeyB64:   request.PublicKeyB64,
+		Status:         ControlSessionActive,
+		CreatedAtMS:    now.UnixMilli(),
+		ExpiresAtMS:    now.Add(controlLeases.ttl).UnixMilli(),
+	}
+	if request.ProtocolVersion == 2 {
+		if !simulationControlEnabled(vehicleID) {
+			http.Error(w, "v2 simulation control is not enabled for vehicle", http.StatusForbidden)
+			return
+		}
+		session.ProtocolVersion = 2
+		session.ClientInstanceID = request.ClientInstanceID
+		session.SenderIdentity = "control-" + session.SessionID
+	}
+	if lkApiKey == "" || lkApiSecret == "" {
+		http.Error(w, "control token configuration unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	token, err := issueControlToken(session)
+	if err != nil {
+		http.Error(w, "failed to issue LiveKit token", http.StatusInternalServerError)
+		return
 	}
 	if err := controlLeases.AcquireControlSession(r.Context(), session); err != nil {
 		writeControlSessionError(w, err)
@@ -71,12 +99,6 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := issueOperatorToken(session.VehicleID, session.OperatorID, ControllerAccess)
-	if err != nil {
-		_ = controlLeases.ReleaseControlSession(r.Context(), session.SessionID, session.OperatorID)
-		http.Error(w, "failed to issue LiveKit token", http.StatusInternalServerError)
-		return
-	}
 	recordAudit(r.Context(), AuditEvent{
 		OperatorID: session.OperatorID, VehicleID: session.VehicleID, SessionID: session.SessionID,
 		Event: "control_acquire", Result: "success",
@@ -95,6 +117,10 @@ func handleRenewControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := r.Context().Value("user").(*UserClaims)
+	if _, err := controlRequestOwner(r, r.PathValue("session_id")); err != nil {
+		writeControlSessionError(w, err)
+		return
+	}
 	session, err := controlLeases.RenewControlSession(r.Context(), r.PathValue("session_id"), claims.Name)
 	if err != nil {
 		writeControlSessionError(w, err)
@@ -117,7 +143,7 @@ func handleReleaseControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := r.Context().Value("user").(*UserClaims)
-	session, err := controlLeases.getSessionByID(r.Context(), r.PathValue("session_id"))
+	session, err := controlRequestOwner(r, r.PathValue("session_id"))
 	if err != nil {
 		writeControlSessionError(w, err)
 		return
@@ -134,7 +160,13 @@ func handleReleaseControl(w http.ResponseWriter, r *http.Request) {
 		OperatorID: session.OperatorID, VehicleID: session.VehicleID, SessionID: session.SessionID,
 		Event: "control_release", Result: "success",
 	})
-	w.WriteHeader(http.StatusNoContent)
+	// Releasing the HTTP lease starts handover; it does not confirm the vehicle.
+	handover, err := controlLeases.GetHandover(r.Context(), session.VehicleID)
+	if err != nil {
+		writeControlSessionError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, handover)
 }
 
 func handleGetControl(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +207,7 @@ func isEd25519PublicKey(encoded string) bool {
 
 func writeControlSessionError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrControlLeaseHeld):
+	case errors.Is(err, ErrControlLeaseHeld), errors.Is(err, ErrControlHandoverPending):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, ErrControlSessionNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)

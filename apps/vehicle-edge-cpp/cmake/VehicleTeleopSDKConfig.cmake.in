@@ -1,0 +1,12 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(VehicleAuthSDK @PROJECT_VERSION@ EXACT CONFIG)
+find_dependency(OpenSSL 1.1.1)
+if(@EDGE_ENABLE_GSTREAMER@)
+  find_dependency(PkgConfig)
+  pkg_check_modules(GStreamer REQUIRED IMPORTED_TARGET
+    gstreamer-app-1.0 gstreamer-video-1.0)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/VehicleTeleopSDKTargets.cmake")
+check_required_components(VehicleTeleopSDK)

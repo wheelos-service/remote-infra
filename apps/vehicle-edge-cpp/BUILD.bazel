@@ -1,0 +1,190 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "config",
+    srcs = ["src/common/config.cc"],
+    hdrs = ["include/vehicle_edge/config.h"],
+    includes = ["include"],
+    linkopts = ["-lcurl"],
+    deps = [":state", "@jsoncpp//:jsoncpp"],
+)
+
+cc_library(
+    name = "state",
+    srcs = ["src/common/state_cache.cc"],
+    hdrs = ["include/vehicle_edge/state_cache.h"],
+    includes = ["include"],
+    linkopts = ["-pthread"],
+    deps = ["@jsoncpp//:jsoncpp"],
+)
+
+cc_library(
+    name = "transport",
+    srcs = ["src/common/http_client.cc"],
+    hdrs = ["include/vehicle_edge/http_client.h"],
+    includes = ["include"],
+    linkopts = ["-lcurl", "-pthread"],
+    deps = [":config"],
+)
+
+cc_library(
+    name = "auth",
+    srcs = ["src/auth/auth_client.cc"],
+    hdrs = ["include/vehicle_edge/auth_client.h"],
+    includes = ["include"],
+    deps = [":transport"],
+)
+
+cc_library(
+    name = "data",
+    srcs = [
+        "src/data/data_client.cc",
+        "src/data/data_service.cc",
+        "src/data/durable_store.cc",
+        "src/data/health_service.cc",
+        "src/data/task_service.cc",
+    ],
+    hdrs = [
+        "include/vehicle_edge/data_client.h",
+        "include/vehicle_edge/data_service.h",
+        "include/vehicle_edge/durable_store.h",
+        "include/vehicle_edge/health_service.h",
+        "include/vehicle_edge/task_service.h",
+    ],
+    linkopts = ["-lsqlite3"],
+    includes = ["include"],
+    deps = [":auth", ":state"],
+)
+
+cc_library(
+    name = "teleop",
+    srcs = [
+        "src/teleop/teleop_client.cc",
+        "src/teleop/media_demand.cc",
+        "src/teleop/media_service.cc",
+        "src/teleop/encoded_video.cc",
+        "src/teleop/control_receiver.cc",
+        "src/teleop/control_service.cc",
+    ],
+    hdrs = [
+        "include/vehicle_edge/teleop_client.h",
+        "include/vehicle_edge/media_demand.h",
+        "include/vehicle_edge/media_service.h",
+        "include/vehicle_edge/encoded_video.h",
+        "include/vehicle_edge/control_receiver.h",
+        "include/vehicle_edge/control_service.h",
+    ],
+    includes = ["include"],
+    deps = [":auth"],
+    linkopts = ["-lcrypto"],
+)
+
+cc_library(
+    name = "runtime",
+    srcs = ["src/data/source_service.cc"],
+    hdrs = ["include/vehicle_edge/source_service.h"],
+    includes = ["include"],
+    deps = [":data"],
+)
+
+cc_library(
+    name = "camera_gst",
+    tags = ["manual"],
+    srcs = ["src/adapters/camera_gst/camera_gst_adapter.cc"],
+    hdrs = ["include/vehicle_edge/camera_gst_adapter.h"],
+    includes = ["include"],
+    deps = [":teleop", "@gstreamer//:gstreamer"],
+)
+
+cc_library(
+    name = "telemetry",
+    deps = [":runtime", ":teleop"],
+)
+
+cc_library(
+    name = "cyber_adapter",
+    srcs = [
+        "src/adapters/cyber/cyber_adapter.cc",
+        "src/adapters/cyber/cyber_task_adapter.cc",
+    ],
+    hdrs = [
+        "include/vehicle_edge/cyber_adapter.h",
+        "include/vehicle_edge/cyber_task_adapter.h",
+    ],
+    includes = ["include"],
+    deps = [
+        ":data",
+        ":state",
+        "@wheelos_msgs//wheelos_msgs/chassis_msgs:chassis_cc_proto",
+        "@wheelos_msgs//wheelos_msgs/localization_msgs:localization_cc_proto",
+        "@wheelos_msgs//wheelos_msgs/mission_msgs:mission_request_cc_proto",
+        "@wheelos_msgs//wheelos_msgs/mission_msgs:mission_runtime_status_cc_proto",
+        "@wheelos_msgs//wheelos_msgs/monitor_msgs:system_status_cc_proto",
+    ],
+)
+
+cc_binary(
+    name = "vehicle_data",
+    srcs = ["src/apps/vehicle_telemetry.cc"],
+    defines = ["EDGE_DATA_ONLY"],
+    deps = [
+        ":cyber_adapter",
+        ":runtime",
+        "@wheelos_core//cyber",
+    ],
+)
+
+cc_binary(
+    name = "vehicle_telemetry",
+    srcs = ["src/apps/vehicle_telemetry.cc"],
+    deps = [
+        ":cyber_adapter",
+        ":telemetry",
+        "@wheelos_core//cyber",
+    ],
+)
+
+cc_test(
+    name = "data_test",
+    srcs = ["tests/data_test.cc"],
+    deps = [":data"],
+)
+
+cc_test(
+    name = "telemetry_test",
+    srcs = ["tests/telemetry_test.cc"],
+    deps = [":telemetry"],
+)
+
+cc_test(
+    name = "cyber_adapter_test",
+    srcs = ["tests/cyber_adapter_test.cc"],
+    deps = [":cyber_adapter"],
+)
+
+cc_test(
+    name = "media_test",
+    srcs = ["tests/media_test.cc"],
+    deps = [":telemetry"],
+)
+
+cc_test(
+    name = "control_receiver_test",
+    srcs = ["tests/control_receiver_test.cc"],
+    deps = [":teleop"],
+)
+
+cc_test(
+    name = "encoded_video_test",
+    srcs = ["tests/encoded_video_test.cc"],
+    deps = [":teleop"],
+)
+
+cc_test(
+    name = "camera_gst_test",
+    tags = ["manual"],
+    srcs = ["tests/camera_gst_test.cc"],
+    deps = [":camera_gst"],
+)

@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(vehicle_teleop_example LANGUAGES CXX)
+find_package(VehicleAuthSDK 0.1 CONFIG REQUIRED)
+find_package(VehicleTeleopSDK 0.1 CONFIG REQUIRED)
+add_executable(teleop_simulation teleop_simulation.cc)
+target_link_libraries(teleop_simulation PRIVATE VehicleEdge::teleop)
+target_compile_options(teleop_simulation PRIVATE -Wall -Wextra -Wpedantic -Werror)

@@ -1,0 +1,14 @@
+{
+  "vehicle_id": "registered-vehicle-id",
+  "gateway_url": "https://gateway.example.com",
+  "token_url": "https://identity.example.com/oauth/token",
+  "client_id": "REPLACE_WITH_REGISTERED_DEVICE_CLIENT",
+  "client_secret": "REPLACE_WITH_DEVICE_SECRET",
+  "media_enabled": false,
+  "control_mode": "disabled",
+  "livekit_url": "wss://rtc.example.com",
+  "media_worker_path": "/opt/vehicle-edge/bin/vehicle_media_worker",
+  "camera_source": "simulation",
+  "camera_track": "camera0",
+  "allow_insecure_localhost": false
+}

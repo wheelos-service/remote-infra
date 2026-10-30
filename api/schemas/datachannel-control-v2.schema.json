@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Simulation control v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "type", "vehicle_id", "session_id", "client_instance_id", "receiver_instance_id", "revision", "sequence", "timestamp_ms", "command", "signature"],
+  "properties": {
+    "version": { "const": 2 },
+    "type": { "const": "control" },
+    "vehicle_id": { "$ref": "#/$defs/id" },
+    "session_id": { "$ref": "#/$defs/id" },
+    "client_instance_id": { "$ref": "#/$defs/id" },
+    "receiver_instance_id": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+    "revision": { "$ref": "#/$defs/positiveInteger" },
+    "sequence": { "$ref": "#/$defs/positiveInteger" },
+    "timestamp_ms": { "$ref": "#/$defs/positiveInteger" },
+    "signature": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steering", "throttle", "brake", "direction"],
+      "properties": {
+        "steering": { "type": "integer", "minimum": -1000, "maximum": 1000 },
+        "throttle": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "brake": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "direction": { "type": "integer", "minimum": -1, "maximum": 1 }
+      },
+      "not": {
+        "properties": { "throttle": { "minimum": 1 }, "brake": { "minimum": 1 } },
+        "required": ["throttle", "brake"]
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$" },
+    "positiveInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+  }
+}

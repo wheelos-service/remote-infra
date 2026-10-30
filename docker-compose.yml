@@ -2,6 +2,14 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   casdoor-db:
     image: mysql:8.0
@@ -96,9 +104,18 @@ services:
       OIDC_JWKS_URL: "${OIDC_JWKS_URL:-}"
       VEHICLE_ACL_JSON: "${VEHICLE_ACL_JSON:-[]}"
       VEHICLE_SUBJECT_MAP_JSON: "${VEHICLE_SUBJECT_MAP_JSON:-{}}"
+      VEHICLE_REGISTRY_JSON: "${VEHICLE_REGISTRY_JSON:-[]}"
+      CONTROL_HANDOVER_ACK_ENABLED: "${CONTROL_HANDOVER_ACK_ENABLED:-false}"
+      SIMULATED_CONTROL_VEHICLES_JSON: "${SIMULATED_CONTROL_VEHICLES_JSON:-[]}"
+      OPERATIONS_DB_PATH: "/var/lib/teleop/operations.db"
       ALLOWED_ORIGINS: "${CLIENT_ORIGIN:-http://localhost:8000}"
+    volumes:
+      - operations-data:/var/lib/teleop
     depends_on:
-      - livekit
+      livekit:
+        condition: service_started
+      redis:
+        condition: service_healthy
 
   caddy:
     image: caddy:2-alpine
@@ -129,3 +146,5 @@ volumes:
   caddy-config:
   casdoor-db:
   casdoor-config:
+  operations-data:
+  redis-data:
