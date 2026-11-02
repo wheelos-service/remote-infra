@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import * as esbuild from 'esbuild'
 import { webcrypto } from 'node:crypto'
 import { createRequire } from 'node:module'
+import { convertMap, parseMapText } from './prepare-maps.mjs'
 globalThis.crypto ??= webcrypto
 
 globalThis.window = {
@@ -23,6 +24,10 @@ const { outputFiles } = await esbuild.build({
     { in: 'src/lib/simulation-controller.ts', out: 'simulation-controller' },
     { in: 'src/lib/simulation-input.ts', out: 'simulation-input' },
     { in: 'src/lib/camera-view.ts', out: 'camera-view' },
+    { in: 'src/lib/fleet-map.ts', out: 'fleet-map' },
+    { in: 'src/lib/mock-fleet.ts', out: 'mock-fleet' },
+    { in: 'src/lib/teleop-config.ts', out: 'teleop-config' },
+    { in: 'src/lib/dashboard-data.ts', out: 'dashboard-data' },
   ],
   outdir: 'test-build',
   bundle: true,
@@ -48,6 +53,139 @@ const controlProtocol = await loadBundle('control-protocol')
 const { SimulationController } = await loadBundle('simulation-controller')
 const simulationInput = await loadBundle('simulation-input')
 const cameraView = await loadBundle('camera-view')
+const fleetMap = await loadBundle('fleet-map')
+const mockFleet = await loadBundle('mock-fleet')
+const dashboard = await loadBundle('dashboard-data')
+
+const mapText = `header { version: "fixture-v1" }
+lane {
+  id { id: "lane-1" }
+  central_curve { segment { line_segment { point { x: 100 y: 200 } point { x: 110 y: 200 } point { x: 110 y: 220 } } } }
+  left_boundary { curve { segment { line_segment { point { x: 100 y: 202 } point { x: 112 y: 220 } } } } }
+  right_boundary { curve { segment { line_segment { point { x: 100 y: 198 } point { x: 108 y: 220 } } } } }
+}`
+const demoMap = fleetMap.fleetMapSchema.parse(convertMap(mapText, 'fixture-map'))
+
+test('local simulation and preview flags without endpoint overrides preserve default URLs', async () => {
+  const search = window.location.search
+  try {
+    window.location.search = '?preview=1&fleet=1&dev=1&control=simulation'
+    const { teleopConfig } = await loadBundle('teleop-config')
+    assert.ok(teleopConfig.gatewayUrl.startsWith('https://'))
+    assert.ok(teleopConfig.livekitUrl.startsWith('wss://'))
+    assert.equal(teleopConfig.simulationControl, true)
+  } finally { window.location.search = search }
+})
+
+test('Apollo map conversion keeps absolute sampled geometry, frame and separate lane boundaries', () => {
+  assert.equal(parseMapText('header { version: "\\351\\235\\222" }').header[0].version[0], '青')
+  assert.deepEqual(demoMap.bounds, [100, 198, 112, 220])
+  assert.equal(demoMap.frame_id, 'map:fixture-map')
+  assert.deepEqual(demoMap.lanes[0].center, [[100, 200], [110, 200], [110, 220]])
+  assert.equal(demoMap.lanes[0].left.length, 2)
+  assert.throws(() => convertMap('header { version: "empty" }', 'empty'))
+  assert.throws(() => convertMap(mapText, '../escape'))
+  assert.throws(() => parseMapText('lane { id { id: "unclosed" }'))
+  assert.throws(() => parseMapText('lane { } }'))
+  assert.throws(() => convertMap(mapText.replace('x: 100', 'x: NaN'), 'invalid'))
+  assert.throws(() => fleetMap.fleetMapSchema.parse({ ...demoMap, frame_id: 'guessed-utm' }))
+  assert.throws(() => fleetMap.fleetMapSchema.parse({ ...demoMap, bounds: [0, 0, 1, 1] }))
+})
+
+test('lane sampling follows arc length and rejects zero-length routes and invalid distances', () => {
+  assert.deepEqual(fleetMap.lanePosition(demoMap.lanes[0].center, 15), { x: 110, y: 205, heading: Math.PI / 2 })
+  assert.deepEqual(fleetMap.lanePosition(demoMap.lanes[0].center, 35), { x: 105, y: 200, heading: 0 })
+  for (const distance of [NaN, Infinity, -1]) assert.throws(() => fleetMap.lanePosition(demoMap.lanes[0].center, distance))
+  assert.throws(() => fleetMap.lanePosition([[1, 1], [1, 1]], 0))
+})
+
+test('dynamic fleet uses actual map coordinates with independent fresh, stale, offline and restarted streams', () => {
+  const started = 1_793_333_000_000
+  const before = mockFleet.createMockFleet(demoMap, 0, started, 0)
+  const after = mockFleet.createMockFleet(demoMap, 31_000, started, 31_000)
+  assert.equal(after.entries.length, 8)
+  assert.equal(new Set(after.entries.map((entry) => entry.vehicle_id)).size, 8)
+  for (const entry of after.entries) {
+    const { receivedAtClientMs, receivedAtWallMs, ...wire } = entry
+    api.vehicleEntrySchema.parse(wire)
+    assert.equal(entry.state.localization.message.frame_id, demoMap.frame_id)
+    const { x, y } = entry.state.localization.message.position
+    assert.ok(x >= demoMap.bounds[0] && x <= demoMap.bounds[2])
+    assert.ok(y >= demoMap.bounds[1] && y <= demoMap.bounds[3])
+  }
+  assert.notDeepEqual(before.entries[0].state.localization.message.position, after.entries[0].state.localization.message.position)
+  assert.deepEqual(before.entries[1].state.localization.message.position, after.entries[1].state.localization.message.position)
+  assert.deepEqual(before.entries[4].state.localization.message.position, after.entries[4].state.localization.message.position)
+  assert.equal(telemetry.getSampleFreshness(after.entries[4].state.localization, after.entries[4], 31_000).state, 'stale')
+  assert.equal(telemetry.getSampleFreshness(after.entries[4].state.chassis, after.entries[4], 31_000).state, 'fresh')
+  assert.equal(telemetry.directoryOnline(after.entries[6], false, 31_000), false)
+  assert.deepEqual(before.entries[6].state, after.entries[6].state)
+  assert.notEqual(before.entries[7].state.stream_id, after.entries[7].state.stream_id)
+  assert.equal(after.entries[7].state.sequence, 3)
+  assert.equal(telemetry.getSampleFreshness(after.entries[0].state.chassis, after.entries[0], 37_000).state, 'stale')
+  assert.equal(telemetry.directoryOnline(after.entries[0], false, 42_000), false)
+  assert.notEqual(mockFleet.createMockFleet(demoMap, 0, started + 1, 0).entries[0].state.stream_id, before.entries[0].state.stream_id)
+})
+
+test('mock Monitor recovery and unknown tasks pass actual data contracts without management authority', () => {
+  const started = 1_793_333_000_000
+  const failure = mockFleet.createMockVehicleData('sim-006', demoMap, 10_000, started)
+  const recovery = mockFleet.createMockVehicleData('sim-006', demoMap, 20_000, started)
+  assert.equal(failure.health.payload.sample.message.hmi_modules.monitor.status, 'ERROR')
+  assert.deepEqual(recovery.events.map((event) => event.transition), ['raised', 'recovered'])
+  assert.equal(recovery.events[0].event_id, failure.events[0].event_id)
+  assert.equal(recovery.health.payload.sample.message.hmi_modules.monitor.status, 'OK')
+  const unknown = mockFleet.createMockVehicleData('sim-008', demoMap, 31_000, started)
+  assert.equal(unknown.tasks[0].result.status, 'unknown')
+  assert.equal(unknown.can_manage, false)
+  assert.equal(unknown.profile.payload.map_id, demoMap.id)
+  assert.equal(dataAPI.healthFreshness(unknown, 0).fresh, true)
+  assert.equal(dataAPI.healthFreshness(mockFleet.createMockVehicleData('sim-007', demoMap, 31_000, started), 0).fresh, false)
+  dataAPI.vehicleDataSchema.parse(unknown)
+  assert.throws(() => mockFleet.createMockVehicleData('real-car', demoMap, 0, started))
+})
+
+test('backup dashboard adapter distinguishes parked, faulty, stale and offline vehicles without invented metrics', () => {
+  const started = 1_793_333_000_000
+  const fleet = mockFleet.createMockFleet(demoMap, 1000, started, 1000)
+  const summaries = fleet.entries.map((entry) => dashboard.dashboardVehicle(entry,
+    mockFleet.createMockVehicleData(entry.vehicle_id, demoMap, 1000, started), demoMap, 1000))
+  assert.equal(summaries[0].speedKmh, 7.2)
+  assert.equal(summaries[1].status, 'IDLE')
+  assert.equal(summaries[1].gear, 'P')
+  assert.equal(summaries[2].gear, 'R')
+  assert.equal(summaries[3].batteryPercent, 12)
+  assert.equal(summaries[3].status, 'ALARM')
+  assert.match(summaries[4].localizationLabel, /过期/)
+  assert.equal(summaries[6].status, 'OFFLINE')
+  assert.equal(summaries[6].speedKmh, null)
+  assert.equal(summaries[6].batteryPercent, undefined)
+  assert.equal(summaries[6].gear, '—')
+  assert.match(summaries[0].locationLabel, /fixture-v1/)
+  assert.deepEqual(dashboard.mapPercent(demoMap, 100, 198), { left: '5%', top: '95%' })
+  const brokenFrame = structuredClone(fleet.entries[0])
+  brokenFrame.state.localization.message.frame_id = 'different-map'
+  assert.equal(dashboard.dashboardVehicle(brokenFrame, undefined, demoMap, 1000).position, undefined)
+  const stopped = dashboard.dashboardVehicle(fleet.entries[0], undefined, demoMap, 13_000)
+  assert.equal(stopped.status, 'OFFLINE')
+  assert.equal(stopped.speedKmh, null)
+})
+
+test('backup alert/task adapters preserve recovery and unknown outcomes and handle empty snapshots', () => {
+  const started = 1_793_333_000_000
+  const failure = { 'sim-006': mockFleet.createMockVehicleData('sim-006', demoMap, 1000, started) }
+  const recovery = { 'sim-006': mockFleet.createMockVehicleData('sim-006', demoMap, 21_000, started) }
+  assert.equal(dashboard.dashboardAlerts(failure)[0].status, 'open')
+  assert.equal(dashboard.dashboardAlerts(recovery)[0].status, 'closed')
+  assert.equal(dashboard.dashboardAlerts(recovery)[0].id, dashboard.dashboardAlerts(failure)[0].id)
+  const task = dashboard.dashboardTasks({ 'sim-008': mockFleet.createMockVehicleData('sim-008', demoMap, 1000, started) })[0]
+  assert.equal(task.status, 'unknown')
+  assert.equal(task.vehicleId, 'sim-008')
+  assert.match(dashboard.dashboardDetails(recovery['sim-006']).diagnosis, /OK/)
+  assert.match(dashboard.dashboardDetails(undefined).diagnosis, /不能推断健康/)
+  assert.deepEqual(dashboard.dashboardAlerts({}), [])
+  assert.deepEqual(dashboard.dashboardTasks({}), [])
+})
 
 test('shared input converts normalized intent to v2 integers without enabling legacy actions', () => {
   const convert = simulationInput.simulationCommand
@@ -292,7 +430,8 @@ test('Data preview renders Monitor and task panels with every mutation disabled 
     stdin: {
       contents: `import React from 'react'; import {renderToStaticMarkup} from 'react-dom/server';
         import Panel from './src/pages/VehicleDataPanel';
-        export const render = (mode) => renderToStaticMarkup(<Panel vehicleId="car-test" preview mode={mode} />);`,
+        import {MockFleetProvider} from './src/app/MockFleetProvider';
+        export const render = (mode) => renderToStaticMarkup(<MockFleetProvider><Panel vehicleId="car-test" preview mode={mode} /></MockFleetProvider>);`,
       resolveDir: process.cwd(), loader: 'tsx',
     },
     bundle: true, format: 'cjs', platform: 'node', write: false,

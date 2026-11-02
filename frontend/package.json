@@ -2,6 +2,7 @@
   "name": "web-creator",
   "version": "1.0.0",
   "scripts": {
+    "prepare:maps": "node scripts/prepare-maps.mjs",
     "dev": "node scripts/build.mjs",
     "test": "node scripts/test.mjs",
     "typecheck": "tsc -p . --noEmit --incremental false",

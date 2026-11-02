@@ -1,15 +1,13 @@
 import { HashRouter, Route, Routes } from 'react-router'
-import { AuthProvider } from './app/AuthProvider'
 import HomePage from './pages/Home'
+import { MockFleetProvider } from './app/MockFleetProvider'
 
 export default function App() {
   return (
-    <AuthProvider>
-      <HashRouter>
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-        </Routes>
-      </HashRouter>
-    </AuthProvider>
+    <HashRouter>
+      <Routes>
+        <Route path="/" element={<MockFleetProvider defaultEnabled><HomePage /></MockFleetProvider>} />
+      </Routes>
+    </HashRouter>
   )
 }

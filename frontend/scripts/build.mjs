@@ -3,6 +3,8 @@ import { rimraf } from 'rimraf'
 import stylePlugin from 'esbuild-style-plugin'
 import autoprefixer from 'autoprefixer'
 import tailwindcss from 'tailwindcss'
+import { existsSync } from 'node:fs'
+import { cp } from 'node:fs/promises'
 
 const args = process.argv.slice(2)
 const isProd = args[0] === '--production'
@@ -29,6 +31,16 @@ const esbuildOpts = {
     '.png': 'file',
   },
   plugins: [
+    {
+      name: 'local-map-assets',
+      setup(build) {
+        build.onEnd(async (result) => {
+          if (!result.errors.length && existsSync('public/maps')) {
+            await cp('public/maps', 'dist/maps', { recursive: true })
+          }
+        })
+      },
+    },
     stylePlugin({
       postcss: {
         plugins: [tailwindcss, autoprefixer],
@@ -44,7 +56,7 @@ if (isProd) {
   await ctx.watch()
   const host = process.env.HOST || '0.0.0.0'
   const requestedPort = Number(process.env.PORT || 8000)
-  const { hosts, port } = await ctx.serve({ host, port: requestedPort })
+  const { hosts, port } = await ctx.serve({ host, port: requestedPort, servedir: 'dist' })
   console.log(`Running on:`)
   hosts.forEach((host) => {
     console.log(`http://${host}:${port}`)

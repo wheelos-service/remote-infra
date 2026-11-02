@@ -5,6 +5,7 @@ import {
   healthFreshness, newDataQuery, submitDataQuery,
 } from '../lib/vehicle-data-api'
 import type { DataTask, VehicleData } from '../lib/vehicle-data-api'
+import { useMockFleet } from '../app/MockFleetProvider'
 
 interface Props {
   vehicleId: string
@@ -23,7 +24,8 @@ const statusLabels: Record<string, string> = {
 
 const VehicleDataPanel: React.FC<Props> = ({ vehicleId, accessToken, preview = false, mode = 'details' }) => {
   const live = useVehicleData(vehicleId, accessToken, !preview)
-  const data = preview ? createPreviewData(vehicleId) : live.data
+  const mockFleet = useMockFleet()
+  const data = mockFleet.enabled ? mockFleet.data[vehicleId] : preview ? createPreviewData(vehicleId) : live.data
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -42,7 +44,10 @@ const VehicleDataPanel: React.FC<Props> = ({ vehicleId, accessToken, preview = f
   }, [data, draft, busy])
   const current = Boolean(data) && !live.error && !preview && live.elapsedMs <= 5000
   const manage = current && data?.can_manage && Boolean(accessToken)
-  const health = data ? healthFreshness(data, preview ? 0 : live.elapsedMs) : undefined
+  const sampleElapsed = mockFleet.enabled
+    ? Math.max(0, performance.now() - (mockFleet.vehicles.entries[0]?.receivedAtClientMs ?? performance.now()))
+    : preview ? 0 : live.elapsedMs
+  const health = data ? healthFreshness(data, sampleElapsed) : undefined
   const act = async (operation: (signal: AbortSignal) => Promise<void>) => {
     if (!accessToken || preview || busy || request.current) return
     const controller = new AbortController()
@@ -100,7 +105,8 @@ const VehicleDataPanel: React.FC<Props> = ({ vehicleId, accessToken, preview = f
             {data.profile ? `${data.profile.payload.model || '未知车型'} · 软件 ${data.profile.payload.software_version || '未知'} · 地图 ${data.profile.payload.map_id || '未配置'}` : '尚未收到设备静态信息'}
           </p>
           <p className="mt-1 text-xs text-amber-200">
-            Monitor：{!preview && current && health?.fresh ? '源数据新鲜' : preview ? '预览，非实时' : '未知 / 过期 / 不完整'}
+            Monitor：{mockFleet.enabled ? health?.fresh ? '模拟源新鲜（非实车）' : '模拟源未知 / 过期'
+              : !preview && current && health?.fresh ? '源数据新鲜' : preview ? '预览，非实时' : '未知 / 过期 / 不完整'}
             {health?.age != null && ` · 至少 ${(health.age / 1000).toFixed(1)} 秒`}
             {data.health?.payload.sample.message?.components_truncated && ' · 已截断，不推断恢复'}
           </p>
@@ -110,7 +116,7 @@ const VehicleDataPanel: React.FC<Props> = ({ vehicleId, accessToken, preview = f
           </>}
           <HealthChecks data={data} />
         </div>
-        <Capacity data={data} elapsedMs={live.elapsedMs} />
+        <Capacity data={data} elapsedMs={sampleElapsed} />
         {mode !== 'tasks' && <div className="space-y-2">
           <h3 className="text-xs text-slate-200">最近 {data.events.length} 条事件 · 人工确认不改变设备恢复状态</h3>
           {data.events.map((event) => {

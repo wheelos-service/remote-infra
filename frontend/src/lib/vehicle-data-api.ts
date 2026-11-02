@@ -236,8 +236,7 @@ export async function exportDataRecords(vehicle: string, kind: 'events' | 'tasks
   throw new VehicleDataError('导出超过容量边界，未生成不完整文件')
 }
 
-export function createPreviewData(vehicle: string): VehicleData {
-  const now = 1793333000000
+export function createPreviewData(vehicle: string, now = 1793333000000): VehicleData {
   const base = { schema_version: 1, vehicle_id: vehicle, stream_id: 'preview', sequence: 1, published_at_ms: now }
   return vehicleDataSchema.parse({
     vehicle_id: vehicle, server_time_ms: now, can_manage: false,

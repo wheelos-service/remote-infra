@@ -10,6 +10,7 @@ import {
 import type { VehicleOperations } from '../lib/vehicle-operations-api'
 import { selectedPreviewScenario } from '../lib/preview-vehicles'
 import VehicleDataPanel from './VehicleDataPanel'
+import { useMockFleet } from '../app/MockFleetProvider'
 
 export type OperationsPanelMode = 'details' | 'alerts' | 'tasks'
 
@@ -36,12 +37,16 @@ const VehicleOperationsPanel: React.FC<VehicleOperationsPanelProps> = ({
   mode = 'details',
 }) => {
   const live = useVehicleOperations(vehicleId, accessToken, !preview)
+  const mockFleet = useMockFleet()
   const data = preview ? createPreviewOperations(vehicleId, undefined, selectedPreviewScenario()) : live.data
   const operationsAge = live.requestStartedAtMs === undefined
     ? null
     : Math.max(0, (live.nowMs ?? performance.now()) - live.requestStartedAtMs)
   const snapshotFresh = !preview && Boolean(data) && !live.error &&
     operationsAge !== null && operationsAge <= 5_000
+  if (mockFleet.enabled) {
+    return <VehicleDataPanel key={vehicleId} vehicleId={vehicleId} preview mode={mode} />
+  }
 
   if (mode === 'alerts') {
     return (

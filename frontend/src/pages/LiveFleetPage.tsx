@@ -12,6 +12,8 @@ import {
 } from '../lib/vehicle-telemetry'
 import type { VehicleDirectoryEntry, VehicleTelemetry } from '../lib/vehicles-api'
 import VehicleOperationsPanel from './VehicleOperationsPanel'
+import { useMockFleet } from '../app/MockFleetProvider'
+import FleetMapPanel from './FleetMapPanel'
 
 interface LiveFleetPageProps {
   mode: 'fleet' | 'monitor'
@@ -49,8 +51,10 @@ function onlineLabel(entry: ReceivedVehicle, requestFailed: boolean, nowMs: numb
 }
 
 const LiveFleetPage: React.FC<LiveFleetPageProps> = ({ mode, vehicles, accessToken, preview = false }) => {
+  const mockFleet = useMockFleet()
   const [selectedVehicleId, setSelectedVehicleId] = useState('')
-  const [nowMs, setNowMs] = useState(() => performance.now())
+  const [tickMs, setNowMs] = useState(() => performance.now())
+  const nowMs = Math.max(tickMs, performance.now())
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(performance.now()), 1_000)
@@ -83,7 +87,7 @@ const LiveFleetPage: React.FC<LiveFleetPageProps> = ({ mode, vehicles, accessTok
             {mode === 'fleet' ? '车队总览' : '车辆监控'}
           </h1>
           <p className="mt-1 text-xs text-slate-400">
-            {preview
+            {mockFleet.enabled ? '动态多车 Mock · 仅本地地图资源与合成数据，不连接真实车辆' : preview
               ? '固定预览场景 · 非实时数据，不会建立视频或控制会话'
               : '授权车辆实时状态 · 只读遥测，不会建立视频或控制会话'}
           </p>
@@ -91,7 +95,7 @@ const LiveFleetPage: React.FC<LiveFleetPageProps> = ({ mode, vehicles, accessTok
         <div className="flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-xs text-slate-300">
           <Radio className="h-3.5 w-3.5 text-sky-300" />
           {vehicles.status === 'loading' && (preview ? '预览场景' : '正在读取车辆目录')}
-          {vehicles.status === 'ready' && (preview ? '预览场景 · 非实时' : '每 2 秒更新')}
+          {vehicles.status === 'ready' && (mockFleet.enabled ? 'Mock · 每 500 ms 更新' : preview ? '预览场景 · 非实时' : '每 2 秒更新')}
           {vehicles.status === 'error' && '车辆目录请求失败'}
           {vehicles.status === 'signed-out' && '未登录'}
         </div>
@@ -124,6 +128,10 @@ const LiveFleetPage: React.FC<LiveFleetPageProps> = ({ mode, vehicles, accessTok
           <SummaryCard icon={<Wifi className="h-4 w-4 text-emerald-300" />} label="在线" value={onlineCount} />
           <SummaryCard icon={<Radio className="h-4 w-4 text-amber-300" />} label="远程操作占用" value={occupiedCount} />
         </div>
+      )}
+      {mockFleet.enabled && mockFleet.map && (
+        <FleetMapPanel key={mockFleet.map.id} map={mockFleet.map} entries={vehicles.entries}
+          selectedId={selectedVehicleId} select={setSelectedVehicleId} nowMs={nowMs} requestFailed={vehicles.requestFailed} />
       )}
 
       <div className="grid min-h-[420px] flex-1 gap-4 xl:grid-cols-[minmax(280px,0.8fr)_minmax(0,1.8fr)]">
