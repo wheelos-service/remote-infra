@@ -28,6 +28,9 @@ const { outputFiles } = await esbuild.build({
     { in: 'src/lib/mock-fleet.ts', out: 'mock-fleet' },
     { in: 'src/lib/teleop-config.ts', out: 'teleop-config' },
     { in: 'src/lib/dashboard-data.ts', out: 'dashboard-data' },
+    { in: 'src/lib/fleet-overview.ts', out: 'fleet-overview' },
+    { in: 'src/lib/vehicle-alerts.ts', out: 'vehicle-alerts' },
+    { in: 'src/lib/vehicle-monitor.ts', out: 'vehicle-monitor' },
   ],
   outdir: 'test-build',
   bundle: true,
@@ -56,6 +59,9 @@ const cameraView = await loadBundle('camera-view')
 const fleetMap = await loadBundle('fleet-map')
 const mockFleet = await loadBundle('mock-fleet')
 const dashboard = await loadBundle('dashboard-data')
+const fleetOverview = await loadBundle('fleet-overview')
+const vehicleAlerts = await loadBundle('vehicle-alerts')
+const vehicleMonitor = await loadBundle('vehicle-monitor')
 
 const mapText = `header { version: "fixture-v1" }
 lane {
@@ -185,6 +191,235 @@ test('backup alert/task adapters preserve recovery and unknown outcomes and hand
   assert.match(dashboard.dashboardDetails(undefined).diagnosis, /不能推断健康/)
   assert.deepEqual(dashboard.dashboardAlerts({}), [])
   assert.deepEqual(dashboard.dashboardTasks({}), [])
+})
+
+test('overview counts driving mode independently of motion, health and remote control occupancy', () => {
+  const start = 1_793_333_000_000
+  const fleet = mockFleet.createMockFleet(demoMap, 1000, start, 1000)
+  const data = Object.fromEntries(fleet.entries.map((entry) => [entry.vehicle_id,
+    mockFleet.createMockVehicleData(entry.vehicle_id, demoMap, 1000, start)]))
+  const rows = fleet.entries.map((entry) => fleetOverview.overviewVehicle(entry, data[entry.vehicle_id], demoMap, 1000))
+  assert.equal(rows[1].mode, 'auto', 'stopped auto remains autonomous mode')
+  assert.equal(rows[3].mode, 'auto', 'fault does not rewrite driving mode')
+  assert.equal(rows[3].health, 'fault')
+  assert.equal(rows[4].health, 'unknown', 'stale source is not an authoritative fault')
+  assert.equal(rows[6].mode, 'unknown')
+  assert.equal(rows[6].speed, null)
+  assert.deepEqual(fleetOverview.fleetMetrics(rows, data), { total: 8, online: 7, auto: 7, manual: 0, unknown: 1, faults: 3, attention: 4 })
+  const manual = structuredClone(fleet.entries[0])
+  manual.state.chassis.message.driving_mode = 'COMPLETE_MANUAL'
+  manual.control = { status: 'free', is_self: false }
+  const row = fleetOverview.overviewVehicle(manual, data[manual.vehicle_id], demoMap, 1000)
+  assert.equal(row.mode, 'manual')
+  assert.equal(row.control, '无远程会话')
+  manual.state.chassis.message.driving_mode = 'AUTO_STEER_ONLY'
+  manual.control = { status: 'occupied', is_self: true }
+  assert.equal(fleetOverview.overviewVehicle(manual, data[manual.vehicle_id], demoMap, 1000).mode, 'partial')
+  manual.state.chassis.source_timestamp_ms = start - 10_000
+  assert.equal(fleetOverview.overviewVehicle(manual, data[manual.vehicle_id], demoMap, 1000).mode, 'unknown')
+  assert.equal(fleetOverview.overviewVehicle(manual, data[manual.vehicle_id], demoMap, 1000).online, true)
+})
+
+test('overview evaluates all Monitor checks, unknowns, map mismatch and retained fault recovery separately', () => {
+  const start = 1_793_333_000_000
+  const entry = mockFleet.createMockFleet(demoMap, 1000, start, 1000).entries[0]
+  const data = mockFleet.createMockVehicleData(entry.vehicle_id, demoMap, 1000, start)
+  data.health.payload.sample.message.require_emergency_stop = false
+  data.health.payload.sample.message.hmi_modules.monitor.status = 'ERROR'
+  assert.equal(fleetOverview.overviewVehicle(entry, data, demoMap, 1000).health, 'fault')
+  data.health.payload.sample.message.hmi_modules.monitor.status = 'WARN'
+  assert.equal(fleetOverview.overviewVehicle(entry, data, demoMap, 1000).health, 'degraded')
+  data.health.payload.sample.message.hmi_modules.monitor.status = 'OK'
+  data.health.payload.sample.message.components_truncated = true
+  assert.equal(fleetOverview.overviewVehicle(entry, data, demoMap, 1000).health, 'unknown')
+  data.health.payload.sample.message.components_truncated = false
+  assert.equal(fleetOverview.overviewVehicle(entry, data, demoMap, 1000).health, 'ok')
+  entry.state.localization.message.frame_id = 'wrong-map'
+  assert.equal(fleetOverview.overviewVehicle(entry, data, demoMap, 1000).position, undefined)
+  assert.equal(fleetOverview.overviewVehicle(entry, data, demoMap, 1000).health, 'unknown')
+  entry.state.localization.message.frame_id = demoMap.frame_id
+  entry.state.localization.message.position.x = demoMap.bounds[2] + 1
+  assert.equal(fleetOverview.overviewVehicle(entry, data, demoMap, 1000).health, 'unknown')
+  const recovered = mockFleet.createMockVehicleData('sim-006', demoMap, 21_000, start)
+  assert.equal(fleetOverview.activeFaults(recovered), 0)
+  assert.equal(fleetOverview.activeFaults(mockFleet.createMockVehicleData('sim-006', demoMap, 1000, start)), 1)
+  assert.equal(fleetOverview.activeFaults(undefined), 0)
+  const fault = mockFleet.createMockVehicleData('sim-004', demoMap, 1000, start)
+  fault.events.push({ ...fault.events[0], event_id: 'changed', transition: 'changed', severity: 'FATAL', occurred_at_ms: start + 500 })
+  assert.equal(fleetOverview.activeFaults(fault), 2)
+})
+
+test('vehicle alerts group fault occurrences, preserve recovery evidence and do not treat acknowledgement as recovery', () => {
+  const start = 1_793_333_000_000
+  const data = mockFleet.createMockVehicleData('sim-006', demoMap, 21_000, start)
+  const raised = data.events[0], recovery = data.events[1]
+  data.events = [recovery, { ...raised, event_id: 'changed', transition: 'changed', occurred_at_ms: start + 1000 }, raised, raised]
+  let items = vehicleAlerts.vehicleAlerts(data)
+  assert.equal(items.length, 1)
+  assert.equal(items[0].events.length, 3, 'deduplicate exact event IDs')
+  assert.equal(items[0].state, 'recovered')
+  assert.equal(items[0].startedAt, start)
+  assert.equal(items[0].recoveredAt, start + 20_000)
+  data.events.push({ ...raised, event_id: 'raised-again', occurred_at_ms: start + 30_000 })
+  items = vehicleAlerts.vehicleAlerts(data)
+  assert.equal(items.length, 2, 'recurrence creates a new occurrence')
+  assert.equal(items[0].state, 'active')
+  assert.notEqual(items[0].id, items[1].id)
+  data.acknowledgements = [{ event_id: 'raised-again', operator_id: 'observer', acknowledged_at_ms: start + 31_000 }]
+  assert.equal(vehicleAlerts.pendingAlertCount(data), 1)
+  assert.equal(fleetOverview.activeFaults(data), 1, 'overview and event center share the same model')
+  data.events = [{ ...raised, event_id: 'orphan-change', transition: 'changed' }]
+  assert.equal(vehicleAlerts.vehicleAlerts(data)[0].historyIncomplete, true)
+  assert.equal(vehicleAlerts.pendingAlertCount(data), 1)
+  data.events = [recovery]
+  assert.equal(vehicleAlerts.vehicleAlerts(data)[0].severity, 'UNKNOWN', 'no invented historical severity')
+  assert.equal(vehicleAlerts.pendingAlertCount(data), 0)
+  data.events = [raised, { ...recovery, occurred_at_ms: start }]
+  assert.equal(vehicleAlerts.vehicleAlerts(data)[0].state, 'unknown', 'conflicting equal timestamps have no authoritative ordering')
+  assert.equal(vehicleAlerts.pendingAlertCount(data), 1, 'ambiguous recovery does not erase pending fault')
+  data.events[0].vehicle_id = 'wrong-car'
+  assert.throws(() => vehicleAlerts.vehicleAlerts(data), /身份不一致/)
+})
+
+test('vehicle alert grouping shows multiple faults per car and keeps totals independent of filters', () => {
+  const start = 1_793_333_000_000
+  const records = Object.fromEntries(['sim-004', 'sim-006'].map((id) =>
+    [id, mockFleet.createMockVehicleData(id, demoMap, 6000, start)]))
+  const groups = vehicleAlerts.groupVehicleAlerts(records, { 'sim-004': '港区巡检车' })
+  assert.equal(groups.length, 2)
+  assert.equal(groups[0].pending, 2)
+  assert.equal(groups[0].alerts.length, 2, 'changed event does not inflate fault count')
+  assert.equal(groups[0].alerts[0].severity, 'ERROR', 'show severe vehicle faults ahead of warnings')
+  assert.equal(groups[0].alerts.find((item) => item.faultKey === 'hmi_modules/monitor').events.length, 2)
+  const filters = { ...vehicleAlerts.initialAlertFilters, query: '港区' }
+  assert.deepEqual(vehicleAlerts.filterVehicleAlerts(groups, filters, start + 6000).map((group) => group.vehicleId), ['sim-004'])
+  filters.query = 'MOCK-3-CHANGED'
+  const matches = vehicleAlerts.filterVehicleAlerts(groups, filters, start + 6000)
+  assert.equal(matches.length, 1)
+  assert.equal(matches[0].alerts.length, 1)
+  assert.equal(matches[0].pending, 2, 'vehicle-wide count remains visible under event search')
+  filters.vehicle = 'sim-006'
+  assert.deepEqual(vehicleAlerts.filterVehicleAlerts(groups, filters, start + 6000), [])
+  assert.equal(groups.reduce((sum, group) => sum + group.pending, 0), 3)
+  assert.equal(vehicleAlerts.filterVehicleAlerts(groups, { ...vehicleAlerts.initialAlertFilters, severity: 'critical' }, start + 6000)
+    .reduce((sum, group) => sum + group.alerts.length, 0), 2)
+})
+
+test('alert filters use event timestamps for 24h changes and allow searching recovered event history', () => {
+  const start = 1_793_333_000_000
+  const data = mockFleet.createMockVehicleData('sim-006', demoMap, 21_000, start)
+  const groups = vehicleAlerts.groupVehicleAlerts({ [data.vehicle_id]: data })
+  const filters = { ...vehicleAlerts.initialAlertFilters, query: 'mock-5-recovered' }
+  assert.deepEqual(vehicleAlerts.filterVehicleAlerts(groups, filters, start + 21_000), [])
+  filters.state = 'all'
+  assert.equal(vehicleAlerts.filterVehicleAlerts(groups, filters, start + 21_000)[0].alerts[0].state, 'recovered')
+  filters.period = '24h'
+  assert.equal(vehicleAlerts.filterVehicleAlerts(groups, filters, start + 86_400_000 + 20_000).length, 1, 'inclusive boundary')
+  assert.equal(vehicleAlerts.filterVehicleAlerts(groups, filters, start + 86_400_000 + 20_001).length, 0)
+  assert.equal(vehicleAlerts.filterVehicleAlerts(groups, filters, start - 1).length, 0, 'future events are not in the past 24h')
+  filters.period = 'retained'
+  filters.severity = 'WARN'
+  assert.equal(vehicleAlerts.filterVehicleAlerts(groups, filters, start + 21_000).length, 0)
+  assert.equal(vehicleAlerts.pendingAlertCount(undefined), 0)
+})
+
+test('dashboard period summary counts occurrences by actual raised/recovered timestamps, not changed records or vehicle closures', () => {
+  const start = 1_793_333_000_000
+  const fault = mockFleet.createMockVehicleData('sim-004', demoMap, 6000, start)
+  const recovered = mockFleet.createMockVehicleData('sim-006', demoMap, 21_000, start)
+  const groups = vehicleAlerts.groupVehicleAlerts({ [fault.vehicle_id]: fault, [recovered.vehicle_id]: recovered })
+  assert.deepEqual(vehicleAlerts.alertPeriodSummary(groups, start, start + 21_000), { vehicles: 2, added: 3, recovered: 1 })
+  assert.deepEqual(vehicleAlerts.alertPeriodSummary(groups, start + 1, start + 21_000), { vehicles: 0, added: 0, recovered: 1 },
+    'changed event does not become an added alarm; recovery belongs to its own time')
+  assert.deepEqual(vehicleAlerts.alertPeriodSummary(groups, start + 20_000, start + 20_000), { vehicles: 0, added: 0, recovered: 1 })
+  recovered.events = [recovered.events[1]]
+  assert.deepEqual(vehicleAlerts.alertPeriodSummary(vehicleAlerts.groupVehicleAlerts({ recovered }), start, start + 21_000),
+    { vehicles: 0, added: 0, recovered: 1 }, 'missing start does not invent a raised alarm')
+  for (const [from, to] of [[NaN, start], [start, Infinity], [start + 1, start]]) {
+    assert.throws(() => vehicleAlerts.alertPeriodSummary(groups, from, to), /时间范围/)
+  }
+})
+
+test('full vehicle timeline combines all fault keys and acknowledgements at their own times without cross-vehicle records', () => {
+  const start = 1_793_333_000_000
+  const data = mockFleet.createMockVehicleData('sim-004', demoMap, 6000, start)
+  const ack = { event_id: 'mock-3-battery-raised', operator_id: 'test-operator', acknowledged_at_ms: start + 2000 }
+  data.acknowledgements = [ack, ack, { ...ack, event_id: 'not-loaded' }]
+  const items = vehicleAlerts.vehicleTimeline(data)
+  assert.equal(items.length, 4)
+  assert.equal(new Set(items.map((item) => item.event.fault_key)).size, 2, 'timeline spans the whole vehicle, not one selected alarm')
+  assert.equal(items[2].kind, 'human')
+  assert.equal(items[2].at, start + 2000)
+  assert.equal(items[2].operator, 'test-operator')
+  assert.equal(items[3].event.transition, 'changed')
+  assert.ok(items.every((item) => item.event.vehicle_id === data.vehicle_id))
+  assert.deepEqual(vehicleAlerts.vehicleTimeline(undefined), [])
+  const recovered = mockFleet.createMockVehicleData('sim-006', demoMap, 21_000, start)
+  assert.equal(vehicleAlerts.vehicleTimeline(recovered).at(-1).event.transition, 'recovered')
+})
+
+test('developer map preserves metric aspect ratio and prioritizes selected labels without moving anchors', () => {
+  const view = fleetOverview.fitMap([100, 200, 300, 240], 800, 400)
+  const origin = fleetOverview.screenPoint({ x: 100, y: 200 }, view, 800, 400)
+  const east = fleetOverview.screenPoint({ x: 110, y: 200 }, view, 800, 400)
+  const north = fleetOverview.screenPoint({ x: 100, y: 210 }, view, 800, 400)
+  assert.ok(Math.abs((east.x - origin.x) - (origin.y - north.y)) < 1e-8)
+  assert.throws(() => fleetOverview.fitMap([0, 0, 1, 1], 0, 400))
+  const start = 1_793_333_000_000
+  const fleet = mockFleet.createMockFleet(demoMap, 1000, start, 1000)
+  const rows = fleet.entries.map((entry) => ({ ...fleetOverview.overviewVehicle(entry, undefined, demoMap, 1000), position: { x: 200, y: 220, heading: 0 } }))
+  const labels = fleetOverview.markerLabels(rows, view, 800, 400, 'sim-008')
+  assert.equal(labels[0].row.id, 'sim-008')
+  assert.ok(labels[0].label)
+  assert.deepEqual(labels[0].position, labels[1].position)
+  assert.equal(fleetOverview.markerLabels([{ ...rows[0], position: { x: 1e9, y: 1e9 } }], view, 800, 400, 'sim-001')[0].label, undefined)
+  const shown = labels.filter((value) => value.label)
+  for (let i = 0; i < shown.length; i++) for (let j = i + 1; j < shown.length; j++) {
+    assert.ok(Math.abs(shown[i].label.x - shown[j].label.x) >= 112 || Math.abs(shown[i].label.y - shown[j].label.y) >= 27)
+  }
+})
+
+test('local BEV projects metric positions heading-up without aspect distortion and freezes old locations', () => {
+  const pose = { x: 100, y: 200, heading: 0 }
+  assert.deepEqual(vehicleMonitor.bevPoint({ x: 100, y: 200 }, pose, 800, 400, 40), { x: 400, y: 200 })
+  assert.deepEqual(vehicleMonitor.bevPoint({ x: 110, y: 200 }, pose, 800, 400, 40), { x: 400, y: 100 }, 'east-facing vehicle sees east ahead')
+  assert.deepEqual(vehicleMonitor.bevPoint({ x: 100, y: 210 }, pose, 800, 400, 40), { x: 300, y: 200 }, 'north is left of east-facing car')
+  const north = vehicleMonitor.bevPoint({ x: 100, y: 210 }, { ...pose, heading: Math.PI / 2 }, 800, 400, 40)
+  assert.ok(Math.abs(north.x - 400) < 1e-8 && Math.abs(north.y - 100) < 1e-8)
+  const reverse = vehicleMonitor.bevPoint({ x: 110, y: 200 }, { ...pose, heading: Math.PI }, 800, 400, 40)
+  assert.ok(Math.abs(reverse.y - 300) < 1e-8, 'projection follows body heading, not travel direction')
+  for (const range of [0, -1, NaN, Infinity]) assert.throws(() => vehicleMonitor.bevPoint(pose, pose, 800, 400, range))
+  const start = 1_793_333_000_000
+  const entry = mockFleet.createMockFleet(demoMap, 1000, start, 1000).entries[0]
+  const row = fleetOverview.overviewVehicle(entry, undefined, demoMap, 1000)
+  const fresh = vehicleMonitor.bevPose(row)
+  assert.ok(fresh)
+  const stale = { ...row, localizationFresh: false, position: { x: 200, y: 220, heading: 1 } }
+  assert.deepEqual(vehicleMonitor.bevPose(stale, fresh), fresh, 'stale updates never move the camera')
+  assert.deepEqual(vehicleMonitor.bevPose({ ...stale, online: false }, fresh), fresh)
+  assert.deepEqual(vehicleMonitor.bevPose(stale), stale.position, 'initial old snapshot can be shown explicitly as old')
+  assert.equal(vehicleMonitor.bevPose({ ...stale, position: undefined }, fresh), undefined, 'invalid frame/bounds cannot reuse stale geometry')
+  assert.equal(vehicleMonitor.bevPose({ ...row, position: { x: 100, y: 200 } }, fresh), undefined, 'missing heading is not guessed')
+})
+
+test('passive vehicle diagnosis prioritizes faults and treats missing, stale and partial data as unknown', () => {
+  const start = 1_793_333_000_000
+  const entry = mockFleet.createMockFleet(demoMap, 6000, start, 6000).entries[3]
+  const data = mockFleet.createMockVehicleData(entry.vehicle_id, demoMap, 6000, start)
+  let checks = vehicleMonitor.vehicleHealthChecks(entry, data, 6000)
+  assert.equal(checks[0].status, 'FATAL')
+  assert.equal(checks.find((check) => check.key === 'chassis').status, 'ERROR')
+  assert.equal(checks.find((check) => check.key === '其他检查/battery').status, 'WARN')
+  checks = vehicleMonitor.vehicleHealthChecks(entry, data, 20_000)
+  assert.ok(checks.every((check) => check.status === 'UNKNOWN'), 'stale values cannot remain healthy or current faults')
+  delete entry.state.chassis.message.error_code
+  delete entry.state.chassis.message.chassis_error_mask
+  assert.equal(vehicleMonitor.vehicleHealthChecks(entry, undefined, 6000).find((check) => check.key === 'chassis').status, 'UNKNOWN')
+  entry.state.chassis.message.driving_mode = 'EMERGENCY_MODE'
+  assert.equal(vehicleMonitor.vehicleHealthChecks(entry, undefined, 6000).find((check) => check.key === 'chassis').status, 'ERROR')
+  data.health.payload.sample.message.components_truncated = true
+  assert.ok(vehicleMonitor.vehicleHealthChecks(entry, data, 6000).filter((check) =>
+    check.key.startsWith('模块/') || check.key.startsWith('其他检查/')).every((check) => check.status === 'UNKNOWN'))
 })
 
 test('shared input converts normalized intent to v2 integers without enabling legacy actions', () => {

@@ -5,8 +5,10 @@
  */
 
 import React, { useMemo, useState } from 'react'
-import { Car, MapPin, Maximize2, Minimize2, Wifi } from 'lucide-react'
-import DashboardMap from './DashboardMap'
+import { Car, Maximize2, Minimize2, Wifi } from 'lucide-react'
+import type { FleetMap } from '../lib/fleet-map'
+import type { OverviewVehicle } from '../lib/fleet-overview'
+import VehicleBev from './VehicleBev'
 
 /**
  * 车辆档位类型。
@@ -22,7 +24,11 @@ export interface TeleopWorkbenchProps {
   /** 当前车辆档位，用于决定前视/后视画面。 */
   gear: Gear
   /** 网络信号质量等级，0–4 格。 */
-  networkQuality: 0 | 1 | 2 | 3 | 4
+  networkQuality: 0 | 1 | 2 | 3 | 4 | null
+  row: OverviewVehicle
+  map: FleetMap
+  onBack: () => void
+  onMonitor: () => void
   /** 当前车速（km/h），可选。 */
   speedKph?: number
   /** 当前电量百分比（0–100），可选。 */
@@ -43,10 +49,12 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({
   networkQuality,
   speedKph,
   batteryPercent,
-  runModeLabel = '自动驾驶 · 演示环境',
-  locationLabel = '深圳 · 测试园区',
+  runModeLabel = '模式未知',
+  locationLabel = '位置未知',
+  row, map, onBack, onMonitor,
 }) => {
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [failedCamera, setFailedCamera] = useState<string | null>(null)
 
   const isReversing = gear === 'R'
 
@@ -79,11 +87,7 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({
       <header className="mb-2 flex items-center justify-between text-xs text-slate-300">
         <div className="flex items-center gap-2">
           <span className="font-medium">主视角 · {cameraConfig.label}</span>
-          <span className="flex items-center gap-1 rounded-full border border-emerald-500/70 bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300">
-            <span className="relative flex h-1.5 w-1.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/60" />
-              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            </span>
+          <span className="rounded-full border border-amber-700 bg-amber-950/30 px-2 py-0.5 text-[11px] text-amber-200">
             <span>示例图片</span>
           </span>
         </div>
@@ -94,11 +98,13 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({
 
       {/* 视频画面 + HUD 叠加层 */}
       <div className="relative min-h-[260px] flex-1 overflow-hidden rounded-xl bg-slate-950">
-        <img
+        {failedCamera !== cameraConfig.src && <img
           src={cameraConfig.src}
+          onError={() => setFailedCamera(cameraConfig.src)}
           alt={cameraConfig.label}
           className="absolute inset-0 h-full w-full object-cover"
-        />
+        />}
+        {failedCamera === cameraConfig.src && <p className="absolute inset-x-0 top-24 text-center text-xs text-slate-500">示例图片不可用 · 未接入实时视频</p>}
 
         {/* 顶部/底部渐变叠加，提升 HUD 可读性 */}
         <div className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-slate-950/90 via-slate-950/40 to-transparent" />
@@ -143,8 +149,8 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({
           </div>
 
           {/* 右侧：小地图（在底部右侧），小屏幕可根据需要隐藏或保留 */}
-          <div className="hidden sm:block">
-            <MiniMapOverlay vehicleId={vehicleId} locationLabel={locationLabel} />
+          <div className="pointer-events-auto hidden w-[280px] shrink-0 xl:block">
+            <VehicleBev map={map} row={row} compact />
           </div>
         </div>
       </div>
@@ -152,20 +158,20 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({
   )
 
   return (
-    <div className="flex h-full flex-col gap-4">
+    <div className="flex h-full min-h-[500px] flex-col gap-4" data-testid="remote-driving-workbench">
       {/* 顶部信息条：标题 + 运行提示 */}
-      <header className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <h1 className="text-sm font-semibold text-slate-100">接管工作台 · 监看模式</h1>
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <button type="button" onClick={onBack} className="rounded border border-slate-700 px-3 py-2 text-xs">返回远程驾驶列表</button>
+          <h1 className="text-sm font-semibold text-slate-100">{vehicleId} · 远程驾驶工作台</h1>
+          <span className="text-xs text-slate-300">{row.online ? '在线' : '离线'} · {row.control} · 监看模式</span>
           <span className="inline-flex items-center gap-1 rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-slate-300">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/40" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
-            </span>
             <span>Mock 数据 · 视频未接入 · 不可控制</span>
           </span>
         </div>
+        <button type="button" onClick={onMonitor} className="text-xs text-sky-200">查看车辆监控</button>
       </header>
+      {!row.online && <p role="status" className="text-xs text-amber-300">车辆离线，不能确认当前状态；视频未接入，控制不可用。</p>}
 
       {/* 主体区域：单块主视频界面（底部 HUD 左状态 + 右小地图） */}
       <main className="min-h-0 flex-1">{renderCameraArea(false)}</main>
@@ -176,7 +182,7 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({
           <div className="mb-2 flex items-center justify-between text-xs text-slate-300">
             <div className="flex items-center gap-2">
               <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px]">
-                接管工作台 · 全屏监看
+                {vehicleId} · 全屏监看 · 不可控制
               </span>
               <span className="hidden text-slate-500 sm:inline">点击右上角按钮可退出全屏</span>
             </div>
@@ -192,7 +198,8 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({
  * 网络信号强度指示器组件。
  * 使用 0–4 根信号柱展示网络质量，辅以图标和文字说明。
  */
-const NetworkSignalIndicator: React.FC<{ quality: 0 | 1 | 2 | 3 | 4 }> = ({ quality }) => {
+const NetworkSignalIndicator: React.FC<{ quality: 0 | 1 | 2 | 3 | 4 | null }> = ({ quality }) => {
+  if (quality === null) return <span className="rounded bg-slate-950/80 px-2 py-1 text-[11px] text-slate-400">网络质量未知 · 未测量</span>
   const bars = [1, 2, 3, 4]
   const label =
     quality === 0
@@ -299,44 +306,6 @@ const StatusHud: React.FC<StatusHudProps> = ({
 
       {/* 底部：位置文本 */}
       <p className="mt-1.5 truncate text-[10px] text-slate-500">{locationLabel}</p>
-    </div>
-  )
-}
-
-/**
- * 右侧 HUD：小地图叠加卡片。
- * 在视频画面内展示车辆在园区内的大致位置，位于底部右侧。
- */
-interface MiniMapOverlayProps {
-  /** 当前车辆编号。 */
-  vehicleId: string
-  /** 位置文本。 */
-  locationLabel: string
-}
-
-/**
- * 小地图组件：底部右侧展示园区示意与车辆位置。
- */
-const MiniMapOverlay: React.FC<MiniMapOverlayProps> = ({ vehicleId, locationLabel }) => {
-  return (
-    <div className="pointer-events-auto h-24 w-32 overflow-hidden rounded-xl border border-slate-800/80 bg-slate-950/90 shadow-lg shadow-slate-950/80 sm:h-28 sm:w-40">
-      <div className="relative h-full w-full">
-        <DashboardMap vehicleId={vehicleId} />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-slate-950/90 via-slate-950/50 to-transparent" />
-        <div className="absolute bottom-1.5 left-1.5 right-1.5 rounded-md border border-slate-800/80 bg-slate-950/85 px-1.5 py-1">
-          <p className="flex items-center justify-between gap-1 text-[10px] text-slate-200">
-            <span className="inline-flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              <span className="font-medium">{vehicleId}</span>
-            </span>
-            <span className="inline-flex items-center gap-0.5 text-[9px] text-slate-400">
-              <MapPin className="h-2.5 w-2.5 text-emerald-300" />
-              <span>小地图</span>
-            </span>
-          </p>
-          <p className="mt-0.5 truncate text-[9px] text-slate-500">{locationLabel}</p>
-        </div>
-      </div>
     </div>
   )
 }

@@ -5,7 +5,7 @@
  *              alert center and task management center.
  */
 
-import React, { useMemo, useState } from 'react'
+import React, { useState } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -20,10 +20,15 @@ import {
   Wifi,
   Zap,
 } from 'lucide-react'
-import TeleopWorkbench from './TeleopWorkbench'
+import RemoteDriving from './RemoteDriving'
 import { useMockFleet } from '../app/MockFleetProvider'
-import { dashboardAlerts, dashboardDetails, dashboardTasks, dashboardVehicle, type DashboardVehicle } from '../lib/dashboard-data'
+import { dashboardDetails, dashboardTasks, type DashboardVehicle } from '../lib/dashboard-data'
 import DashboardMap from './DashboardMap'
+import FleetOverviewPage from './FleetOverview'
+import VehicleAlertCenter from './VehicleAlertCenter'
+import VehicleMonitor from './VehicleMonitor'
+import { initialMonitorList } from '../lib/vehicle-monitor'
+import { initialAlertFilters, type AlertSection } from '../lib/vehicle-alerts'
 
 /**
  * Vehicle driving or connection status types.
@@ -39,34 +44,6 @@ type VehicleSummary = DashboardVehicle
  * Supported main page sections in the dashboard.
  */
 type MainSection = 'fleet' | 'monitor' | 'drive' | 'alerts' | 'tasks'
-
-/**
- * Alert severity levels.
- */
-type AlertSeverity = 'critical' | 'warning' | 'info'
-
-/**
- * Alert lifecycle status.
- */
-type AlertStatus = 'open' | 'in-progress' | 'closed'
-
-/**
- * Alert record describing an autonomous-driving incident and its handling.
- */
-interface AlertRecord {
-  id: string
-  time: string
-  vehicleId: string
-  title: string
-  severity: AlertSeverity
-  status: AlertStatus
-  location: string
-  description: string
-  impact: string
-  cause: string
-  resolution: string
-  followUp: string
-}
 
 /**
  * Task lifecycle status.
@@ -95,20 +72,24 @@ interface TaskRecord {
  */
 const HomePage: React.FC = () => {
   const [activeSection, setActiveSection] = useState<MainSection>('fleet')
-  const [selectedVehicleId, setSelectedVehicleId] = useState<string>('AV-012')
+  const [selectedVehicleId, setSelectedVehicleId] = useState<string>('')
   /** Current view mode in the vehicle monitoring module. */
   const [monitorMode, setMonitorMode] = useState<'list' | 'detail'>('list')
+  const [monitorList, setMonitorList] = useState(initialMonitorList)
+  const [alertFilters, setAlertFilters] = useState(initialAlertFilters)
+  const [alertSection, setAlertSection] = useState<AlertSection>('dashboard')
+  const [returnToAlerts, setReturnToAlerts] = useState(false)
+  const [driveVehicleId, setDriveVehicleId] = useState<string | null>(null)
+  const [driveList, setDriveList] = useState(initialMonitorList)
   const mock = useMockFleet()
-  const vehicles = useMemo(() => {
-    const map = mock.map
-    return map ? mock.vehicles.entries.map((entry) =>
-      dashboardVehicle(entry, mock.data[entry.vehicle_id], map, performance.now())) : []
-  }, [mock.map, mock.vehicles, mock.data])
-
-  const selectedVehicle = useMemo(
-    () => vehicles.find((v) => v.id === selectedVehicleId) ?? vehicles[0],
-    [selectedVehicleId, vehicles],
-  )
+  const selected = selectedVehicleId || mock.vehicles.entries[0]?.vehicle_id || ''
+  const openAlerts = (vehicle?: string) => {
+    setAlertFilters({ ...initialAlertFilters, state: vehicle ? 'all' : 'pending',
+      vehicle: vehicle ?? '', selectedVehicle: vehicle ?? '' })
+    setAlertSection('work')
+    setReturnToAlerts(false)
+    setActiveSection('alerts')
+  }
 
   /**
    * Handles selecting a vehicle from either the map or list.
@@ -117,6 +98,7 @@ const HomePage: React.FC = () => {
   const handleSelectVehicle = (id: string, goToMonitor = false) => {
     setSelectedVehicleId(id)
     if (goToMonitor) {
+      setReturnToAlerts(false)
       setActiveSection('monitor')
       setMonitorMode('detail')
     }
@@ -128,57 +110,71 @@ const HomePage: React.FC = () => {
    */
   const handleChangeSection = (section: MainSection) => {
     setActiveSection(section)
+    setReturnToAlerts(false)
+    if (section === 'drive') setDriveVehicleId(null)
     if (section === 'monitor') {
       setMonitorMode('list')
     }
   }
 
   let content: React.ReactNode
-  if (!selectedVehicle) {
+  if (!mock.map || !mock.vehicles.entries.length) {
     content = <PlaceholderSection title={mock.error ? '数据加载失败' : '正在加载车队数据'}
       description={mock.error ?? '读取本地地图与八车 Mock 数据，不连接真实车辆。'} />
   } else if (activeSection === 'fleet') {
     content = (
-      <FleetOverview
-        vehicles={vehicles}
-        selectedVehicleId={selectedVehicle.id}
-        onSelectVehicle={handleSelectVehicle}
-      />
+      <FleetOverviewPage selected={selected} onSelect={handleSelectVehicle} onAlerts={openAlerts} />
     )
   } else if (activeSection === 'monitor') {
     content = (
-      <VehicleMonitorSection
-        vehicles={vehicles}
-        selectedVehicle={selectedVehicle}
+      <VehicleMonitor
+        selected={selected}
         mode={monitorMode}
+        list={monitorList}
+        onListChange={setMonitorList}
         onModeChange={setMonitorMode}
-        onSelectVehicle={handleSelectVehicle}
+        onSelect={(id) => handleSelectVehicle(id, true)}
+        onDrive={(id) => { setDriveVehicleId(id); setActiveSection('drive') }}
+        onAlerts={openAlerts}
       />
     )
   } else if (activeSection === 'drive') {
     content = (
-      <TeleopWorkbench
-        vehicleId={selectedVehicle.id}
-        gear={selectedVehicle.gear}
-        networkQuality={selectedVehicle.status === 'OFFLINE' ? 0 : 4}
-        speedKph={selectedVehicle.speedKmh ?? undefined}
-        batteryPercent={selectedVehicle.batteryPercent}
-        runModeLabel={selectedVehicle.runModeLabel}
-        locationLabel={selectedVehicle.locationLabel}
-      />
+      <RemoteDriving vehicleId={driveVehicleId} list={driveList} onListChange={setDriveList}
+        onEnter={setDriveVehicleId} onBack={() => setDriveVehicleId(null)}
+        onMonitor={(id) => {
+          setSelectedVehicleId(id)
+          setMonitorMode('detail')
+          setActiveSection('monitor')
+        }} />
     )
   } else if (activeSection === 'alerts') {
-    content = <AlertCenter />
+    content = null
   } else {
-    content = <TaskCenter vehicles={vehicles} />
+    content = <TaskCenter vehicles={mock.vehicles.entries.map((entry) => ({ id: entry.vehicle_id, name: entry.name }))} />
   }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-50 flex">
       <SideNav activeSection={activeSection} onChangeSection={handleChangeSection} />
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
         <TopBar />
-        <main className="flex-1 p-4 xl:p-6 overflow-hidden">{content}</main>
+        <main className="flex-1 p-4 xl:p-6 overflow-hidden">
+          {returnToAlerts && (activeSection === 'monitor' || activeSection === 'drive') &&
+            <button type="button" onClick={() => { setActiveSection('alerts'); setReturnToAlerts(false) }}
+              className="mb-3 rounded border border-sky-800 px-3 py-1.5 text-xs text-sky-200">← 返回告警处置</button>}
+          {content}
+          {mock.map && mock.vehicles.entries.length > 0 && <div hidden={activeSection !== 'alerts'} className="h-full min-h-0">
+            <VehicleAlertCenter filters={alertFilters} section={alertSection} onSection={setAlertSection}
+              onChange={setAlertFilters} onNavigate={(id) => {
+                setAlertFilters((current) => ({ ...current, selectedVehicle: id }))
+                setSelectedVehicleId(id)
+                setMonitorMode('detail')
+                setReturnToAlerts(true)
+                setActiveSection('monitor')
+              }} />
+          </div>}
+        </main>
       </div>
     </div>
   )
@@ -246,7 +242,7 @@ const SideNav: React.FC<SideNavProps> = ({ activeSection, onChangeSection }) => 
             onClick={() => onChangeSection('drive')}
           >
             <Car className="w-4 h-4" />
-            <span>接管工作台</span>
+            <span>远程驾驶</span>
           </div>
         </div>
 
@@ -257,16 +253,13 @@ const SideNav: React.FC<SideNavProps> = ({ activeSection, onChangeSection }) => 
             onClick={() => onChangeSection('alerts')}
           >
             <AlertTriangle className="w-4 h-4 text-amber-400" />
-            <span>告警事件</span>
+            <span>告警中心</span>
           </div>
         </div>
 
         <div className="space-y-1">
           <div className="px-2 text-[11px] tracking-wide text-slate-500/80">任务调度</div>
-          <div
-            className={itemClass(activeSection === 'tasks')}
-            onClick={() => onChangeSection('tasks')}
-          >
+          <div className={itemClass(activeSection === 'tasks')} onClick={() => onChangeSection('tasks')}>
             <ClipboardList className="w-4 h-4" />
             <span>任务管理</span>
           </div>
@@ -1575,303 +1568,13 @@ const TelemetryCard: React.FC<{ title: string; children: React.ReactNode }> = ({
   )
 }
 
-/**
- * Alert center component showing incidents and handling reports.
- */
-const AlertCenter: React.FC = () => {
-  const mock = useMockFleet()
-  const [severityFilter, setSeverityFilter] = useState<'all' | AlertSeverity>('all')
-  const [statusFilter, setStatusFilter] = useState<'all' | AlertStatus>('all')
-  const [selectedId, setSelectedId] = useState<string>('AL-20261023-001')
-
-  const alerts: AlertRecord[] = dashboardAlerts(mock.data)
-
-  const filteredAlerts = alerts.filter((a) => {
-    if (severityFilter !== 'all' && a.severity !== severityFilter) return false
-    if (statusFilter !== 'all' && a.status !== statusFilter) return false
-    return true
-  })
-
-  const selected =
-    filteredAlerts.find((a) => a.id === selectedId) ??
-    filteredAlerts[0]
-
-  /**
-   * Returns CSS classes for severity pill.
-   */
-  const severityClass = (severity: AlertSeverity) => {
-    if (severity === 'critical') {
-      return 'bg-red-900/50 text-red-200 border-red-500/70'
-    }
-    if (severity === 'warning') {
-      return 'bg-amber-900/40 text-amber-200 border-amber-500/70'
-    }
-    return 'bg-sky-900/40 text-sky-200 border-sky-500/70'
-  }
-
-  /**
-   * Returns human readable severity label.
-   */
-  const severityLabel = (severity: AlertSeverity) => {
-    if (severity === 'critical') return '严重'
-    if (severity === 'warning') return '警告'
-    return '信息'
-  }
-
-  /**
-   * Returns human readable status label.
-   */
-  const statusLabel = (status: AlertStatus) => {
-    if (status === 'open') return '未处理'
-    if (status === 'in-progress') return '处理中'
-    return '已关闭'
-  }
-
-  return (
-    <div className="h-full flex flex-col gap-4">
-      {/* Header + summary */}
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex flex-col">
-          <div className="flex items-center gap-2">
-            <h1 className="text-sm font-semibold text-slate-100">告警事件中心</h1>
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-900 border border-slate-700 text-[11px] text-slate-300">
-              <FileText className="w-3 h-3" />
-              自动驾驶事故记录与处置
-            </span>
-          </div>
-          <p className="mt-1 text-xs text-slate-500">
-            聚合自动驾驶运行过程中的风险事件，支持按严重程度与处理进度进行筛选和审计。
-          </p>
-        </div>
-        <div className="flex gap-3 text-xs">
-          <div className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 flex items-center gap-2">
-            <AlertTriangle className="w-3 h-3 text-amber-300" />
-            <span>近 24 小时事件</span>
-            <span className="font-semibold">{alerts.length}</span>
-          </div>
-          <div className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 flex items-center gap-2">
-            <Clock className="w-3 h-3 text-sky-300" />
-            <span>平均关闭时长</span>
-            <span className="font-semibold">未知</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Filters */}
-      <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2">
-          <span className="text-slate-400">严重程度</span>
-          <div className="inline-flex rounded-full bg-slate-900 border border-slate-800 p-0.5">
-            {[
-              { key: 'all' as const, label: '全部' },
-              { key: 'critical' as const, label: '严重' },
-              { key: 'warning' as const, label: '警告' },
-              { key: 'info' as const, label: '信息' },
-            ].map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                onClick={() => setSeverityFilter(item.key)}
-                className={[
-                  'px-2.5 py-0.5 rounded-full',
-                  severityFilter === item.key
-                    ? 'bg-sky-600 text-slate-950'
-                    : 'text-slate-300',
-                ].join(' ')}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-slate-400">处理状态</span>
-          <div className="inline-flex rounded-full bg-slate-900 border border-slate-800 p-0.5">
-            {[
-              { key: 'all' as const, label: '全部' },
-              { key: 'open' as const, label: '未处理' },
-              { key: 'in-progress' as const, label: '处理中' },
-              { key: 'closed' as const, label: '已关闭' },
-            ].map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                onClick={() => setStatusFilter(item.key)}
-                className={[
-                  'px-2.5 py-0.5 rounded-full',
-                  statusFilter === item.key
-                    ? 'bg-emerald-600 text-slate-950'
-                    : 'text-slate-300',
-                ].join(' ')}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* List + detail */}
-      <div className="flex-1 min-h-0 grid grid-cols-1 xl:grid-cols-[minmax(0,1.7fr)_minmax(0,2.3fr)] gap-4">
-        {/* Left: alert list */}
-        <section className="bg-slate-900/70 border border-slate-800 rounded-xl flex flex-col">
-          <div className="px-3 py-2 border-b border-slate-800 flex items-center justify-between text-xs text-slate-300">
-            <span className="font-medium">告警列表</span>
-            <span className="text-slate-500">
-              共 {filteredAlerts.length} 条 · 点击查看详情与处置报告
-            </span>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto">
-            {filteredAlerts.map((alert) => (
-              <button
-                key={alert.id}
-                type="button"
-                onClick={() => setSelectedId(alert.id)}
-                className={[
-                  'w-full text-left px-3 py-2 border-b border-slate-800/80 flex flex-col gap-1 hover:bg-slate-900',
-                  alert.id === selectedId ? 'bg-slate-900/80' : '',
-                ].join(' ')}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-[11px] text-slate-500">{alert.id}</span>
-                    <span
-                      className={[
-                        'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px]',
-                        severityClass(alert.severity),
-                      ].join(' ')}
-                    >
-                      <AlertTriangle className="w-3 h-3" />
-                      {severityLabel(alert.severity)}
-                    </span>
-                    <span className="text-xs font-medium text-slate-100 truncate">
-                      {alert.title}
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-slate-500 whitespace-nowrap">
-                    {alert.time}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-slate-500">
-                  <span className="truncate">
-                    车辆 {alert.vehicleId} · {alert.location}
-                  </span>
-                  <span>
-                    状态：
-                    <span
-                      className={
-                        alert.status === 'closed'
-                          ? 'text-emerald-400'
-                          : alert.status === 'in-progress'
-                          ? 'text-amber-300'
-                          : 'text-red-300'
-                      }
-                    >
-                      {statusLabel(alert.status)}
-                    </span>
-                  </span>
-                </div>
-              </button>
-            ))}
-            {filteredAlerts.length === 0 && (
-              <div className="px-3 py-6 text-center text-xs text-slate-500">
-                当前筛选条件下暂无告警事件。
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* Right: alert detail / report */}
-        {selected ? <section className="bg-slate-900/70 border border-slate-800 rounded-xl flex flex-col">
-          <div className="px-3 py-2 border-b border-slate-800 flex items-center justify-between text-xs text-slate-300">
-            <div className="flex items-center gap-2">
-              <span className="font-medium">事件详情与处置报告</span>
-              <span className="text-slate-500">{selected.time}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span
-                className={[
-                  'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px]',
-                  severityClass(selected.severity),
-                ].join(' ')}
-              >
-                <AlertTriangle className="w-3 h-3" />
-                {severityLabel(selected.severity)}
-              </span>
-              <span className="text-[11px] text-slate-400">
-                状态：{statusLabel(selected.status)}
-              </span>
-            </div>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3 text-xs text-slate-300">
-            <div>
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="text-sm font-semibold text-slate-100">
-                  {selected.title}
-                </h2>
-                <span className="text-[11px] text-slate-400">
-                  车辆 {selected.vehicleId} · {selected.location}
-                </span>
-              </div>
-              <p className="mt-1 text-slate-300 leading-relaxed">
-                {selected.description}
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-2.5">
-                <div className="flex items-center gap-1.5 text-[11px] text-slate-400 mb-1">
-                  <Activity className="w-3 h-3" />
-                  <span>影响范围</span>
-                </div>
-                <p className="text-[11px] text-slate-200 leading-relaxed">
-                  {selected.impact}
-                </p>
-              </div>
-              <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-2.5">
-                <div className="flex items-center gap-1.5 text-[11px] text-slate-400 mb-1">
-                  <FileText className="w-3 h-3" />
-                  <span>根因分析</span>
-                </div>
-                <p className="text-[11px] text-slate-200 leading-relaxed">
-                  {selected.cause}
-                </p>
-              </div>
-              <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-2.5">
-                <div className="flex items-center gap-1.5 text-[11px] text-slate-400 mb-1">
-                  <ClipboardList className="w-3 h-3" />
-                  <span>处置结果</span>
-                </div>
-                <p className="text-[11px] text-slate-200 leading-relaxed">
-                  {selected.resolution}
-                </p>
-              </div>
-            </div>
-
-            <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-2.5">
-              <div className="flex items-center justify-between mb-1">
-                <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                  <Clock className="w-3 h-3" />
-                  <span>后续跟进与改进建议</span>
-                </div>
-              </div>
-              <p className="text-[11px] text-slate-200 leading-relaxed">
-                {selected.followUp}
-              </p>
-            </div>
-          </div>
-        </section> : <PlaceholderSection title="事件详情与处置报告" description="当前筛选条件下暂无告警事件。" />}
-      </div>
-    </div>
-  )
-}
 
 /**
  * Task management center for creating and dispatching missions.
  */
 interface TaskCenterProps {
   /** All vehicles available for task dispatch. */
-  vehicles: VehicleSummary[]
+  vehicles: { id: string; name: string }[]
 }
 
 /**
@@ -1903,7 +1606,10 @@ const TaskCenter: React.FC<TaskCenterProps> = ({ vehicles }) => {
    * Returns style classes for task status badge.
    */
   const taskStatusClass = (status: TaskStatus) => {
-    if (status === 'running' || status === 'unknown') {
+    if (status === 'unknown') {
+      return 'bg-amber-950/40 text-amber-200 border-amber-700'
+    }
+    if (status === 'running') {
       return 'bg-emerald-900/40 text-emerald-200 border-emerald-500/70'
     }
     if (status === 'scheduled') {
@@ -1931,41 +1637,41 @@ const TaskCenter: React.FC<TaskCenterProps> = ({ vehicles }) => {
     return 'text-slate-300'
   }
 
-  const runningCount = tasks.filter((t) => t.status === 'running').length
-  const scheduledCount = tasks.filter((t) => t.status === 'scheduled').length
-  const completedToday = tasks.filter((t) => t.status === 'completed').length
+  const unknownCount = tasks.filter((t) => t.status === 'unknown').length
+  const pendingCount = tasks.filter((t) => t.status === 'pending').length
+  const completedCount = tasks.filter((t) => t.status === 'completed').length
 
   return (
-    <div className="h-full flex flex-col gap-4">
+    <div data-testid="task-center" className="h-full min-w-0 flex flex-col gap-4">
       {/* Header */}
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-col">
           <div className="flex items-center gap-2">
             <h1 className="text-sm font-semibold text-slate-100">任务管理中心</h1>
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-900 border border-slate-700 text-[11px] text-slate-300">
               <ClipboardList className="w-3 h-3" />
-              下发与编排自动驾驶任务
+              Mock 预览 · 运营任务未接入
             </span>
           </div>
           <p className="mt-1 text-xs text-slate-500">
-            支持配置巡逻、物料运输等任务，统一管理任务生命周期，提升运营效率。
+            保留任务列表、详情和新建表单；当前列表为只读技术查询记录，不代表运营任务执行情况。
           </p>
         </div>
-        <div className="flex gap-3 text-xs">
+        <div className="flex flex-wrap gap-3 text-xs">
           <div className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 flex items-center gap-2">
             <Activity className="w-3 h-3 text-emerald-300" />
-            <span>执行中</span>
-            <span className="font-semibold">{runningCount}</span>
+            <span>查询结果未知</span>
+            <span className="font-semibold">{unknownCount}</span>
           </div>
           <div className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 flex items-center gap-2">
             <Clock className="w-3 h-3 text-sky-300" />
-            <span>已排程</span>
-            <span className="font-semibold">{scheduledCount}</span>
+            <span>查询等待结果</span>
+            <span className="font-semibold">{pendingCount}</span>
           </div>
           <div className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 flex items-center gap-2">
             <Gauge className="w-3 h-3 text-amber-300" />
-            <span>今日完成</span>
-            <span className="font-semibold">{completedToday}</span>
+            <span>查询成功</span>
+            <span className="font-semibold">{completedCount}</span>
           </div>
         </div>
       </div>
@@ -2079,11 +1785,11 @@ const TaskCenter: React.FC<TaskCenterProps> = ({ vehicles }) => {
                   <div className="text-[11px] text-slate-200">{selected.type}</div>
                 </div>
                 <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-2.5">
-                  <div className="text-[11px] text-slate-400 mb-1">起点</div>
+                  <div className="text-[11px] text-slate-400 mb-1">原请求编号</div>
                   <div className="text-[11px] text-slate-200">{selected.from}</div>
                 </div>
                 <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-2.5">
-                  <div className="text-[11px] text-slate-400 mb-1">终点</div>
+                  <div className="text-[11px] text-slate-400 mb-1">地图标识</div>
                   <div className="text-[11px] text-slate-200">{selected.to}</div>
                 </div>
               </div>
@@ -2098,7 +1804,7 @@ const TaskCenter: React.FC<TaskCenterProps> = ({ vehicles }) => {
                 <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-2.5">
                   <div className="text-[11px] text-slate-400 mb-1">约束与注意事项</div>
                   <p className="text-[11px] text-slate-200 leading-relaxed">
-                    请确认任务时间不与车辆维护窗口冲突，物料运输任务需预留装卸时间，并关注相关道路的限速与禁行规则。
+                    当前为技术查询记录，不包含运营路线、进度或完成验收；查询成功不代表车辆完成运动任务。
                   </p>
                 </div>
               </div>
@@ -2146,7 +1852,7 @@ const TaskCenter: React.FC<TaskCenterProps> = ({ vehicles }) => {
                 <select className="w-full px-2 py-1.5 rounded-md bg-slate-950 border border-slate-800 text-[11px] focus:outline-none focus:ring-1 focus:ring-sky-500">
                   {vehicles.map((v) => (
                     <option key={v.id} value={v.id}>
-                      {v.id} · {v.locationLabel}
+                      {v.name}
                     </option>
                   ))}
                 </select>

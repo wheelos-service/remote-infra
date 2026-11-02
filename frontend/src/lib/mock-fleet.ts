@@ -81,6 +81,7 @@ export function createMockVehicleData(vehicle: string, map: FleetMap, elapsedMs:
     monitor: { status: fault ? 'ERROR' : 'OK', message: fault ? '模拟故障' : '模拟正常' },
   }
   message.require_emergency_stop = fault
+  if (index === 3) message.other_components.battery = { status: 'WARN', message: '模拟电量偏低' }
   data.events = fault || recovered ? [{
     schema_version: 1, type: 'vehicle_event', vehicle_id: vehicle, event_id: `mock-${index}-raised`,
     fault_key: 'hmi_modules/monitor', severity: 'ERROR', transition: 'raised',
@@ -91,6 +92,18 @@ export function createMockVehicleData(vehicle: string, map: FleetMap, elapsedMs:
     fault_key: 'hmi_modules/monitor', severity: 'OK', transition: 'recovered',
     occurred_at_ms: startedAtMs + 20_000, message: '模拟明确恢复 · 不是真实车辆',
   })
+  if (index === 3) {
+    data.events.push({
+      schema_version: 1, type: 'vehicle_event', vehicle_id: vehicle, event_id: 'mock-3-battery-raised',
+      fault_key: 'other_components/battery', severity: 'WARN', transition: 'raised',
+      occurred_at_ms: startedAtMs, message: '模拟电量偏低 · 剩余 12%',
+    })
+    if (elapsedMs >= 5000) data.events.push({
+      schema_version: 1, type: 'vehicle_event', vehicle_id: vehicle, event_id: 'mock-3-changed',
+      fault_key: 'hmi_modules/monitor', severity: 'ERROR', transition: 'changed',
+      occurred_at_ms: startedAtMs + 5000, message: '模拟故障持续 · 需排查底盘',
+    })
+  }
   data.tasks = index === 7 ? [{
     request: {
       schema_version: 1, vehicle_id: vehicle, request_id: 'mock-query', client_epoch: 'mock-epoch',
