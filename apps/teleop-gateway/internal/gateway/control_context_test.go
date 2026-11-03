@@ -117,6 +117,7 @@ func TestControlChainServer(t *testing.T) {
 	api := &ViewingLeaseAPI{store: &ViewingLeaseStore{client: f.client}, registry: f.api.registry,
 		authorizer: vehicleAuthorizer, identities: f.api.identities}
 	api.register(f.mux)
+	f.mux.Handle("GET /api/auth/me", AuthenticationMiddleware(http.HandlerFunc(handleAuthMe)))
 	f.mux.Handle("GET /api/token/vehicle", AuthenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims := r.Context().Value("user").(*UserClaims)
 		if !vehicleSelfMatches(claims, "car-2", vehicleIdentities) {

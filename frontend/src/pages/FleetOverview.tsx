@@ -10,13 +10,15 @@ interface Props {
   onSelect: (id: string, detail?: boolean) => void
   onAlerts: (vehicle?: string) => void
   initialFocus?: { x: number; y: number }
+  query: string
+  filter: 'all' | 'attention' | 'offline'
+  onQuery: (query: string) => void
+  onFilter: (filter: 'all' | 'attention' | 'offline') => void
 }
 const duration = (age: number | null) => age === null ? '未知' : `${(age / 1000).toFixed(1)} s`
 
-export default function FleetOverview({ selected, onSelect, onAlerts, initialFocus }: Props) {
+export default function FleetOverview({ selected, onSelect, onAlerts, initialFocus, query, filter, onQuery, onFilter }: Props) {
   const mock = useMockFleet()
-  const [query, setQuery] = useState('')
-  const [filter, setFilter] = useState<'all' | 'attention' | 'offline'>('all')
   const [focusPosition, setFocusPosition] = useState(initialFocus)
   const map = mock.map
   if (!map) return null
@@ -42,7 +44,6 @@ export default function FleetOverview({ selected, onSelect, onAlerts, initialFoc
   return <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto" data-testid="fleet-overview">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h1 className="text-base font-semibold">车队总览</h1>
-      <span className="rounded-full border border-amber-800 bg-amber-950/30 px-3 py-1 text-[11px] text-amber-200">演示数据 · 非真实车辆</span>
     </div>
     <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
       {cards.map(({ label, value, detail, icon: Icon, color, action }) => <section key={label} title={detail}
@@ -63,10 +64,10 @@ export default function FleetOverview({ selected, onSelect, onAlerts, initialFoc
       <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70">
         <header className="border-b border-slate-800 p-3">
           <div className="flex items-center justify-between"><h2 className="text-sm font-medium">车辆 · 异常优先</h2><span className="text-[11px] text-slate-400">需关注 {metrics.attention} / {metrics.total}</span></div>
-          <input aria-label="筛选车队车辆" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索车辆"
+          <input aria-label="筛选车队车辆" value={query} onChange={(event) => onQuery(event.target.value)} placeholder="搜索车辆"
             className="mt-3 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-sky-500" />
           <div className="mt-2 flex gap-1 text-[11px]">
-            {(['all', 'attention', 'offline'] as const).map((value) => <button key={value} type="button" aria-pressed={filter === value} onClick={() => setFilter(value)}
+            {(['all', 'attention', 'offline'] as const).map((value) => <button key={value} type="button" aria-pressed={filter === value} onClick={() => onFilter(value)}
               className={`rounded px-3 py-1 ${filter === value ? 'bg-sky-900 text-sky-200' : 'text-slate-400 hover:bg-slate-800'}`}>
               {value === 'all' ? '全部' : value === 'attention' ? '需关注' : '离线'}
             </button>)}

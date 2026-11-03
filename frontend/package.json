@@ -2,6 +2,10 @@
   "name": "web-creator",
   "version": "1.0.0",
   "scripts": {
+    "build:shared": "npm --prefix ../packages/teleop-shared run build",
+    "predev": "npm run build:shared",
+    "pretest": "npm run build:shared",
+    "pretypecheck": "npm run build:shared",
     "prepare:maps": "node scripts/prepare-maps.mjs",
     "dev": "node scripts/build.mjs",
     "test": "node scripts/test.mjs",
@@ -9,6 +13,7 @@
     "build": "npm run typecheck && node scripts/build.mjs --production"
   },
   "dependencies": {
+    "@livekit-infra/teleop-shared": "file:../packages/teleop-shared",
     "@hookform/resolvers": "^5.0.1",
     "@radix-ui/react-accordion": "^1.2.8",
     "@radix-ui/react-alert-dialog": "^1.1.11",

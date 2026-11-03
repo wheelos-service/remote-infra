@@ -124,7 +124,6 @@ function VehicleMonitorDetail({ row, entry, data, group, onBack, onDrive, onAler
         <span className="text-xs text-slate-300">{row.modeLabel}</span>
         <button type="button" onClick={onAlerts} className={`text-xs ${pending ? 'text-amber-300' : 'text-slate-400'}`}>待恢复告警 {pending}{pending && group ? ` · 最高${severityLabel(group.severity)}` : ''} · 查看告警 →</button>
       </div>
-      <span className="text-[11px] text-slate-500">演示数据 · 非真实车辆</span>
     </header>
     <nav aria-label="车辆详情页签" className="flex gap-1 overflow-x-auto border-b border-slate-800">
       {([

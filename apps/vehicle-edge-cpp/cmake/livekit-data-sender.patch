@@ -1,0 +1,48 @@
+--- a/livekit/src/room/mod.rs
++++ b/livekit/src/room/mod.rs
+@@ -0,0 +1 @@
++mod data_sender;
+@@ -1846,7 +1847,7 @@
+     fn handle_data(
+-        &self,
++        self: &Arc<Self>,
+         payload: Vec<u8>,
+         topic: Option<String>,
+         kind: DataPacketKind,
+         participant_sid: Option<ParticipantSid>,
+         participant_identity: Option<ParticipantIdentity>,
+@@ -1865,6 +1866,34 @@
+         }
+-
++
++        // Non-media publishers' signaling updates are batched by the SFU.
++        // Register only authenticated identity/SID metadata, never payload fields.
++        if participant.is_none() {
++            if let (Some(identity), Some(sid)) = (&participant_identity, &participant_sid) {
++                if data_sender::can_register(
++                    identity.as_str(), sid.as_str(),
++                    self.get_participant_by_identity(identity).is_some(),
++                ) && *identity != self.local_participant.identity() {
++                    let remote = self.create_participant(
++                        ParticipantKind::Standard,
++                        Vec::new(),
++                        sid.clone(),
++                        identity.clone(),
++                        String::new(),
++                        participant::ParticipantState::Active,
++                        String::new(),
++                        HashMap::new(),
++                        0,
++                        Some(proto::ParticipantPermission::default()),
++                        0,
++                        Vec::new(),
++                    );
++                    self.dispatcher.dispatch(&RoomEvent::ParticipantConnected(remote.clone()));
++                    participant = Some(remote);
++                }
++            }
++        }
++
+         // Update participant's data encryption status for regular data messages
+         if let Some(ref p) = participant {
+             use crate::e2ee::EncryptionType;

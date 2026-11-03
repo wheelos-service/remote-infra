@@ -1,5 +1,10 @@
 # 运维平台统一入口与远程接管迁移设计
 
+> 历史调研与迁移方案，部分基线已过期。当前目录、协议和部署边界见
+> [docs/architecture.md](../docs/architecture.md)、
+> [docs/compatibility.md](../docs/compatibility.md)、
+> [docs/deployment.md](../docs/deployment.md)。
+
 日期：2026-10-26  
 状态：设计提案，未实施业务代码迁移  
 目标入口：`frontend/`  

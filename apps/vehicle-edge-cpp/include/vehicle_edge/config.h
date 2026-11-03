@@ -23,6 +23,7 @@ struct DeviceConfig {
   std::string camera_source;
   std::string control_mode = "disabled";
   std::string camera_track = "camera0";
+  std::string camera_layout = "single";
   std::string mission_runtime_channel;
   std::string mission_result_channel;
   std::string system_status_channel;

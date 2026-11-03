@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {ControlInput, bindKeyboardInput} from '../dist/lib/control-input.js';
+import {ControlInput, bindKeyboardInput} from '../dist/control-input.js';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 

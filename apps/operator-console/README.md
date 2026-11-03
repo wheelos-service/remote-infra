@@ -7,6 +7,21 @@
 This component is the standalone browser client for the remote vehicle
 supervision Demo.
 
+Pure input/gamepad/camera state machines and their unit tests now live only in
+`packages/teleop-shared/`; `src/lib/` contains compatibility re-exports.
+Install dependencies from the repository root before building:
+
+```bash
+npm ci --prefix packages/teleop-shared
+npm ci --prefix apps/operator-console
+```
+
+The build copies shared JavaScript into `dist/shared/` for the browser import
+map. Docker builds use repository-root context:
+`docker build -f apps/operator-console/Dockerfile -t teleop-console-legacy .`.
+The primary Compose path does not start this console.
+Current interface ownership is in [compatibility.md](../../docs/compatibility.md).
+
 The HTML entrypoint is kept in `public/index.html`. The control sender
 and video-grid modules live in `src/lib/` and are compiled to `dist` by the
 build. The video-grid stylesheet lives in `public/css/video-grid.css` and is

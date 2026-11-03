@@ -1,11 +1,14 @@
-FROM node:18 AS build
-WORKDIR /app
-COPY package*.json ./
-RUN if [ -f package-lock.json ]; then npm ci --prefer-offline --no-audit; else npm install --no-audit; fi
-COPY . .
-RUN npm run build --if-present
+FROM node:22 AS build
+WORKDIR /repo
+COPY packages/teleop-shared/package*.json packages/teleop-shared/
+RUN npm ci --prefix packages/teleop-shared --no-audit
+COPY apps/operator-console/package*.json apps/operator-console/
+RUN npm ci --prefix apps/operator-console --no-audit
+COPY packages/teleop-shared/ packages/teleop-shared/
+COPY apps/operator-console/ apps/operator-console/
+RUN npm --prefix apps/operator-console run build
 
 FROM nginx:stable-alpine
-COPY --from=build /app/dist /usr/share/nginx/html
+COPY --from=build /repo/apps/operator-console/dist /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]

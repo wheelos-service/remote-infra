@@ -1,5 +1,9 @@
 # 自动驾驶运营平台架构与模块图
 
+> 历史方案图，非当前运行拓扑。当前边界见
+> [docs/architecture.md](../docs/architecture.md) 和
+> [docs/compatibility.md](../docs/compatibility.md)。
+
 日期：2026-10-30
 
 状态：目标设计图，不代表端到端验收；服务端租约和单操作者栅栏已实现，车辆物理交接仍须独立批准和验证。

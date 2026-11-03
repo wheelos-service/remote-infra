@@ -3,11 +3,15 @@
 LiveKit remote vehicle supervision prototype with three runtime boundaries:
 
 ```text
-apps/operator-console/  browser operator console
+frontend/               React operator platform (Mock home; authorized /#/teleop)
 apps/teleop-gateway/    Go Gateway
-apps/vehicle-edge/      vehicle-side agent
+apps/vehicle-edge-cpp/  C++ vehicle SDKs (simulation control only)
 infra/                  Compose, Kubernetes, and LiveKit configuration
 ```
+
+`packages/teleop-shared/` owns the pure input/gamepad/camera state machines.
+`apps/operator-console/` and `apps/vehicle-edge/` remain legacy v1 references,
+not dependencies of the primary frontend. See [compatibility boundaries](docs/compatibility.md).
 
 ## Quick Start
 
@@ -15,8 +19,15 @@ infra/                  Compose, Kubernetes, and LiveKit configuration
 cp .env.example .env
 docker compose config
 docker compose up -d --build redis livekit-config livekit teleop-backend
-cd apps/operator-console && npm run build && python3 -m http.server 8000 --directory dist
+docker compose up -d --build frontend
+# Open http://127.0.0.1:8000/ (Mock) or /#/teleop (authorized RTC).
 ```
+
+The default home is an isolated Mock. `/#/teleop` is the authorized three-camera
+entry; it requires a configured Gateway and a publishing C++ simulator.
+See [`frontend/README.md`](frontend/README.md) for runtime configuration and
+explicit simulation-control enablement. Compose binds the frontend to loopback;
+the cloud Caddy profile serves it at `CLIENT_DOMAIN`.
 
 Documentation:
 

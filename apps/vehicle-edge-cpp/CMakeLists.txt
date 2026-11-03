@@ -130,7 +130,30 @@ endif()
 option(EDGE_ENABLE_LIVEKIT "Build the native read-only LiveKit worker" OFF)
 if(EDGE_ENABLE_LIVEKIT)
   include(cmake/LiveKitSDK.cmake)
+  find_program(EDGE_CARGO cargo REQUIRED)
+  find_program(EDGE_PATCH patch REQUIRED)
+  set(_edge_ffi_env)
+  foreach(variable CARGO_HOME RUSTUP_HOME RUSTUP_TOOLCHAIN CC CXX CXXFLAGS
+      BINDGEN_EXTRA_CLANG_ARGS)
+    set(EDGE_FFI_${variable} "$ENV{${variable}}" CACHE STRING
+      "Environment override for the pinned LiveKit FFI build")
+    if(NOT EDGE_FFI_${variable} STREQUAL "")
+      list(APPEND _edge_ffi_env "${variable}=${EDGE_FFI_${variable}}")
+    endif()
+  endforeach()
+  get_filename_component(_edge_cargo_bin "${EDGE_CARGO}" DIRECTORY)
+  list(APPEND _edge_ffi_env "PATH=${_edge_cargo_bin}:$ENV{PATH}")
+  add_custom_target(edge_livekit_ffi_patch
+    COMMAND "${CMAKE_COMMAND}" -E env ${_edge_ffi_env} "${CMAKE_COMMAND}"
+      "-DEDGE_FFI_WORK=${CMAKE_BINARY_DIR}/livekit-ffi-patched"
+      "-DEDGE_FFI_LIBRARY=${_livekit_cache}/${_livekit_name}/lib/liblivekit_ffi.so"
+      "-DEDGE_FFI_PATCH=${CMAKE_CURRENT_SOURCE_DIR}/cmake/livekit-data-sender.patch"
+      "-DEDGE_FFI_SENDER=${CMAKE_CURRENT_SOURCE_DIR}/cmake/livekit_sender.rs"
+      "-DEDGE_CARGO=${EDGE_CARGO}" "-DEDGE_PATCH=${EDGE_PATCH}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/LiveKitFFIPatch.cmake"
+    COMMENT "Building pinned LiveKit FFI with authenticated sender compatibility fix")
   add_library(edge_media src/workers/media_backend.cc)
+  add_dependencies(edge_media edge_livekit_ffi_patch)
   target_link_libraries(edge_media PUBLIC edge_teleop LiveKit::livekit)
   target_compile_options(edge_media PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_executable(vehicle_media_worker src/workers/media_worker.cc)
@@ -204,6 +227,12 @@ if(BUILD_TESTING)
     add_test(NAME camera_gst_test COMMAND camera_gst_test)
   endif()
   if(EDGE_ENABLE_LIVEKIT)
+    find_program(EDGE_RUSTC rustc REQUIRED)
+    add_custom_target(livekit_sender_test_build ALL
+      COMMAND "${CMAKE_COMMAND}" -E env ${_edge_ffi_env} "${EDGE_RUSTC}" --test
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/livekit_sender.rs"
+        -o "${CMAKE_BINARY_DIR}/livekit_sender_test")
+    add_test(NAME livekit_sender_test COMMAND "${CMAKE_BINARY_DIR}/livekit_sender_test")
     add_test(NAME livekit_sdk_smoke COMMAND vehicle_media_worker --sdk-smoke)
     set_tests_properties(livekit_sdk_smoke PROPERTIES TIMEOUT 10)
     add_executable(livekit_integration_test tests/livekit_integration_test.cc)

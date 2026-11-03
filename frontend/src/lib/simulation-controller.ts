@@ -44,6 +44,7 @@ export class SimulationController {
   private sending = false
   private sendStarted = 0
   private renewing = false
+  private mediaReady = true
   private releaseTask?: Promise<void>
   private readonly instanceId = crypto.randomUUID()
 
@@ -53,7 +54,7 @@ export class SimulationController {
     private readonly bearer: string,
     private readonly connection: ControlConnection,
     private readonly changed: () => void,
-    private readonly request: typeof fetch = fetch,
+    private readonly request: typeof fetch = (input, init) => fetch(input, init),
   ) {}
 
   private async api(path: string, body?: unknown, allowGone = false): Promise<unknown> {
@@ -85,6 +86,7 @@ export class SimulationController {
 
   async acquire(): Promise<void> {
     if (this.state !== 'idle') throw new Error('Controller is already in use')
+    if (!this.mediaReady) throw new Error('Three camera feeds are not ready')
     this.acquiring = true
     this.state = 'acquiring'
     this.changed()
@@ -105,7 +107,7 @@ export class SimulationController {
       }
       this.leaseDeadline = started + data.renew_after_ms * 2
       this.renewAt = started + data.renew_after_ms
-      if (this.closing) return
+      if (!this.canContinue()) return
       this.state = 'connecting'
       this.changed()
       let timeout: ReturnType<typeof setTimeout> | undefined
@@ -119,7 +121,7 @@ export class SimulationController {
           }),
         ])
       } finally { clearTimeout(timeout) }
-      if (this.closing) return
+      if (!this.canContinue()) return
       if (performance.now() >= this.leaseDeadline) throw new Error('Control lease expired while connecting')
       this.connectedAt = performance.now()
       this.timer = setInterval(() => { void this.tick() }, 75)
@@ -166,9 +168,23 @@ export class SimulationController {
   }
 
   setCommand(command: ControlCommand): void {
-    if (this.state !== 'ready') throw new Error('Vehicle control is not ready')
-    this.command = controlCommandSchema.parse(command)
+    if (this.state !== 'ready' || !this.mediaReady) throw new Error('Vehicle control is not ready')
+    const next = controlCommandSchema.parse(command)
+    if (next.steering === this.command.steering && next.throttle === this.command.throttle &&
+        next.brake === this.command.brake && next.direction === this.command.direction) return
+    this.command = next
     this.intentRevision++
+  }
+
+  setMediaReady(ready: boolean): void {
+    this.mediaReady = ready
+    if (!ready && ['acquiring', 'connecting', 'ready'].includes(this.state)) {
+      this.fail('Camera feed lost; release and acquire a new session')
+    }
+  }
+
+  private canContinue(): boolean {
+    return !this.closing && this.state !== 'locked' && this.mediaReady
   }
 
   fail(message: string): void {

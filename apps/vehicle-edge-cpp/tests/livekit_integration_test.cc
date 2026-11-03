@@ -4,10 +4,12 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <fcntl.h>
 #include <iostream>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -39,35 +41,70 @@ struct Child {
 };
 
 struct Observer : livekit::RoomDelegate {
+  struct View {
+    std::shared_ptr<livekit::Track> track;
+    std::shared_ptr<livekit::VideoStream> stream;
+    std::thread reader;
+    std::atomic<int> frames{0};
+    std::array<std::atomic<std::uint64_t>, 3> colors{};
+  };
   std::mutex mutex;
-  std::shared_ptr<livekit::Track> track;
-  std::shared_ptr<livekit::VideoStream> stream;
-  std::thread reader;
-  std::atomic<int> frames{0};
+  std::map<std::string, std::shared_ptr<View>> views;
+  std::atomic<bool> invalid_tracks{false};
+  std::atomic<bool> vehicle_left{false};
+  std::atomic<int> unsubscribed{0};
   std::atomic<int> states{0};
 
   ~Observer() override { Close(); }
 
   void Close() {
-    if (stream)
-      stream->close();
-    if (reader.joinable())
-      reader.join();
+    std::lock_guard<std::mutex> lock(mutex);
+    for (const auto &entry : views)
+      if (entry.second->stream)
+        entry.second->stream->close();
+    for (const auto &entry : views)
+      if (entry.second->reader.joinable())
+        entry.second->reader.join();
   }
 
   void onTrackSubscribed(livekit::Room &,
                          const livekit::TrackSubscribedEvent &event) override {
-    if (event.track->kind() == livekit::TrackKind::KIND_VIDEO) {
+    if (event.track->kind() == livekit::TrackKind::KIND_VIDEO &&
+        event.participant &&
+        event.participant->identity() == "vehicle-car-test") {
       std::lock_guard<std::mutex> lock(mutex);
-      track = event.track;
+      auto view = std::make_shared<View>();
+      view->track = event.track;
+      for (const auto &entry : views)
+        if (entry.second->track->sid() == event.track->sid())
+          invalid_tracks = true;
+      if (!views.emplace(event.track->name(), std::move(view)).second)
+        invalid_tracks = true;
     }
+  }
+
+  void onTrackUnsubscribed(
+      livekit::Room &, const livekit::TrackUnsubscribedEvent &event) override {
+    if (event.track->kind() == livekit::TrackKind::KIND_VIDEO &&
+        event.participant &&
+        event.participant->identity() == "vehicle-car-test")
+      ++unsubscribed;
+  }
+
+  void onParticipantDisconnected(
+      livekit::Room &,
+      const livekit::ParticipantDisconnectedEvent &event) override {
+    if (event.participant &&
+        event.participant->identity() == "vehicle-car-test")
+      vehicle_left = true;
   }
 
   void
   onUserPacketReceived(livekit::Room &,
                        const livekit::UserDataPacketEvent &event) override {
     if (event.topic != "vehicle.state" ||
-        event.kind != livekit::DataPacketKind::Reliable)
+        event.kind != livekit::DataPacketKind::Reliable || !event.participant ||
+        event.participant->identity() != "vehicle-car-test")
       return;
     Json::CharReaderBuilder builder;
     std::unique_ptr<Json::CharReader> parser(builder.newCharReader());
@@ -81,20 +118,55 @@ struct Observer : livekit::RoomDelegate {
       ++states;
   }
 
-  void StartReader() {
+  void StartReaders() {
     std::lock_guard<std::mutex> lock(mutex);
-    if (!track || reader.joinable())
-      return;
-    livekit::VideoStream::Options options;
-    options.capacity = 2;
-    stream = livekit::VideoStream::fromTrack(track, options);
-    reader = std::thread([this] {
-      livekit::VideoFrameEvent event;
-      while (stream->read(event)) {
-        if (event.frame.width() == 640 && event.frame.height() == 480)
-          ++frames;
+    for (const auto &entry : views) {
+      const auto view = entry.second;
+      if (view->reader.joinable())
+        continue;
+      livekit::VideoStream::Options options;
+      options.capacity = 2;
+      options.format = livekit::VideoBufferType::RGBA;
+      view->stream = livekit::VideoStream::fromTrack(view->track, options);
+      view->reader = std::thread([view] {
+        livekit::VideoFrameEvent event;
+        while (view->stream->read(event)) {
+          if (event.frame.width() != 640 || event.frame.height() != 480 ||
+              event.frame.type() != livekit::VideoBufferType::RGBA)
+            continue;
+          const auto *pixels = event.frame.data();
+          for (int y = 40; y < 480; y += 80)
+            for (int x = 40; x < 640; x += 80)
+              for (int channel = 0; channel < 3; ++channel)
+                view->colors[channel] += pixels[(y * 640 + x) * 4 + channel];
+          ++view->frames;
+        }
+      });
+    }
+  }
+
+  bool Received(const vehicle_edge::DeviceConfig &config) {
+    std::lock_guard<std::mutex> lock(mutex);
+    const std::vector<std::string> names =
+        config.camera_layout == "three"
+            ? std::vector<std::string>{"camera-left", "camera-center",
+                                       "camera-right"}
+            : std::vector<std::string>{config.camera_track};
+    if (invalid_tracks || views.size() != names.size() || states < 3)
+      return false;
+    for (std::size_t index = 0; index < names.size(); ++index) {
+      const auto found = views.find(names[index]);
+      if (found == views.end() || found->second->frames < 3)
+        return false;
+      if (config.camera_layout == "three") {
+        const auto &colors = found->second->colors;
+        for (std::size_t channel = 0; channel < 3; ++channel)
+          if (channel != index &&
+              colors[index].load() <= colors[channel].load() * 2)
+            return false;
       }
-    });
+    }
+    return true;
   }
 };
 
@@ -200,7 +272,7 @@ int main() {
       bool received_feedback = false;
       bool worker_ready = false;
       while (std::chrono::steady_clock::now() < deadline &&
-             (delegate.frames < 3 || delegate.states < 3)) {
+             !delegate.Received(config)) {
         const auto now = std::chrono::steady_clock::now();
         Json::Value update;
         update["generation"] = Json::UInt64(1);
@@ -230,16 +302,18 @@ int main() {
             received_feedback |= feedback->keyframe_requested ||
                                  feedback->target_bitrate_bps != 0;
         }
-        delegate.StartReader();
+        delegate.StartReaders();
         std::this_thread::sleep_for(100ms);
       }
-      const bool received = delegate.frames >= 3 && delegate.states >= 3;
+      const bool received = delegate.Received(config);
       delegate.Close();
-      if (!received)
-        std::cerr << "received frames=" << delegate.frames
-                  << " states=" << delegate.states << '\n';
+      if (!received) {
+        for (const auto &entry : delegate.views)
+          std::cerr << entry.first << " frames=" << entry.second->frames << '\n';
+        std::cerr << "states=" << delegate.states << '\n';
+      }
       Require(received,
-              "actual video frames or vehicle.state were not received");
+              "named distinct video frames or vehicle.state not received");
       Require(!encoded || received_feedback,
               "encoded source feedback did not return over IPC");
       // Stop renewing authorization while the observer remains in the Room.
@@ -253,10 +327,19 @@ int main() {
       child.pid = -1;
       Require(WIFEXITED(status) && WEXITSTATUS(status) == 0,
               "backend cleanup did not complete successfully");
+      const auto left_by = std::chrono::steady_clock::now() + 2s;
+      const int expected_tracks = config.camera_layout == "three" ? 3 : 1;
+      while (std::chrono::steady_clock::now() < left_by &&
+             (!delegate.vehicle_left ||
+              delegate.unsubscribed != expected_tracks))
+        std::this_thread::sleep_for(20ms);
+      Require(delegate.vehicle_left &&
+                  delegate.unsubscribed == expected_tracks,
+              "expired worker left publications or participant in Room");
       observer.disconnect();
     }
     livekit::shutdown();
-    std::cout << (encoded ? "encoded H264" : "simulation")
+    std::cout << (encoded ? "encoded H264" : config.camera_layout + " simulation")
               << " RTC video/state received; demand expiry left Room\n";
     return 0;
   } catch (const std::exception &error) {

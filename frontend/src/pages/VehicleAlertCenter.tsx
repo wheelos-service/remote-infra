@@ -42,7 +42,6 @@ export default function VehicleAlertCenter({ filters, section, onSection, onChan
   return <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto" data-testid="vehicle-alert-center">
     <header className="flex flex-wrap items-center justify-between gap-2">
       <h1 className="text-base font-semibold">告警事件中心</h1>
-      <span className="rounded-full border border-amber-800 bg-amber-950/30 px-3 py-1 text-[11px] text-amber-200">演示数据 · 非真实车辆</span>
     </header>
     <nav aria-label="告警中心板块" className="flex gap-1 border-b border-slate-800">
       {([

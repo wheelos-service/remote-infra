@@ -1,0 +1,31 @@
+{
+  "name": "@livekit-infra/teleop-shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./input-command": {
+      "types": "./dist/input-command.d.ts",
+      "default": "./dist/input-command.js"
+    },
+    "./control-input": {
+      "types": "./dist/control-input.d.ts",
+      "default": "./dist/control-input.js"
+    },
+    "./gamepad-input": {
+      "types": "./dist/gamepad-input.d.ts",
+      "default": "./dist/gamepad-input.js"
+    },
+    "./camera-view": {
+      "types": "./dist/camera-view.d.ts",
+      "default": "./dist/camera-view.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

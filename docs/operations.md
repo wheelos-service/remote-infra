@@ -152,7 +152,9 @@ unchanged.
 For local testing:
 
 ```bash
-cd apps/operator-console
+npm ci --prefix packages/teleop-shared
+cd frontend
+npm ci
 npm run build
 python3 -m http.server 8000 --directory dist
 ```
@@ -160,13 +162,24 @@ python3 -m http.server 8000 --directory dist
 For production, host the static client at `https://client.example.com/` and use:
 
 ```text
-https://client.example.com/?backend=https://api.example.com&livekit=wss://rtc.example.com
+https://client.example.com/#/teleop
 ```
 
 Production authentication uses OIDC Authorization Code + PKCE. The browser receives only public OIDC configuration; access tokens and Ed25519 private keys remain in page memory.
+Runtime endpoints are supplied by the public-only `runtime-config.js` mount,
+not production URL overrides. Compose/static hosting setup is maintained only
+in [deployment.md](deployment.md).
 
 ## Vehicle Startup
 
+The current C++ simulator setup is documented in
+[`apps/vehicle-edge-cpp/README.md`](../apps/vehicle-edge-cpp/README.md).
+The home route is Mock; only the authorized `/#/teleop` entry connects to RTC.
+Simulation control must be explicitly enabled and does not actuate a real vehicle.
+
+### Legacy Python v1 reference
+
+The following commands are not the current React/C++ v2 workflow.
 The vehicle needs a unique ID, independent device credentials, API and RTC addresses, and camera/controller configuration. It requires outbound access only and must not receive the LiveKit API secret.
 
 ```bash

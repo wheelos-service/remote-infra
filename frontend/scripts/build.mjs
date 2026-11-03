@@ -32,11 +32,14 @@ const esbuildOpts = {
   },
   plugins: [
     {
-      name: 'local-map-assets',
+      name: 'public-assets',
       setup(build) {
         build.onEnd(async (result) => {
-          if (!result.errors.length && existsSync('public/maps')) {
-            await cp('public/maps', 'dist/maps', { recursive: true })
+          if (!result.errors.length) {
+            await cp('public/runtime-config.js', 'dist/runtime-config.js')
+            if (existsSync('public/maps')) {
+              await cp('public/maps', 'dist/maps', { recursive: true })
+            }
           }
         })
       },

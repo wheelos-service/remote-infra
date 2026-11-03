@@ -10,7 +10,6 @@ import pathlib
 import socket
 import subprocess
 import threading
-import tempfile
 import time
 import urllib.request
 import uuid
@@ -123,9 +122,21 @@ def main():
             input=json.dumps({"config": config, "observer_token": token("observer", False)}),
             text=True, timeout=25, check=True,
         )
+        config["camera_layout"] = "three"
+        config["control_mode"] = "simulation"
+        subprocess.run(
+            [str(ROOT / "build/livekit_integration_test")],
+            input=json.dumps({
+                "config": config,
+                "observer_token": token("observer-three", False),
+            }),
+            text=True, timeout=25, check=True,
+        )
+        config["camera_layout"] = "single"
+        config["control_mode"] = "disabled"
         # Generate one independently decodable baseline AU, no camera/device.
-        with tempfile.TemporaryDirectory(prefix="edge-encoded-fixture-") as directory:
-            path = pathlib.Path(directory) / "frame.h264"
+        path = ROOT / "build" / ("edge-encoded-fixture-" + uuid.uuid4().hex + ".h264")
+        try:
             subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
                 "-i", "testsrc2=size=640x480:rate=10", "-frames:v", "1",
@@ -143,6 +154,8 @@ def main():
                 }),
                 text=True, timeout=25, check=True,
             )
+        finally:
+            path.unlink(missing_ok=True)
     finally:
         gateway.shutdown()
         gateway.server_close()

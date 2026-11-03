@@ -74,6 +74,7 @@ DeviceConfig ParseConfig(const Json::Value &value) {
                                                   "camera_source",
                                                   "control_mode",
                                                   "camera_track",
+                                                  "camera_layout",
                                                   "mission_runtime_channel",
                                                   "mission_result_channel",
                                                   "system_status_channel",
@@ -177,6 +178,10 @@ DeviceConfig ParseConfig(const Json::Value &value) {
     if (config.control_mode == "simulation" && !config.media_enabled)
       throw std::invalid_argument("simulation control requires media");
   }
+  if (value.isMember("camera_layout"))
+    config.camera_layout = RequiredString(value, "camera_layout");
+  if (config.camera_layout != "single" && config.camera_layout != "three")
+    throw std::invalid_argument("camera_layout must be single or three");
   if (config.media_enabled) {
     config.livekit_url = RequiredString(value, "livekit_url");
     auto endpoint = config.livekit_url;
@@ -201,6 +206,10 @@ DeviceConfig ParseConfig(const Json::Value &value) {
     if (!ValidIdentifier(config.camera_track))
       throw std::invalid_argument("invalid camera_track");
   }
+  if (config.camera_layout == "three" &&
+      (!config.media_enabled || config.camera_source != "simulation"))
+    throw std::invalid_argument(
+        "three camera layout requires enabled simulation media");
   return config;
 }
 

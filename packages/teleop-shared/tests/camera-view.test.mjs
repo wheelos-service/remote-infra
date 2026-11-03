@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {CameraView} from '../dist/lib/camera-view.js';
+import {CameraView} from '../dist/camera-view.js';
 const command = action => ({mode: 'high_level', action});
 test('reverse request, confirmation, stop, emergency and stale feedback retain correct view', () => {
     const v = new CameraView();

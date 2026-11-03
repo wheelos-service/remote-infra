@@ -1,6 +1,6 @@
-import { CameraView } from '../../../apps/operator-console/src/lib/camera-view'
+import { CameraView } from '@livekit-infra/teleop-shared/camera-view'
 export { CameraView }
-export type { ViewMode } from '../../../apps/operator-console/src/lib/camera-view'
+export type { ViewMode } from '@livekit-infra/teleop-shared/camera-view'
 
 export const cameras = [
   { name: 'front', label: '前视（单路）' },

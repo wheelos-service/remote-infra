@@ -1,5 +1,9 @@
 # 自动驾驶运营平台数据接入与按需会话实施计划
 
+> 历史实施计划，保留阶段证据，不作为当前能力说明。当前契约仅维护在
+> [docs/architecture.md](../docs/architecture.md)、
+> [docs/compatibility.md](../docs/compatibility.md) 和 `api/schemas/`。
+
 日期：2026-10-30
 
 状态：遥测、观看租约、多车监看、Data 业务前端与运维首阶段已实现；实车执行、原生媒体和物理交接验收尚未关闭

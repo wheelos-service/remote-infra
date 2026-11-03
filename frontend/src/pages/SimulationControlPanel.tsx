@@ -5,12 +5,13 @@ import { SimulationController } from '../lib/simulation-controller'
 import type { ControlCommand } from '../lib/control-protocol'
 import {
   ControlInput, GamepadInput, bindGamepadInput, bindKeyboardInput,
-  simulationCommand, simulationGamepadMapping, type GamepadView,
+  simulationCommand, simulationGamepadMapping, type GamepadView, type GamepadMapping,
 } from '../lib/simulation-input'
 
-export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onIntent }: {
+export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyChange, onIntent }: {
   vehicleId: string
   bearer: string
+  videoReady: boolean
   onBusyChange: (busy: boolean) => void
   onIntent: (vehicleId: string, command?: ControlCommand) => void
 }) {
@@ -18,14 +19,17 @@ export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onInte
   const input = useRef<ControlInput | undefined>(undefined)
   const gamepad = useRef<GamepadInput | undefined>(undefined)
   const mounted = useRef(false)
+  const mediaReady = useRef(videoReady)
+  mediaReady.current = videoReady
   const [, render] = useState(0)
   const [message, setMessage] = useState('')
   const [inputState, setInputState] = useState({ keyboardEnabled: false, gamepadEnabled: false, message: '输入未启用' })
   const [pad, setPad] = useState<GamepadView>()
+  const [mapping, setMapping] = useState<GamepadMapping>({ ...simulationGamepadMapping })
   const changed = useCallback(() => {
     if (!mounted.current) return
     const state = controller.current?.state
-    const ready = state === 'ready'
+    const ready = state === 'ready' && mediaReady.current
     if (input.current?.isAvailable !== ready) input.current?.setAvailable(ready)
     if (!ready) onIntent(vehicleId)
     onBusyChange(Boolean(state && state !== 'closed' && state !== 'idle'))
@@ -38,7 +42,7 @@ export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onInte
       allowVehicleActions: false,
       send: async (intent) => {
         const active = controller.current
-        if (active?.state !== 'ready') throw new Error('模拟控制尚未就绪')
+        if (active?.state !== 'ready' || !mediaReady.current) throw new Error('模拟控制或三路画面尚未就绪')
         const command = simulationCommand(intent)
         active.setCommand(command)
         onIntent(vehicleId, command)
@@ -51,6 +55,7 @@ export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onInte
     })
     const monitor = new GamepadInput(controls, (value) => { if (mounted.current) setPad(value) })
     monitor.setMapping(simulationGamepadMapping)
+    setMapping({ ...simulationGamepadMapping })
     input.current = controls
     gamepad.current = monitor
     const unbindKeyboard = bindKeyboardInput(controls, window, document)
@@ -59,6 +64,7 @@ export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onInte
       controls.suspend('页面离开：输入已停止')
       if (controller.current) void controller.current.release().catch(() => {
         if (mounted.current) render((n) => n + 1)
+        else console.error('模拟控制释放未确认；需检查 Gateway 交接状态')
       })
     }
     const hidden = () => { if (document.hidden) release() }
@@ -77,7 +83,13 @@ export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onInte
     }
   }, [bearer, vehicleId, onIntent])
 
+  useEffect(() => {
+    controller.current?.setMediaReady(videoReady)
+    changed()
+  }, [videoReady, changed])
+
   const acquire = async () => {
+    if (!mediaReady.current) return
     if (controller.current && !['idle', 'closed'].includes(controller.current.state)) return
     if (!globalThis.crypto?.subtle || typeof crypto.randomUUID !== 'function') {
       setMessage('模拟签名要求 HTTPS 或 localhost，以及支持 Ed25519 的浏览器；不会降级到旧协议。')
@@ -88,10 +100,12 @@ export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onInte
     const next = new SimulationController(vehicleId, teleopConfig.gatewayUrl, bearer, {
       connect: async (token) => { await room.connect(teleopConfig.livekitUrl, token, { autoSubscribe: false }) },
       publish: async (body) => {
-        await room.localParticipant.publishData(new Uint8Array(body), { reliable: true, topic: 'vehicle.control.v2' })
+        await room.localParticipant.publishData(new Uint8Array(body), { reliable: true, topic: 'vehicle.control.v2',
+          destinationIdentities: [`vehicle-${vehicleId}`] })
       },
       disconnect: async () => { await room.disconnect() },
     }, changed)
+    next.setMediaReady(mediaReady.current)
     controller.current = next
     room.on(RoomEvent.DataReceived, (body, participant, kind, topic) => {
       if (topic === 'vehicle.control.feedback.v2') {
@@ -113,7 +127,7 @@ export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onInte
     }
   }
   const state = controller.current?.state ?? 'idle'
-  const ready = state === 'ready'
+  const ready = state === 'ready' && videoReady
   const busy = state !== 'closed' && state !== 'idle'
   const button = 'rounded border border-amber-600 px-3 py-2 disabled:opacity-40'
   return (
@@ -121,13 +135,12 @@ export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onInte
       <p className="font-semibold">模拟控制链路 · 不连接实车执行器</p>
       <p className="mt-1">目标：{vehicleId || '未选择'} · 状态：{state}</p>
       <div className="mt-3 flex flex-wrap gap-2">
-        <button type="button" disabled={!vehicleId || busy} onClick={() => void acquire()} className={button}>申请模拟控制权</button>
+        <button type="button" disabled={!vehicleId || busy || !videoReady} onClick={() => void acquire()} className={button}>申请模拟控制权</button>
         <button type="button" disabled={!busy} onClick={() => void release()} className={button}>释放并等待模拟交接</button>
         <button type="button" disabled={!ready} className={button}
           onClick={() => input.current?.setKeyboardEnabled(!inputState.keyboardEnabled)}>
           {inputState.keyboardEnabled ? '关闭键盘' : '启用键盘 WASD / 方向键'}
         </button>
-        <button type="button" disabled={!ready} className={button} onClick={() => input.current?.emergencyStop()}>模拟制动（Space）</button>
         {(['forward', 'reverse', 'left', 'right'] as const).map((action, index) => (
           <button type="button" key={action} disabled={!ready} className={button}
             onPointerDown={(event) => {
@@ -141,6 +154,32 @@ export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onInte
           </button>
         ))}
       </div>
+      <details className="mt-3">
+        <summary>手柄检测与映射（修改后需重新确认，-1 表示不用）</summary>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          {([
+            ['axisX', '转向轴'], ['axisY', '前后轴'], ['enableButton', '使能按钮'],
+            ['emergencyButton', '制动按钮'], ['upButton', '前进按钮'], ['downButton', '倒车按钮'],
+            ['leftButton', '左转按钮'], ['rightButton', '右转按钮'],
+          ] as const).map(([key, label]) => <label key={key} className="flex items-center justify-between gap-2">
+            {label}<input type="number" aria-label={`手柄${label}编号`} value={mapping[key]} min={key === 'enableButton' || key === 'emergencyButton' ? 0 : -1}
+              className="w-20 rounded border border-amber-800 bg-slate-950 p-2"
+              onChange={event => {
+                const value = { ...mapping, [key]: event.currentTarget.valueAsNumber }
+                setMapping(value)
+                gamepad.current?.setMapping(value)
+              }} />
+          </label>)}
+          {(['invertX', 'invertY'] as const).map((key, index) => <label key={key}>
+            <input type="checkbox" checked={mapping[key]} onChange={event => {
+              const value = { ...mapping, [key]: event.currentTarget.checked }
+              setMapping(value)
+              gamepad.current?.setMapping(value)
+            }} /> {index === 0 ? '反转转向轴' : '反转前后轴'}
+          </label>)}
+        </div>
+      </details>
+      <p className="mt-2">{videoReady ? '三路画面正在出帧' : '三路画面未就绪：禁止启用输入；画面恢复不会自动恢复控制'}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <select aria-label="模拟控制手柄" className="rounded border border-amber-800 bg-slate-950 p-2"
           value={pad?.selectedIndex ?? ''} disabled={!ready} onChange={(event) => {
@@ -159,9 +198,20 @@ export function SimulationControlPanel({ vehicleId, bearer, onBusyChange, onInte
       <p className="mt-2">{inputState.message} · {pad?.validation || pad?.message}</p>
       {pad?.pad && <p className="mt-1">轴：{pad.pad.axes.map((value) => value.toFixed(2)).join(' / ')} · 按下按钮：{pad.pad.buttons.flatMap((value, index) => value.pressed ? [index] : []).join(', ') || '无'}</p>}
       <p className="mt-2">挡位和自动驾驶模式请求未接入 v2，不开放 1–4 / E / Q 及对应手柄动作；不回退到 v1。</p>
+      <p className="mt-2">键盘为离散请求，W+A 等组合方向会停止；手柄为比例输入，两者互斥。前三相机无后视覆盖，倒车仅限隔离模拟验收。</p>
       <p className="mt-2">反馈序号：{controller.current?.feedback?.accepted_sequence ?? '—'}；
         {controller.current?.feedback?.reason ?? '等待车端 v2 SDK'}。仅证明模拟验包，不代表物理执行。失焦、断线或反馈超时停止发令；交接完成前禁止切换。</p>
+      <p data-testid="control-feedback" data-sequence={controller.current?.feedback?.accepted_sequence}
+        data-command={JSON.stringify(controller.current?.feedback?.command)} className="mt-2">
+        模拟设定（非底盘实测）：
+        {controller.current?.feedback?.command ? `转向 ${controller.current.feedback.command.steering}‰ · 油门 ${controller.current.feedback.command.throttle}‰ · 制动 ${controller.current.feedback.command.brake}‰ · 方向 ${controller.current.feedback.command.direction}` : '等待反馈'}
+      </p>
       {(message || controller.current?.error) && <p role="alert" className="mt-2 text-red-300">{message || controller.current?.error}</p>}
+      <div className="fixed inset-x-0 bottom-0 z-[60] flex flex-wrap items-center justify-end gap-3 border-t border-amber-800 bg-slate-950 p-3 text-xs">
+        <span>{vehicleId} · {state} · {inputState.gamepadEnabled ? '手柄' : inputState.keyboardEnabled ? '键盘' : '输入未启用'} · 仅模拟</span>
+        <button type="button" disabled={!ready} className={button} onClick={() => input.current?.suspend('已发送停止，请重新启用输入')}>停止并停用输入</button>
+        <button type="button" disabled={!ready} className="rounded border border-red-500 bg-red-950 px-4 py-2 disabled:opacity-40" onClick={() => input.current?.emergencyStop()}>模拟制动（Space）</button>
+      </div>
     </section>
   )
 }

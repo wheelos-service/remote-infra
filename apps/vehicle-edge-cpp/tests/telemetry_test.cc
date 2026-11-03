@@ -231,6 +231,36 @@ void URLAndConfigSemantics() {
   media["camera_source"] = "simulation";
   Require(vehicle_edge::ParseConfig(media).media_enabled,
           "explicit loopback simulation rejected");
+  Require(vehicle_edge::ParseConfig(media).camera_layout == "single" &&
+              vehicle_edge::ParseConfig(media).camera_track == "camera0",
+          "default single camera compatibility lost");
+  media["camera_layout"] = "single";
+  media["camera_track"] = "custom-camera";
+  Require(vehicle_edge::ParseConfig(media).camera_track == "custom-camera",
+          "custom single camera name lost");
+  for (const auto &layout :
+       {Json::Value("four"), Json::Value(""), Json::Value(3),
+        Json::Value(), Json::Value(true)}) {
+    media["camera_layout"] = layout;
+    Rejects([&] { vehicle_edge::ParseConfig(media); },
+            "invalid camera layout accepted");
+  }
+  media["camera_layout"] = "three";
+  Require(vehicle_edge::ParseConfig(media).camera_layout == "three" &&
+              vehicle_edge::ParseConfig(media).control_mode == "disabled",
+          "three simulated cameras unnecessarily required control");
+  media["control_mode"] = "simulation";
+  Require(vehicle_edge::ParseConfig(media).control_mode == "simulation",
+          "three cameras with v2 simulation control rejected");
+  media["media_enabled"] = false;
+  media["control_mode"] = "disabled";
+  Rejects([&] { vehicle_edge::ParseConfig(media); },
+          "three layout without enabled simulation accepted");
+  media["media_enabled"] = true;
+  media["camera_source"] = "h264_annexb";
+  Rejects([&] { vehicle_edge::ParseConfig(media); },
+          "unsupported three-track H264 ingress accepted");
+  media["camera_layout"] = "single";
   media["camera_source"] = "h264_annexb";
   Require(vehicle_edge::ParseConfig(media).camera_source == "h264_annexb",
           "explicit encoded-frame ingress rejected");

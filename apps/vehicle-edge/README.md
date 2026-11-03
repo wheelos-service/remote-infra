@@ -4,6 +4,12 @@
 > `apps/vehicle-edge-cpp/`. Read the [merged boundary](#merged-legacy-pythoncyber-reference)
 > before deploying; this agent does not implement current media demand or handover.
 
+This is an explicitly retained compatibility runtime, not the primary Compose
+vehicle implementation. It is never started by the C++ SDK. Protocol migration
+and retirement conditions are maintained in
+[docs/compatibility.md](../../docs/compatibility.md); do not mix its v1 sender,
+signature or actuator assumptions with the v2 simulator.
+
 The recommended vehicle deployment is Docker Compose. By default it publishes
 one front-facing V4L2 camera. An optional Compose override publishes separate
 left, center, and right camera tracks. The vehicle process only makes outbound

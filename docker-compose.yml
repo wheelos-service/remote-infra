@@ -1,4 +1,15 @@
 services:
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-8000}:80"
+    volumes:
+      - ${FRONTEND_CONFIG_PATH:-./frontend/public/runtime-config.js}:/usr/share/nginx/html/runtime-config.js:ro
+      - ${FRONTEND_MAPS_PATH:-./frontend/public/maps}:/usr/share/nginx/html/maps:ro
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -126,6 +137,7 @@ services:
       RTC_DOMAIN: "${RTC_DOMAIN:-rtc.example.com}"
       CASDOOR_DOMAIN: "${CASDOOR_DOMAIN:-casdoor.example.com}"
       CASDOOR_UPSTREAM: "${CASDOOR_UPSTREAM:-casdoor:8000}"
+      CLIENT_DOMAIN: "${CLIENT_DOMAIN:-client.example.com}"
     ports:
       - "80:80"
       - "443:443"
@@ -139,6 +151,7 @@ services:
       - teleop-backend
       - livekit
       - casdoor
+      - frontend
 
 volumes:
   livekit-config:

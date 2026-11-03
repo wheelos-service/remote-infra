@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Building operator-console (npm/TypeScript)..."
-cd "$(dirname "$0")/../../apps/operator-console" || true
-
-if [ -f package.json ]; then
-  if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
-    npm ci || npm install
-  else
-    npm install
-  fi
-  npm run build
-  echo "Frontend build complete: apps/operator-console/dist"
-else
-  echo "No package.json found in apps/operator-console; skipping frontend build"
+echo "Building frontend (React/TypeScript)..."
+if [ ! -d "$(dirname "$0")/../../packages/teleop-shared/node_modules" ]; then
+  npm ci --prefix "$(dirname "$0")/../../packages/teleop-shared"
 fi
+cd "$(dirname "$0")/../../frontend"
+
+if [ ! -d node_modules ]; then
+  npm ci
+fi
+npm run build
+echo "Frontend build complete: frontend/dist"

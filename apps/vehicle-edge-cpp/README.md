@@ -166,7 +166,9 @@ For CTest older than 3.20, change into the build directory and run
 ### Standalone simulation example
 
 The Teleop archive contains `share/vehicle-edge/examples/teleop`, including its
-own CMake project and a disabled configuration template:
+own CMake project and an explicit three-view simulation configuration template
+(`media_enabled=true`, `camera_layout=three`, `control_mode=simulation`).
+The placeholders must be provisioned before use:
 
 ```bash
 cmake -S /opt/vehicle-edge/share/vehicle-edge/examples/teleop \
@@ -187,12 +189,27 @@ That check opens no camera or network. Running without `--check-config` requires
 explicitly enabled `simulation`, valid cloud endpoints and a LiveKit-enabled
 SDK package; Ctrl-C/SIGTERM calls Stop. `control_mode` defaults to `disabled`;
 explicit `simulation` additionally starts the simulator described below.
+The example opts into both three synthetic views and v2 **SIMULATION** control;
+this is not physical actuator integration. For the legacy single simulated view,
+set `camera_layout` to `single` (or omit it) and optionally set `camera_track`.
 It never uploads operations data, emits
 actuator commands, or claims synthetic video is a real vehicle camera.
 An actual camera owner embeds MediaService/CameraGstAdapter instead of using
 this synthetic-video executable.
 
 ### Testable v2 control loop
+
+For disposable browser acceptance only, the uninstalled
+`build/control_chain_test --serve` accepts one newline-terminated JSON object
+on stdin containing the same `config` and `config_path` fields as the
+control-chain harness. Keep stdin open to run the production `MediaService`;
+EOF, SIGINT, or SIGTERM stops it. Set `config.media_worker_path` to the absolute
+path of `build/control_chain_test`: its existing test-only child loader reads
+the disposable `config_path` without requiring root provisioning. This host
+does not acquire a controller lease or join a controller Room; the browser
+owns those actions. Normal control-chain acceptance mode is unchanged.
+This test binary is not shipped and does not change the protected configuration
+requirements of `teleop_simulation` or `vehicle_media_worker`.
 
 The public modules `control_receiver.h` and `control_service.h` are in Teleop,
 not Data. `MediaService` owns the simulator service **outside** the RTC worker:
@@ -271,7 +288,8 @@ subject mapping. Never reuse a physical vehicle ID:
 1. Gateway: set `SIMULATED_CONTROL_VEHICLES_JSON='["sim-car-1","sim-car-2"]'`.
    Keep `CONTROL_HANDOVER_ACK_ENABLED=false`.
 2. Protected device config: set `media_enabled=true`, `camera_source=simulation`,
-   `control_mode=simulation` and matching Gateway/LiveKit/worker settings.
+   `camera_layout=three`, `control_mode=simulation` and matching
+   Gateway/LiveKit/worker settings.
    Run the installed `teleop_simulation` example. No Data SDK is required.
 3. Frontend: set runtime `simulationControl: true`, or on localhost use
    `?dev=1&control=simulation` with the existing local endpoint settings.
@@ -433,6 +451,40 @@ production backend. Other architectures currently fail configuration explicitly.
 
 To build and install the worker (CMake 3.20+, Linux x86_64):
 
+LiveKit batches signaling updates for non-media publishers on a three-second
+interval. A data-only controller can therefore send authenticated packets before
+the vehicle SDK's remote-participant registry includes it. The pinned Rust SDK
+discards that sender's identity when lookup fails, so C++ sees a null participant
+and correctly rejects the packet. This is not a browser payload or signature
+error, and granting media publishing would violate the controller boundary.
+The build now replaces only `liblivekit_ffi.so` using the SDK's exact pinned
+Rust submodule and a local data-sender registration patch. Its source and native/protocol
+submodules are SHA-256 checked, and Cargo uses the pinned lockfile.
+
+LiveKit-enabled builds therefore also require Rust/Cargo (the pinned source
+requests Rust 1.97.1), Clang 21.1+ matching WebRTC's hermetic libc++ ABI,
+libclang development headers for bindgen, protoc, patch, and tar. Point
+`CC`/`CXX` at suitable Clang binaries when necessary; GCC is not a supported
+compiler for this Rust FFI's C++ bridges. The first build downloads and compiles
+these pinned dependencies; portable builds with LiveKit disabled remain unchanged.
+Configure-time Rust/compiler environment overrides are retained in the
+`EDGE_FFI_*` CMake cache variables so subsequent build/package commands use the
+same toolchain; update those cache variables when changing toolchains.
+The C++ SDK's imported headers/library still come from the pinned release archive.
+
+Registration uses only SFU-authenticated identity and a validated participant SID,
+never JSON payload fields or claimed session/sender values. It emits the ordinary
+ParticipantConnected event before DataReceived, allowing C++ to resolve the
+sender. Provisional participant metadata has no permissions; later signaling
+updates fill in the real metadata and normal disconnection removes the entry.
+An existing identity is never replaced by an incoming packet, and absent metadata
+is not replaced with an inferred controller. The C++ delegate still rejects a
+null participant. All signed v2 sender/session/revision/freshness checks remain
+unchanged. `livekit_sender_test` covers data-only early registration, missing or
+invalid metadata rejection, and existing-identity protection. The control-chain
+acceptance explicitly joins the vehicle worker before the data-only controller
+to exercise the browser's participant-update ordering.
+
 ```bash
 cmake -S apps/vehicle-edge-cpp -B apps/vehicle-edge-cpp/build \
   -DCMAKE_BUILD_TYPE=Debug -DEDGE_ENABLE_LIVEKIT=ON
@@ -456,7 +508,24 @@ the protected device config only for an isolated simulator/approved bench:
 }
 ```
 
-The `simulation` source generates 640x480 RGBA at up to 10 fps.
+`camera_layout` defaults to `single`: the worker publishes one track using
+`camera_track` (default `camera0`), preserving existing configurations.
+To opt into three independent **synthetic simulation** streams in the same
+vehicle Room, set `camera_layout` to `three` with enabled
+`camera_source=simulation`. Their fixed names are `camera-left`, `camera-center`,
+and `camera-right`; `camera_track` does not rename these views. Each owns a
+separate VideoSource and publication. The views have distinguishable moving
+red-, green-, and blue-dominant patterns, respectively, not a vehicle surround
+camera feed. Consumers requiring three views must subscribe by these names.
+Unknown layouts, disabled media with `three`, and `three` with `h264_annexb`
+are rejected rather than silently publishing fewer tracks.
+
+The `simulation` source generates 640x480 RGBA at up to 10 fps **per view**.
+All views share the existing demand authorization and bounded worker lifecycle;
+none joins or continues generating frames while demand is absent or expired.
+Three-view media does not require control: `control_mode` remains independently
+opt-in (`disabled` by default, `simulation` for existing signed v2 **SIMULATION**
+control). There is no physical actuator integration.
 The `h264_annexb` source accepts externally supplied encoded AUs through the SDK.
 Neither opens, claims or stops a real camera. Raw Cyber image subscription and
 real vehicle camera deployment are not yet validated; do not label synthetic
@@ -485,7 +554,7 @@ Shutdown waits at most the current bounded OAuth/HTTP request for the poll task.
 The worker's 200 ms termination bound is not the whole Stop call's latency:
 an in-flight OAuth refresh followed by the demand request can take about four
 seconds under the current two-second per-request timeout.
-Healthy workers unpublish their track, release generated frames/encoding and
+Healthy workers unpublish all their tracks, release generated frames/encoding and
 leave the Room. Forced cancellation closes all owned process resources.
 
 Only authorized workers request `GET /api/token/vehicle` (response `{"token":...}`)
@@ -521,8 +590,14 @@ LiveKit server image in `tests/livekit_e2e.py`:
 python3 apps/vehicle-edge-cpp/tests/livekit_e2e.py
 ```
 
-It exercises both generated RGBA and an offline baseline H.264 AU over actual
-LiveKit, checking decoded video, reliable state, encoded feedback and expiry.
+It exercises the default single generated RGBA track, three named independent
+synthetic tracks (with simulation control enabled), and an offline baseline
+H.264 AU over actual LiveKit. The observer verifies unique publication SIDs,
+640x480 decoded frames from every expected track, distinct per-view colors,
+reliable state, encoded feedback, and removal of every track and the vehicle
+participant on demand expiry. Control safety remains covered by the signed v2
+receiver and separate control-chain tests; this media acceptance test does not
+prove control readiness or actuator acknowledgement.
 No actual camera or actuator is involved.
 
 It creates only its own loopback server/container, authenticates the real SDK

@@ -1,0 +1,11 @@
+.git
+.env
+**/node_modules
+**/dist
+**/build
+**/bazel-*
+**/__pycache__
+**/.venv
+**/.pytest_cache
+**/*.log
+frontend/public/maps

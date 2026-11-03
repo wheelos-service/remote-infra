@@ -65,8 +65,12 @@ The tests are grouped by scope:
 The component unit tests remain next to their implementations under
 `apps/teleop-gateway/internal/gateway/` and `apps/vehicle-edge/tests/`.
 
-The merged legacy console also tests the shared input/view modules and their
-listener cleanup with `cd apps/operator-console && npm test`. For Python
+The shared input/view modules and their listener cleanup are tested in their
+own package:
+`npm ci --prefix packages/teleop-shared && npm --prefix packages/teleop-shared test`.
+Install it before the frontend or legacy console. Legacy UI/protocol integration
+tests remain under `apps/operator-console` (`npm test`); they are not a second
+copy of the shared state-machine tests. For Python
 reference tests use an environment with `apps/vehicle-edge/docker/requirements.txt`
 and pytest installed, then run from repository root:
 

@@ -37,7 +37,8 @@ export default function RemoteDriving({ vehicleId, list, onListChange, onEnter, 
     (list.filter !== 'offline' || !row.online))
   return <div data-testid="remote-driving-list" className="flex h-full min-h-0 flex-col gap-4">
     <header className="flex flex-wrap items-center justify-between gap-2"><h1 className="text-base font-semibold">远程驾驶</h1>
-      <span className="text-xs text-slate-400">选择车辆进入工作台 · 不自动申请控制权</span></header>
+      <span className="text-xs text-slate-400">选择车辆进入工作台 · 不自动申请控制权</span>
+      <a href="#/teleop" className="text-xs text-sky-200">C++ 实时三相机工作台（独立授权目录）</a></header>
     <div className="flex flex-wrap gap-3">
       <input aria-label="搜索远程驾驶车辆" placeholder="搜索车辆编号或名称" value={list.query}
         onChange={(event) => onListChange({ ...list, query: event.target.value, scrollTop: 0 })}

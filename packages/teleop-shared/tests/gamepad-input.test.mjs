@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {ControlInput, bindKeyboardInput} from '../dist/lib/control-input.js';
-import {GamepadInput, bindGamepadInput, defaultGamepadMapping, validateMapping, analogAxis} from '../dist/lib/gamepad-input.js';
+import {ControlInput, bindKeyboardInput} from '../dist/control-input.js';
+import {GamepadInput, bindGamepadInput, defaultGamepadMapping, validateMapping, analogAxis} from '../dist/gamepad-input.js';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 const pad = (index = 0) => ({

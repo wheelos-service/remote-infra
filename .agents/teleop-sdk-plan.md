@@ -1,5 +1,11 @@
 # 双 SDK 远程驾驶交付方案
 
+> Historical implementation/evidence log, not the current runtime contract.
+> Current ownership and compatibility are maintained in
+> [architecture](../docs/architecture.md) and
+> [compatibility](../docs/compatibility.md); package build commands live in
+> [the C++ SDK guide](../apps/vehicle-edge-cpp/README.md).
+
 ## 目标与边界
 
 在已有 Apollo/Cyber、camera_gst 和车辆适配的环境中，只新增安装 Auth SDK

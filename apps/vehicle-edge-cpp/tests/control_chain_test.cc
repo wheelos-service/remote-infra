@@ -1,4 +1,8 @@
+#include <poll.h>
+#include <unistd.h>
+
 #include <chrono>
+#include <csignal>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -13,6 +17,9 @@
 
 namespace {
 using namespace std::chrono_literals;
+
+volatile std::sig_atomic_t stopping = 0;
+void Stop(int) { stopping = 1; }
 
 void Require(bool condition, const char *reason) {
   if (!condition)
@@ -59,7 +66,8 @@ struct SDK {
 
 int main(int argc, char **argv) {
   try {
-    if (argc == 2) {
+    const bool serve = argc == 2 && std::string(argv[1]) == "--serve";
+    if (argc == 2 && !serve) {
       // Test-only worker loader. This binary is never shipped; the installed
       // vehicle_media_worker continues to require protected LoadConfig.
       std::ifstream file(argv[1]);
@@ -68,8 +76,39 @@ int main(int argc, char **argv) {
       return vehicle_edge::RunMediaBackend(vehicle_edge::ParseConfig(value));
     }
     Json::Value input;
-    std::cin >> input;
+    if (serve) {
+      // A newline-delimited initial object lets the parent keep stdin open.
+      std::string line;
+      Require(static_cast<bool>(std::getline(std::cin, line)),
+              "serve requires a config JSON line on stdin");
+      input = vehicle_edge::ParseHTTPJSON(line);
+    } else {
+      std::cin >> input;
+    }
     const auto config = vehicle_edge::ParseConfig(input["config"]);
+    if (serve) {
+      std::signal(SIGTERM, Stop);
+      std::signal(SIGINT, Stop);
+      auto cache = std::make_shared<vehicle_edge::StateCache>();
+      vehicle_edge::MediaService service(config, input["config_path"].asString(),
+                                         cache, "browser-test");
+      std::cout << "test-only MediaService host started; no physical writer\n"
+                << std::flush;
+      while (!stopping) {
+        pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+        if (poll(&descriptor, 1, 100) > 0) {
+          if (descriptor.revents & (POLLERR | POLLNVAL))
+            break;
+          if (descriptor.revents & (POLLIN | POLLHUP)) {
+            char buffer[256];
+            if (read(STDIN_FILENO, buffer, sizeof(buffer)) <= 0)
+              break;
+          }
+        }
+      }
+      service.Stop();
+      return 0;
+    }
     const auto signer = input["signer_url"].asString();
     vehicle_edge::HTTPClient http;
     const auto post = [&](const std::string &path, const Json::Value &body,
@@ -97,6 +136,13 @@ int main(int argc, char **argv) {
     auto cache = std::make_shared<vehicle_edge::StateCache>();
     vehicle_edge::MediaService service(config, input["config_path"].asString(),
                                        cache, "control-chain");
+    // Force the browser ordering: vehicle joined before data-only controller.
+    const auto media_by = std::chrono::steady_clock::now() + 10s;
+    while (service.state() != vehicle_edge::MediaState::ACTIVE &&
+           std::chrono::steady_clock::now() < media_by)
+      std::this_thread::sleep_for(20ms);
+    Require(service.state() == vehicle_edge::MediaState::ACTIVE,
+            "vehicle RTC worker did not become active");
     Controller delegate;
     livekit::Room room;
     room.setDelegate(&delegate);
@@ -135,7 +181,7 @@ int main(int argc, char **argv) {
     };
     const auto publish = [&](const std::string &body) {
       local->publishData(std::vector<std::uint8_t>(body.begin(), body.end()),
-                         true, {}, "vehicle.control.v2");
+                         true, {"vehicle-car-2"}, "vehicle.control.v2");
     };
     const auto signed_body = sign();
     auto tampered = vehicle_edge::ParseHTTPJSON(signed_body);

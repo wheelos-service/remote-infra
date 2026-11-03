@@ -116,7 +116,8 @@ void Drain(Update *update) {
   }
 }
 
-void SimulationFrame(livekit::VideoSource *source, std::uint64_t sequence) {
+void SimulationFrame(livekit::VideoSource *source, std::uint64_t sequence,
+                     int view) {
   constexpr int width = 640;
   constexpr int height = 480;
   auto frame = livekit::VideoFrame::create(width, height,
@@ -129,6 +130,15 @@ void SimulationFrame(livekit::VideoSource *source, std::uint64_t sequence) {
       pixels[offset] = stripe ? 220 : 30;
       pixels[offset + 1] = static_cast<std::uint8_t>(y * 255 / height);
       pixels[offset + 2] = stripe ? 30 : 220;
+      if (view >= 0) {
+        // Left/center/right have red/green/blue dominant synthetic patterns.
+        pixels[offset] = 20;
+        pixels[offset + 1] = 20;
+        pixels[offset + 2] = 20;
+        pixels[offset + view] = stripe ? 220 : 80;
+        pixels[offset + (view + 1) % 3] =
+            static_cast<std::uint8_t>(y * 50 / height);
+      }
       pixels[offset + 3] = 255;
     }
   }
@@ -146,8 +156,10 @@ int vehicle_edge::RunMediaBackend(const DeviceConfig &config) {
   signal(SIGTERM, Stop);
   signal(SIGINT, Stop);
   const bool encoded = config.camera_source == "h264_annexb";
+  const bool three = config.camera_layout == "three";
   if (!config.media_enabled ||
-      (!encoded && config.camera_source != "simulation"))
+      (!encoded && config.camera_source != "simulation") ||
+      (config.camera_layout != "single" && !three) || (three && encoded))
     throw std::runtime_error("media is not explicitly enabled");
   Update update;
   update.vehicle_id = config.vehicle_id;
@@ -180,22 +192,32 @@ int vehicle_edge::RunMediaBackend(const DeviceConfig &config) {
     if (!participant)
       throw std::runtime_error("RTC participant unavailable");
     std::shared_ptr<livekit::EncodedVideoSource> encoded_source;
-    std::shared_ptr<livekit::VideoSource> source;
-    if (encoded) {
-      encoded_source = std::make_shared<livekit::EncodedVideoSource>(
-          livekit::VideoCodec::H264, 640, 480);
-      source = encoded_source;
-    } else {
-      source = std::make_shared<livekit::VideoSource>(640, 480);
-    }
-    auto track = participant->publishVideoTrack(
-        config.camera_track, source, livekit::TrackSource::SOURCE_CAMERA);
-    if (!track)
-      throw std::runtime_error("RTC video publication failed");
-    Drain(&update);
-    if (!Authorized(update)) {
-      room.disconnect();
-      return 0;
+    std::vector<std::shared_ptr<livekit::VideoSource>> sources;
+    std::vector<std::shared_ptr<livekit::LocalVideoTrack>> tracks;
+    const std::vector<std::string> names =
+        three ? std::vector<std::string>{"camera-left", "camera-center",
+                                         "camera-right"}
+              : std::vector<std::string>{config.camera_track};
+    for (const auto &name : names) {
+      std::shared_ptr<livekit::VideoSource> source;
+      if (encoded) {
+        encoded_source = std::make_shared<livekit::EncodedVideoSource>(
+            livekit::VideoCodec::H264, 640, 480);
+        source = encoded_source;
+      } else {
+        source = std::make_shared<livekit::VideoSource>(640, 480);
+      }
+      auto track = participant->publishVideoTrack(
+          name, source, livekit::TrackSource::SOURCE_CAMERA);
+      if (!track)
+        throw std::runtime_error("RTC video publication failed");
+      sources.push_back(std::move(source));
+      tracks.push_back(std::move(track));
+      Drain(&update);
+      if (!Authorized(update)) {
+        room.disconnect();
+        return 0;
+      }
     }
     if (send(3, "A", 1, MSG_NOSIGNAL | MSG_DONTWAIT) != 1)
       throw std::runtime_error("media supervisor unavailable");
@@ -282,7 +304,14 @@ int vehicle_edge::RunMediaBackend(const DeviceConfig &config) {
           }
         }
       } else if (now >= next_frame) {
-        SimulationFrame(source.get(), ++sequence);
+        ++sequence;
+        for (std::size_t view = 0; view < sources.size(); ++view) {
+          Drain(&update);
+          if (!Authorized(update))
+            break;
+          SimulationFrame(sources[view].get(), sequence,
+                          three ? static_cast<int>(view) : -1);
+        }
         next_frame = now + std::chrono::milliseconds(100);
       }
       if (!Authorized(update))
@@ -298,9 +327,10 @@ int vehicle_edge::RunMediaBackend(const DeviceConfig &config) {
       }
       Receive(&update, true);
     }
-    participant->unpublishTrack(track->sid());
-    track.reset();
-    source.reset();
+    for (const auto &track : tracks)
+      participant->unpublishTrack(track->sid());
+    tracks.clear();
+    sources.clear();
     encoded_source.reset();
     room.disconnect();
   }

@@ -205,6 +205,9 @@ MediaService::MediaService(DeviceConfig config, std::string config_path,
       !ValidIdentifier(stream_id_) ||
       (config_.control_mode != "disabled" &&
        config_.control_mode != "simulation") ||
+      (config_.camera_layout != "single" && config_.camera_layout != "three") ||
+      (config_.camera_layout == "three" &&
+       (!config_.media_enabled || config_.camera_source != "simulation")) ||
       (!config_.media_enabled && config_.control_mode != "disabled"))
     throw std::invalid_argument("media requires cache, vehicle and stream IDs");
   if (config_.media_enabled) {

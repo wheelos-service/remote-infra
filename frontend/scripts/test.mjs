@@ -24,6 +24,7 @@ const { outputFiles } = await esbuild.build({
     { in: 'src/lib/simulation-controller.ts', out: 'simulation-controller' },
     { in: 'src/lib/simulation-input.ts', out: 'simulation-input' },
     { in: 'src/lib/camera-view.ts', out: 'camera-view' },
+    { in: 'src/lib/camera-feed.ts', out: 'camera-feed' },
     { in: 'src/lib/fleet-map.ts', out: 'fleet-map' },
     { in: 'src/lib/mock-fleet.ts', out: 'mock-fleet' },
     { in: 'src/lib/teleop-config.ts', out: 'teleop-config' },
@@ -31,6 +32,7 @@ const { outputFiles } = await esbuild.build({
     { in: 'src/lib/fleet-overview.ts', out: 'fleet-overview' },
     { in: 'src/lib/vehicle-alerts.ts', out: 'vehicle-alerts' },
     { in: 'src/lib/vehicle-monitor.ts', out: 'vehicle-monitor' },
+    { in: 'src/lib/operations-navigation.ts', out: 'operations-navigation' },
   ],
   outdir: 'test-build',
   bundle: true,
@@ -56,12 +58,27 @@ const controlProtocol = await loadBundle('control-protocol')
 const { SimulationController } = await loadBundle('simulation-controller')
 const simulationInput = await loadBundle('simulation-input')
 const cameraView = await loadBundle('camera-view')
+const cameraFeed = await loadBundle('camera-feed')
 const fleetMap = await loadBundle('fleet-map')
 const mockFleet = await loadBundle('mock-fleet')
 const dashboard = await loadBundle('dashboard-data')
 const fleetOverview = await loadBundle('fleet-overview')
 const vehicleAlerts = await loadBundle('vehicle-alerts')
 const vehicleMonitor = await loadBundle('vehicle-monitor')
+const navigation = await loadBundle('operations-navigation')
+
+test('operations navigation round-trips vehicle/filter context and rejects invalid routes', () => {
+  const state = { ...navigation.defaultNavigation, page: 'alerts', vehicle: 'sim-004',
+    alertSection: 'work', query: '告警 & event=1', state: 'all', selectedVehicle: 'sim-004',
+    monitorQuery: '车 & 004', driveVehicle: 'sim-007', fromAlerts: 'yes' }
+  const search = navigation.navigationSearch(state)
+  assert.deepEqual(navigation.readNavigation(search).data, state)
+  assert.equal(navigation.readNavigation('page=unknown').success, false)
+  assert.equal(navigation.readNavigation('page=drive&driveFilter=alerts').success, false)
+  assert.equal(navigation.readNavigation('severity=INVALID').success, false)
+  assert.equal(navigation.navigationSearch(navigation.defaultNavigation), '')
+  assert.equal(navigation.readNavigation('page=drive&driveVehicle=missing').data.driveVehicle, 'missing')
+})
 
 const mapText = `header { version: "fixture-v1" }
 lane {
@@ -710,6 +727,7 @@ function controllerFixture() {
     protocol_version: 2, sender_identity: 'control-e0dfe6c0-63ee-416d-81b1-689bf10c785d',
     status: 'ACTIVE',
   }
+
   const connection = {
     connect: async () => { calls.push('connect') },
     publish: async (body) => {
@@ -738,8 +756,99 @@ function controllerFixture() {
   })
   const accept = (data = feedback(), sender = 'vehicle-car-test') =>
     controller.acceptFeedback(sender, true, new TextEncoder().encode(JSON.stringify(data)))
-  return { controller, connection, calls, feedback, accept }
+  return { controller, connection, calls, feedback, accept, request }
 }
+
+test('default control HTTP transport does not bind browser fetch to the controller', async context => {
+  const f = controllerFixture()
+  let controller
+  context.mock.method(globalThis, 'fetch', function (...args) {
+    assert.notEqual(this, controller, 'native browser fetch rejects a controller receiver')
+    return f.request(...args)
+  })
+  controller = new SimulationController('car-test', 'http://localhost', 'test', f.connection, () => {})
+  try {
+    await controller.acquire()
+    assert.equal(controller.state, 'connecting')
+  } finally { await controller.release() }
+})
+
+test('camera feed readiness needs three advancing decoded streams and clears on stall and detach', (context) => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  context.mock.timers.enable({ apis: ['setInterval'] })
+  const listeners = new Map()
+  let callback, cancelled, attached = false
+  const video = {
+    addEventListener: (name, fn) => listeners.set(name, fn),
+    removeEventListener: name => listeners.delete(name),
+    requestVideoFrameCallback: fn => { callback = fn; return 7 },
+    cancelVideoFrameCallback: id => { cancelled = id },
+  }
+  const frames = {}
+  const stop = cameraFeed.bindCameraFeed({
+    attach: () => { attached = true },
+    detach: () => { attached = false },
+  }, video, live => { frames.center = live })
+  try {
+    assert.equal(attached, true)
+    assert.equal(cameraFeed.threeCamerasReady(frames), false, 'track arrival is not frame readiness')
+    callback()
+    frames.left = frames.right = true
+    assert.equal(cameraFeed.threeCamerasReady(frames), true)
+    listeners.get('waiting')()
+    assert.equal(cameraFeed.threeCamerasReady(frames), false)
+    callback()
+    now += cameraFeed.CAMERA_FRAME_TIMEOUT_MS
+    context.mock.timers.tick(100)
+    assert.equal(cameraFeed.threeCamerasReady(frames), false)
+    callback()
+    assert.equal(cameraFeed.threeCamerasReady(frames), true)
+    stop()
+    assert.equal(cameraFeed.threeCamerasReady(frames), false)
+    assert.equal(cancelled, 7)
+    assert.equal(attached, false)
+    assert.equal(listeners.size, 0)
+    callback()
+    assert.equal(cameraFeed.threeCamerasReady(frames), false, 'late callback cannot restore detached feed')
+  } finally { stop(); context.mock.timers.reset() }
+})
+
+test('video loss fences v2 control and restored frames cannot rearm the session', async () => {
+  const blocked = controllerFixture()
+  blocked.controller.setMediaReady(false)
+  await assert.rejects(blocked.controller.acquire(), /camera feeds/)
+  assert.deepEqual(blocked.calls, [])
+  const f = controllerFixture()
+  await f.controller.acquire()
+  f.accept()
+  f.controller.setCommand({ steering: 0, throttle: 100, brake: 0, direction: 1 })
+  f.controller.setMediaReady(false)
+  assert.equal(f.controller.state, 'locked')
+  await f.controller.tick()
+  assert.equal(f.calls.includes('publish'), false)
+  f.controller.setMediaReady(true)
+  f.accept()
+  assert.equal(f.controller.state, 'locked')
+  assert.throws(() => f.controller.setCommand(controlProtocol.neutralCommand))
+  await f.controller.release()
+})
+
+test('video loss during connection cannot be overwritten by late RTC completion', async () => {
+  const f = controllerFixture()
+  let complete
+  f.connection.connect = () => new Promise(resolve => { complete = resolve })
+  const acquiring = f.controller.acquire()
+  while (!complete) await new Promise(resolve => setImmediate(resolve))
+  f.controller.setMediaReady(false)
+  complete()
+  await acquiring
+  assert.equal(f.controller.state, 'locked')
+  f.controller.setMediaReady(true)
+  f.accept()
+  assert.equal(f.controller.state, 'locked')
+  await f.controller.release()
+})
 
 test('controller requires bound feedback, signs commands, and fences switching through release', async () => {
   const f = controllerFixture()
@@ -852,6 +961,29 @@ test('releasing the deadman while signing cannot publish a stale pressed command
   finish()
   await sending
   assert.equal(f.calls.includes('publish'), false)
+  await f.controller.release()
+})
+
+test('repeated identical input samples do not cancel an in-flight signature', async context => {
+  const f = controllerFixture()
+  await f.controller.acquire()
+  f.accept()
+  const sign = crypto.subtle.sign.bind(crypto.subtle)
+  let signing = false, finish
+  context.mock.method(crypto.subtle, 'sign', async (...args) => {
+    const signature = await sign(...args)
+    signing = true
+    await new Promise(resolve => { finish = resolve })
+    return signature
+  })
+  const command = { steering: 0, throttle: 100, brake: 0, direction: 1 }
+  f.controller.setCommand(command)
+  const sending = f.controller.tick()
+  while (!signing) await new Promise(resolve => setImmediate(resolve))
+  f.controller.setCommand({ ...command })
+  finish()
+  await sending
+  assert.equal(f.calls.includes('publish'), true)
   await f.controller.release()
 })
 

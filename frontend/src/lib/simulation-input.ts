@@ -1,11 +1,11 @@
 import { z } from 'zod'
-import type { ControlCommand as InputCommand } from '../../../apps/operator-console/src/lib/secure-control-sender'
+import type { ControlCommand as InputCommand } from '@livekit-infra/teleop-shared/input-command'
 import { controlCommandSchema, type ControlCommand } from './control-protocol'
 
-export { ControlInput, bindKeyboardInput } from '../../../apps/operator-console/src/lib/control-input'
-export { GamepadInput, bindGamepadInput } from '../../../apps/operator-console/src/lib/gamepad-input'
-export type { GamepadView } from '../../../apps/operator-console/src/lib/gamepad-input'
-import { defaultGamepadMapping } from '../../../apps/operator-console/src/lib/gamepad-input'
+export { ControlInput, bindKeyboardInput } from '@livekit-infra/teleop-shared/control-input'
+export { GamepadInput, bindGamepadInput } from '@livekit-infra/teleop-shared/gamepad-input'
+export type { GamepadView, GamepadMapping } from '@livekit-infra/teleop-shared/gamepad-input'
+import { defaultGamepadMapping } from '@livekit-infra/teleop-shared/gamepad-input'
 
 export const simulationGamepadMapping = {
   ...defaultGamepadMapping,

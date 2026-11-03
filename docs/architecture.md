@@ -10,27 +10,42 @@ Viewing leases drive media demand; separate multi-vehicle observer Rooms never
 grant control authority. One operator controls at most one vehicle, and HTTP
 release is `202 PENDING` until authoritative device handover is confirmed.
 
-The merged `cyber-apollo-base` Python agent and `apps/operator-console/` remain
-legacy v1 integration references, not replacements for the modular C++ SDK.
-Their pure input and camera-view state machines are reused by the React build
-through typed adapters, without bundling the v1 sender, Python actuator adapter,
-or their session lifecycle. Input conversion targets the existing signed v2
+The Python agent and `apps/operator-console/` remain legacy v1 references,
+not replacements for the modular C++ SDK. Their shared input and camera-view
+state machines now live only in `packages/teleop-shared/`; both clients import
+that transport-free library. The React build does not bundle the v1 sender,
+Python actuator adapter or legacy session lifecycle. Input conversion targets the signed v2
 integer command contract; only allowlisted simulation is enabled. Gear/mode
 actions are rejected, never downgraded to v1. Actual actuation and physical
 handover remain disabled pending approved interfaces and bench evidence.
 
-React observers support front/rear three-camera groups, single-front fallback,
-manual selection, center focus and decoded-frame staleness. Only visible tiles
-are attached and `adaptiveStream` stays enabled. This does not guarantee that
-hidden cameras stop upstream encoding; the legacy console intentionally keeps
-all six attached. Neither UI group selection nor a signed request is an actuator
-acknowledgement. Device publication remains governed by media demand in the C++
-SDK, not by whether a browser has selected a camera group.
+The routed React `/#/teleop` workbench uses three independent front cameras
+(`camera-left/center/right`), center focus and decoded-frame staleness; it has
+no stitching, rear view or single-camera fallback. All three feeds must be fresh
+to enable simulation control. The default home remains an isolated Mock.
+Neither video readiness nor a signed request is an actuator acknowledgement.
+Device publication remains governed by media demand in the C++ SDK.
 
-Detailed platform/module diagrams:
-[`agents/frontend-platform-architecture.md`](../agents/frontend-platform-architecture.md),
-[`agents/frontend-platform-diagrams.md`](../agents/frontend-platform-diagrams.md).
-Delivery gates: [SDK plan](../.agents/teleop-sdk-plan.md).
+## Repository ownership
+
+```text
+frontend/src/features/     Routed layout and task UI
+frontend/src/pages/        Routed workbenches and page-level composition
+frontend/src/lib/          Domain models and strict protocol adapters
+packages/teleop-shared/    Single input/gamepad/view implementation
+apps/teleop-gateway/       Gateway API, authority and storage
+apps/vehicle-edge-cpp/     Auth/Data/Teleop SDKs, workers and native adapters
+api/schemas/              Versioned cross-language payload contracts
+infra/                    Build, static hosting and Compose/Kubernetes assets
+tests/                    Cross-component acceptance; unit tests stay with owners
+docs/                     Current contracts, architecture and operations
+```
+
+[compatibility.md](compatibility.md) identifies primary and retained APIs.
+`agents/` contains historical design proposals; `.agents/` contains contributor
+skills, knowledge indexes and implementation notes that point here, not parallel
+architecture specifications. CMake owns portable C++ SDK packaging; Bazel owns
+native Cyber builds. They use the same source implementations.
 
 ## Legacy v1 integration reference
 

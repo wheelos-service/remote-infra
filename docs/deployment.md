@@ -5,7 +5,7 @@
 ```text
 Browser
   | HTTPS/WSS
-  +-- console.example.com  -> static operator console
+  +-- client.example.com   -> Caddy -> frontend Nginx
   +-- api.example.com      -> Caddy -> Teleop Gateway
   +-- rtc.example.com      -> Caddy -> LiveKit
 
@@ -14,15 +14,18 @@ Vehicle edge agent
   +-- api.example.com and rtc.example.com
 ```
 
-The browser and vehicle run outside the server containers. Docker Compose runs the Gateway, LiveKit, Redis, and optionally Caddy.
+The browser and vehicle run outside the server containers. Docker Compose runs
+the primary frontend Nginx, Gateway, LiveKit, Redis and optionally Caddy.
 
 ## Server Preparation
 
-Use a Linux host with Docker Compose. Point DNS records for the API and RTC domains to the host:
+Use a Linux host with Docker Compose. Point DNS records for the client, API,
+RTC and Casdoor domains to the host:
 
 ```text
 api.example.com  A  <server-ip>
 rtc.example.com  A  <server-ip>
+client.example.com  A  <server-ip>
 ```
 
 Allow the following firewall traffic:
@@ -45,6 +48,7 @@ Set production values in `.env` without committing the file:
 LIVEKIT_API_KEY=teleop_cloud_key
 LIVEKIT_API_SECRET=<random-long-secret>
 CLIENT_ORIGIN=https://client.example.com
+CLIENT_DOMAIN=client.example.com
 API_DOMAIN=api.example.com
 RTC_DOMAIN=rtc.example.com
 ```
@@ -61,25 +65,87 @@ docker compose logs -f teleop-backend livekit caddy
 
 ## Client Deployment
 
-Host the built `apps/operator-console/dist/` directory with static Web hosting, Nginx, a CDN, or another authenticated Web server. For local verification:
+The `frontend` Compose service builds the primary React application and shared
+package from the repository root. It serves static assets on
+`127.0.0.1:${FRONTEND_PORT:-8000}`; the cloud Caddy profile proxies
+`CLIENT_DOMAIN` to it over the container network. Start only the UI with:
 
 ```bash
-cd apps/operator-console
-npm run build
-python3 -m http.server 8000 --directory dist
+docker compose up -d --build frontend
+curl http://127.0.0.1:8000/
 ```
 
-A production client uses the API and RTC endpoints below:
+You can alternatively run `infra/scripts/build-frontend.sh` and host
+`frontend/dist/` with a static server. The legacy console Dockerfile must also
+use repository-root context:
+`docker build -f apps/operator-console/Dockerfile -t teleop-console-legacy .`.
+
+Mount a **public-only**, existing JavaScript file using `FRONTEND_CONFIG_PATH`.
+Its contents set `window.__LIVEKIT_INFRA_CONFIG__` before `main.js`, for example:
+
+```javascript
+window.__LIVEKIT_INFRA_CONFIG__ = {
+  gatewayUrl: 'https://api.example.com',
+  livekitUrl: 'wss://rtc.example.com',
+  authorizeUrl: 'https://casdoor.example.com/login/oauth/authorize',
+  tokenUrl: 'https://casdoor.example.com/api/login/oauth/access_token',
+  clientId: 'public-operator-client-id',
+  simulationControl: false
+};
+```
+
+No device credentials, client secrets or access tokens belong in this file.
+Nginx serves it with `Cache-Control: no-store`; it does not proxy API calls or
+generate configuration from unrestricted environment variables. Set CORS and
+OIDC redirect URIs to match the actual frontend origin. Optional generated map
+assets are mounted read-only from `FRONTEND_MAPS_PATH` (default
+`./frontend/public/maps`) at `/usr/share/nginx/html/maps`; they are not baked
+into the image or Git. Generate maps on the host before starting/restarting
+the frontend service:
+
+```bash
+cd frontend
+npm run prepare:maps -- --source /mnt/synology/map \
+  --map xiaomo_port_inside_0.9.0 --map ruantong_hry_origin
+cd ..
+docker compose up -d --force-recreate frontend
+```
+
+The browser fetches map catalog and map JSON from the same HTTPS origin as the
+frontend; no HTTP mixed-content endpoint is used.
+
+The production real-time entry is:
 
 ```text
-https://client.example.com/?backend=https://api.example.com&livekit=wss://rtc.example.com
+https://client.example.com/#/teleop
 ```
 
 Use OIDC Authorization Code + PKCE. The client may receive public OIDC values such as `clientId` and endpoint URLs, but never a client secret, access token, or LiveKit API secret.
 
+The home route remains an isolated Mock. Configure the public runtime settings
+as described in [`frontend/README.md`](../frontend/README.md); enable simulation
+control explicitly and only for allowlisted simulated vehicles.
+
+## CI scope
+
+`.github/workflows/ci.yml` runs shared state-machine, React, legacy integration,
+Gateway and portable C++ SDK checks, validates Compose and builds the primary
+frontend image. Portable SDK CI uses `EDGE_ENABLE_LIVEKIT=OFF`; actual LiveKit,
+Cyber/hardware and physical handover are separate acceptance gates, not claimed
+by this CI. Use `tests/driving-ui.py` with the documented native toolchain for
+the real browser/C++ simulation chain.
+
 ## Vehicle Deployment
 
-The vehicle requires outbound access to the API and RTC domains and must not expose inbound ports. Install the dependencies and start the vehicle agent with its protected device configuration:
+The current vehicle runtime is the C++ SDK. Follow its
+[build and installation guide](../apps/vehicle-edge-cpp/README.md), with
+`camera_layout=three`, `camera_source=simulation`, and `control_mode=simulation`
+for the three-camera simulator. Physical actuation remains disabled.
+
+### Legacy Python v1 reference
+
+The following commands are for the legacy Python/standalone-console workflow,
+not the React v2 simulator. The vehicle requires outbound access to the API and RTC domains and must not expose inbound ports:
 
 ```bash
 python3 -m venv .venv
