@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { ArrowLeft, Search } from 'lucide-react'
 import { useMockFleet } from '../app/MockFleetProvider'
 import { overviewVehicle } from '../lib/fleet-overview'
@@ -22,6 +22,25 @@ const severityClass = (severity: AlertSeverity) => severity === 'FATAL' ? 'borde
     : severity === 'WARN' ? 'border-amber-700 bg-amber-950/40 text-amber-200' : 'border-slate-600 text-slate-300'
 const age = (value: number) => value < 60_000 ? '不足 1 分钟' : value < 3_600_000 ? `${Math.floor(value / 60_000)} 分钟` : `${Math.floor(value / 3_600_000)} 小时`
 
+function AlertCenterNavigation({ section, onSection }: { section: AlertSection; onSection: (section: AlertSection) => void }) {
+  return <nav aria-label="告警中心板块" className="flex gap-1 border-b border-slate-800">
+    {([['dashboard', '运营看板'], ['work', '车辆处置'], ['history', '历史记录']] as const).map(([value, label]) =>
+      <button key={value} type="button" aria-current={section === value ? 'page' : undefined} onClick={() => onSection(value)}
+        className={`border-b-2 px-4 py-2.5 text-sm ${section === value ? 'border-sky-400 text-sky-200' : 'border-transparent text-slate-400 hover:text-slate-200'}`}>{label}</button>)}
+  </nav>
+}
+
+export function UnavailableVehicleAlertCenter() {
+  const [section, setSection] = useState<AlertSection>('dashboard')
+  return <div className="flex h-full min-h-0 flex-col gap-4" data-testid="vehicle-alert-center">
+    <header><h1 className="text-base font-semibold">告警中心</h1></header>
+    <AlertCenterNavigation section={section} onSection={setSection} />
+    <section className="flex min-h-[300px] items-center justify-center rounded-xl border border-slate-800 bg-slate-900/70 p-8">
+      <p role="status" className="text-sm text-slate-400">告警数据暂不可用</p>
+    </section>
+  </div>
+}
+
 export default function VehicleAlertCenter({ filters, section, onSection, onChange, onNavigate }: Props) {
   const mock = useMockFleet()
   const names = Object.fromEntries(mock.vehicles.entries.map((entry) => [entry.vehicle_id, entry.name]))
@@ -43,15 +62,10 @@ export default function VehicleAlertCenter({ filters, section, onSection, onChan
     <header className="flex flex-wrap items-center justify-between gap-2">
       <h1 className="text-base font-semibold">告警事件中心</h1>
     </header>
-    <nav aria-label="告警中心板块" className="flex gap-1 border-b border-slate-800">
-      {([
-        ['dashboard', '运营看板'], ['work', '车辆处置'], ['history', '历史记录'],
-      ] as const).map(([value, label]) => <button key={value} type="button" aria-current={section === value ? 'page' : undefined}
-        onClick={() => {
+    <AlertCenterNavigation section={section} onSection={value => {
           onSection(value)
           if (value === 'history' && section !== 'history') onChange({ ...filters, state: 'all', selectedAlert: '', selectedVehicle: '' })
-        }} className={`border-b-2 px-4 py-2.5 text-sm ${section === value ? 'border-sky-400 text-sky-200' : 'border-transparent text-slate-400 hover:text-slate-200'}`}>{label}</button>)}
-    </nav>
+        }} />
     {section === 'dashboard' ? <AlertDashboard groups={groups} now={now} onOpen={(next) => {
       onChange(next)
       onSection('work')

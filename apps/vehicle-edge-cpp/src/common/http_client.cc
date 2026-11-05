@@ -1,8 +1,11 @@
 #include "vehicle_edge/http_client.h"
 
 #include <algorithm>
+#include <cctype>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 
 namespace vehicle_edge {
 namespace {
@@ -18,6 +21,79 @@ std::size_t Receive(char *data, std::size_t size, std::size_t count,
   if (body->size() + bytes > kMaxResponseBytes)
     return 0;
   body->append(data, bytes);
+  return bytes;
+}
+
+bool IsKnownGatewayErrorCode(std::string_view code) {
+  static constexpr std::string_view codes[] = {
+      "AUTH_BEARER_REQUIRED",
+      "AUTH_INVALID_TOKEN",
+      "AUTH_SERVICE_UNAVAILABLE",
+      "VEHICLE_REGISTRY_UNAVAILABLE",
+      "VEHICLE_IDENTITY_MISMATCH",
+      "VEHICLE_IDENTITY_SERVICE_UNAVAILABLE",
+      "VEHICLE_NOT_REGISTERED",
+      "VEHICLE_IDENTITY_REQUIRED",
+      "VEHICLE_IDENTITY_UNBOUND",
+      "MEDIA_TOKEN_ISSUANCE_FAILED",
+      "METHOD_NOT_ALLOWED",
+  };
+  return std::find(std::begin(codes), std::end(codes), code) !=
+         std::end(codes);
+}
+
+std::size_t ReceiveHeader(char *data, std::size_t size, std::size_t count,
+                          void *context) {
+  if (size != 0 && count > 8192 / size)
+    return 0;
+  const auto bytes = size * count;
+  const std::string_view line(data, bytes);
+  if (line.rfind("HTTP/", 0) == 0) {
+    auto *response = static_cast<HTTPResponse *>(context);
+    response->request_id.clear();
+    response->error_code.clear();
+    return bytes;
+  }
+  const auto colon = line.find(':');
+  if (colon == std::string_view::npos)
+    return bytes;
+
+  auto equal_ascii_case_insensitive = [](std::string_view left,
+                                         std::string_view right) {
+    if (left.size() != right.size())
+      return false;
+    for (std::size_t i = 0; i < left.size(); ++i) {
+      if (std::tolower(static_cast<unsigned char>(left[i])) !=
+          std::tolower(static_cast<unsigned char>(right[i])))
+        return false;
+    }
+    return true;
+  };
+
+  const std::string_view name = line.substr(0, colon);
+  const auto value_start = line.find_first_not_of(" \t", colon + 1);
+  if (value_start == std::string_view::npos)
+    return bytes;
+  auto value_end = line.find_last_not_of(" \t\r\n");
+  if (value_end == std::string_view::npos || value_end < value_start)
+    return bytes;
+  const auto value = line.substr(value_start, value_end - value_start + 1);
+  auto *response = static_cast<HTTPResponse *>(context);
+  if (equal_ascii_case_insensitive(name, "X-Request-ID")) {
+    const bool safe = value.size() <= 128 &&
+                      !value.empty() &&
+                      std::all_of(value.begin(), value.end(), [](char ch) {
+                        const auto c = static_cast<unsigned char>(ch);
+                        return (c >= 'A' && c <= 'Z') ||
+                               (c >= 'a' && c <= 'z') ||
+                               (c >= '0' && c <= '9') || c == '.' ||
+                               c == '_' || c == '-';
+                      });
+    response->request_id = safe ? std::string(value) : std::string();
+  } else if (equal_ascii_case_insensitive(name, "X-Error-Code") &&
+             IsKnownGatewayErrorCode(value)) {
+    response->error_code = std::string(value);
+  }
   return bytes;
 }
 
@@ -103,6 +179,12 @@ HTTPResponse HTTPClient::Request(const std::string &url,
     headers.release();
     headers.reset(updated);
   }
+  auto *updated =
+      curl_slist_append(headers.get(), "Accept: application/json");
+  if (!updated)
+    throw std::runtime_error("cannot allocate HTTP headers");
+  headers.release();
+  headers.reset(updated);
   Check(curl_easy_setopt(handle_, CURLOPT_URL, url.c_str()));
   Check(curl_easy_setopt(handle_, CURLOPT_HTTPHEADER, headers.get()));
   if (post) {
@@ -121,6 +203,8 @@ HTTPResponse HTTPClient::Request(const std::string &url,
   Check(curl_easy_setopt(handle_, CURLOPT_SSL_VERIFYHOST, 2L));
   Check(curl_easy_setopt(handle_, CURLOPT_WRITEFUNCTION, Receive));
   Check(curl_easy_setopt(handle_, CURLOPT_WRITEDATA, &response.body));
+  Check(curl_easy_setopt(handle_, CURLOPT_HEADERFUNCTION, ReceiveHeader));
+  Check(curl_easy_setopt(handle_, CURLOPT_HEADERDATA, &response));
   const auto status = curl_easy_perform(handle_);
   if (status != CURLE_OK) {
     throw std::runtime_error("HTTP transport failed (curl code " +

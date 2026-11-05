@@ -40,7 +40,7 @@ func (api *ViewingLeaseAPI) authorize(w http.ResponseWriter, r *http.Request, de
 		http.Error(w, "forbidden: vehicle permission required", http.StatusForbidden)
 		return false
 	}
-	if _, ok := api.registry.byID[vehicleID]; !ok {
+	if _, ok := requestVehicleRegistry(r, api.registry).byID[vehicleID]; !ok {
 		http.Error(w, "vehicle not registered", http.StatusNotFound)
 		return false
 	}
@@ -84,6 +84,9 @@ func (api *ViewingLeaseAPI) acquire(w http.ResponseWriter, r *http.Request) {
 		SetIdentity("observer-" + sid).SetValidFor(15 * time.Minute).ToJWT()
 	if err != nil {
 		http.Error(w, "failed to issue viewing token", http.StatusInternalServerError)
+		return
+	}
+	if !reserveManagedToken(w, r, token) {
 		return
 	}
 	lease, err := api.store.mutate(r.Context(), "acquire", vehicleID, owner, sid)

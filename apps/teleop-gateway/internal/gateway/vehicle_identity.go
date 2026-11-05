@@ -9,6 +9,7 @@ import (
 
 type VehicleIdentityResolver struct {
 	bySubject map[string]string
+	strict    bool
 }
 
 func NewVehicleIdentityResolverFromEnvironment() (*VehicleIdentityResolver, error) {
@@ -34,5 +35,5 @@ func (r *VehicleIdentityResolver) Resolve(subject string) (string, bool) {
 }
 
 func (r *VehicleIdentityResolver) Strict() bool {
-	return len(r.bySubject) > 0
+	return r.strict || len(r.bySubject) > 0
 }

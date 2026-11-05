@@ -26,6 +26,17 @@ func handleAcquireVideo(w http.ResponseWriter, r *http.Request) {
 
 func handleReleaseVideo(w http.ResponseWriter, r *http.Request) {
 	claims := r.Context().Value("user").(*UserClaims)
+	if claims.managed != nil {
+		vehicleID, err := videoSessions.client.Get(r.Context(), videoViewerKey(r.PathValue("session_id"))).Result()
+		if err != nil {
+			writeVideoSessionError(w, err)
+			return
+		}
+		if !canObserve(claims) || !vehicleAuthorizer.Authorize(claims, vehicleID, ObservePermission) {
+			http.Error(w, "forbidden: vehicle observe permission required", http.StatusForbidden)
+			return
+		}
+	}
 	session, err := videoSessions.ReleaseViewer(r.Context(), r.PathValue("session_id"))
 	if err != nil {
 		writeVideoSessionError(w, err)
@@ -38,7 +49,11 @@ func handleReleaseVideo(w http.ResponseWriter, r *http.Request) {
 func handleGetVideo(w http.ResponseWriter, r *http.Request) {
 	claims := r.Context().Value("user").(*UserClaims)
 	vehicleID := r.PathValue("vehicle_id")
-	if !hasRole(claims.Roles, "vehicle") && (!canObserve(claims) || !vehicleAuthorizer.Authorize(claims, vehicleID, ObservePermission)) {
+	isDevice := hasRole(claims.Roles, "vehicle")
+	if claims.managed != nil {
+		isDevice = vehicleSelfMatches(claims, vehicleID, vehicleIdentities)
+	}
+	if !isDevice && (!canObserve(claims) || !vehicleAuthorizer.Authorize(claims, vehicleID, ObservePermission)) {
 		http.Error(w, "forbidden: observer role required", http.StatusForbidden)
 		return
 	}

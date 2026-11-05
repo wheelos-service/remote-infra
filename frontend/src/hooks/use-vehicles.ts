@@ -24,9 +24,10 @@ const initialState: VehiclesState = {
   requestFailed: false,
 }
 
-export function useVehicles(accessToken?: string): VehiclesState {
+export function useVehicles(accessToken?: string, organizationId = ''): VehiclesState {
   const [state, setState] = useState<VehiclesState>(initialState)
   const stateTokenRef = useRef<string | undefined>(undefined)
+  const scope = accessToken ? `${accessToken}:${organizationId}` : undefined
 
   useEffect(() => {
     let cancelled = false
@@ -41,7 +42,7 @@ export function useVehicles(accessToken?: string): VehiclesState {
       }
     }
 
-    stateTokenRef.current = accessToken
+    stateTokenRef.current = scope
     setState({ ...initialState, status: 'loading' })
 
     const poll = async () => {
@@ -83,9 +84,9 @@ export function useVehicles(accessToken?: string): VehiclesState {
       if (timer !== undefined) clearTimeout(timer)
       activeController?.abort()
     }
-  }, [accessToken])
+  }, [accessToken, scope])
 
-  if (stateTokenRef.current !== accessToken) {
+  if (stateTokenRef.current !== scope) {
     return accessToken ? { ...initialState, status: 'loading' } : initialState
   }
   return state

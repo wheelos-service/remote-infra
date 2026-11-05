@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { organizationHeaders } from './organization-context'
 import { teleopConfig } from './teleop-config'
 import { chassisMessageSchema, localizationMessageSchema } from './vehicles-api'
 import type { PreviewScenario } from './preview-vehicles'
@@ -137,7 +138,7 @@ export async function fetchVehicleOperations(
     const response = await fetch(
       `${gatewayUrl}/api/vehicles/${encodeURIComponent(id)}/operations`,
       {
-        headers: { Authorization: `Bearer ${bearer}` },
+        headers: { Authorization: `Bearer ${bearer}`, ...organizationHeaders() },
         signal: controller.signal,
         cache: 'no-store',
       },

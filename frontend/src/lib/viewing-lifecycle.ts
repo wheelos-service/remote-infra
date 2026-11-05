@@ -1,5 +1,6 @@
 import { acquireViewing, newViewingId, releaseViewing, renewViewing } from './viewing-api'
 import type { ViewingAcquire, ViewingLease } from './viewing-api'
+import { requestOrganization } from './organization-context'
 
 interface Observer {
   connect(): Promise<void>
@@ -22,12 +23,6 @@ interface ViewingApi {
   release: typeof releaseViewing
 }
 
-const defaultApi: ViewingApi = {
-  acquire: acquireViewing,
-  renew: renewViewing,
-  release: releaseViewing,
-}
-
 export class ViewingLifecycle {
   private stopped = false
   private started = false
@@ -41,11 +36,19 @@ export class ViewingLifecycle {
   private cancelConnection?: () => void
   private cleanup?: Promise<void>
   private readonly requestId = newViewingId()
+  private readonly organizationId = requestOrganization()
+  private readonly api: ViewingApi
 
   constructor(
     private readonly options: ViewingOptions,
-    private readonly api: ViewingApi = defaultApi,
-  ) {}
+    api?: ViewingApi,
+  ) {
+    this.api = api ?? {
+      acquire: (vehicle, bearer, request, client) => acquireViewing(vehicle, bearer, request, client, this.organizationId),
+      renew: (vehicle, session, bearer) => renewViewing(vehicle, session, bearer, this.organizationId),
+      release: (vehicle, session, bearer) => releaseViewing(vehicle, session, bearer, this.organizationId),
+    }
+  }
 
   get active() {
     return !this.stopped &&

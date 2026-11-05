@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -39,18 +40,26 @@ func (api *DataAPI) register(mux *http.ServeMux) {
 func (api *DataAPI) authorize(w http.ResponseWriter, r *http.Request, permission string) bool {
 	id := r.PathValue("vehicle_id")
 	claims := r.Context().Value("user").(*UserClaims)
+	if claims.managed != nil && (strings.Contains(r.URL.Path, "/data/tasks") ||
+		strings.HasSuffix(r.URL.Path, "/data/task-results")) {
+		http.Error(w, "business tasks are outside the managed pilot", http.StatusForbidden)
+		return false
+	}
 	allowed := vehicleSelfMatches(claims, id, api.identities)
 	if permission == "observe" {
 		allowed = canObserve(claims) && api.authorizer.Authorize(claims, id, ObservePermission)
 	}
 	if permission == "task" {
 		allowed = canControl(claims) && api.authorizer.Authorize(claims, id, ControlPermission)
+		if claims.managed != nil {
+			allowed = false
+		}
 	}
 	if !allowed {
 		http.Error(w, "vehicle permission required", 403)
 		return false
 	}
-	if _, ok := api.registry.byID[id]; !ok {
+	if _, ok := requestVehicleRegistry(r, api.registry).byID[id]; !ok {
 		http.Error(w, "vehicle not registered", 404)
 		return false
 	}
@@ -423,7 +432,8 @@ func (api *DataAPI) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := r.Context().Value("user").(*UserClaims)
-	value["can_manage"] = canControl(claims) && api.authorizer.Authorize(claims, r.PathValue("vehicle_id"), ControlPermission)
+	value["can_manage"] = claims.managed == nil && canControl(claims) &&
+		api.authorizer.Authorize(claims, r.PathValue("vehicle_id"), ControlPermission)
 	writeJSON(w, 200, value)
 }
 func dataWriteResult(w http.ResponseWriter, err error) {

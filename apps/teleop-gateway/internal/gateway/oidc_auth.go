@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -18,15 +17,21 @@ import (
 
 var ErrInvalidToken = errors.New("invalid bearer token")
 
+type authenticationFailure string
+
+func (authenticationFailure) Error() string { return ErrInvalidToken.Error() }
+func (authenticationFailure) Unwrap() error { return ErrInvalidToken }
+
 type Authenticator interface {
 	Authenticate(context.Context, string) (*UserClaims, error)
 }
 
 type OIDCAuthenticator struct {
-	issuer   string
-	audiences jwt.Audience
-	jwksURL  string
-	client   *http.Client
+	issuer          string
+	audiences       jwt.Audience
+	jwksURL         string
+	client          *http.Client
+	machineAudience func(context.Context, string, string, []string) (bool, error)
 
 	mu        sync.Mutex
 	keys      jose.JSONWebKeySet
@@ -35,11 +40,12 @@ type OIDCAuthenticator struct {
 
 type oidcTokenClaims struct {
 	jwt.Claims
-	Organization string   `json:"organization"`
-	Tenant       string   `json:"tenant"`
-	Roles        []string `json:"roles"`
-	Role         string   `json:"role"`
+	Organization string     `json:"organization"`
+	Tenant       string     `json:"tenant"`
+	Roles        []string   `json:"roles"`
+	Role         string     `json:"role"`
 	Scope        ScopeClaim `json:"scope"`
+	TokenType    string     `json:"tokenType"`
 }
 
 type ScopeClaim []string
@@ -82,28 +88,58 @@ func NewOIDCAuthenticator(issuer, audience, jwksURL string) (*OIDCAuthenticator,
 func (a *OIDCAuthenticator) Authenticate(ctx context.Context, rawToken string) (*UserClaims, error) {
 	token, err := jwt.ParseSigned(rawToken)
 	if err != nil || len(token.Headers) != 1 || token.Headers[0].KeyID == "" || !allowedOIDCAlgorithm(token.Headers[0].Algorithm) {
-		return nil, ErrInvalidToken
+		return nil, authenticationFailure("OIDC_TOKEN_FORMAT_INVALID")
 	}
 
 	key, err := a.keyFor(ctx, token.Headers[0].KeyID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return nil, err
 	}
 
 	var claims oidcTokenClaims
 	if err := token.Claims(key.Key, &claims); err != nil {
-		return nil, ErrInvalidToken
+		return nil, authenticationFailure("OIDC_SIGNATURE_OR_CLAIMS_INVALID")
+	}
+	// Casdoor distinguishes API, ID and refresh JWTs with this signed claim.
+	// Providers without it retain their existing audience/scope contract.
+	if claims.TokenType != "" && claims.TokenType != "access-token" {
+		return nil, authenticationFailure("OIDC_TOKEN_TYPE_INVALID")
 	}
 	scopes := []string(claims.Scope)
 	tenant := firstNonEmpty(claims.Tenant, claims.Organization)
 	if tenant == "" && hasScope(scopes, "teleop:vehicle") {
 		tenant = "vehicle"
 	}
-	if !audienceAllowed(claims.Audience, a.audiences) || claims.Validate(jwt.Expected{Issuer: a.issuer, Time: time.Now()}) != nil || claims.Subject == "" || len(scopes) == 0 {
-		return nil, ErrInvalidToken
+	if claims.Issuer != a.issuer {
+		return nil, authenticationFailure("OIDC_ISSUER_MISMATCH")
+	}
+	if claims.Validate(jwt.Expected{Issuer: a.issuer, Time: time.Now()}) != nil {
+		return nil, authenticationFailure("OIDC_TIME_INVALID")
+	}
+	if claims.Subject == "" {
+		return nil, authenticationFailure("OIDC_SUBJECT_MISSING")
+	}
+	if len(scopes) == 0 {
+		return nil, authenticationFailure("OIDC_SCOPE_MISSING")
+	}
+	if !audienceAllowed(claims.Audience, a.audiences) {
+		allowed := false
+		if a.machineAudience != nil && claims.TokenType == "access-token" &&
+			claims.Expiry != nil && len(scopes) == 1 && scopes[0] == "teleop:vehicle" {
+			allowed, err = a.machineAudience(ctx, claims.Issuer, claims.Subject, []string(claims.Audience))
+			if err != nil {
+				return nil, authenticationFailure("OIDC_MACHINE_AUTHORITY_UNAVAILABLE")
+			}
+		}
+		if !allowed {
+			return nil, authenticationFailure("OIDC_AUDIENCE_MISMATCH")
+		}
 	}
 
 	return &UserClaims{
+		Issuer:       a.issuer,
+		Audiences:    append([]string(nil), claims.Audience...),
+		TokenType:    claims.TokenType,
 		Name:         claims.Subject,
 		Organization: tenant,
 		Roles:        claimRoles(claims),
@@ -154,7 +190,7 @@ func (a *OIDCAuthenticator) keyFor(ctx context.Context, keyID string) (jose.JSON
 		keys = a.keys.Key(keyID)
 	}
 	if len(keys) != 1 {
-		return jose.JSONWebKey{}, errors.New("signing key not found")
+		return jose.JSONWebKey{}, authenticationFailure("OIDC_SIGNING_KEY_UNAVAILABLE")
 	}
 	return keys[0], nil
 }
@@ -162,22 +198,22 @@ func (a *OIDCAuthenticator) keyFor(ctx context.Context, keyID string) (jose.JSON
 func (a *OIDCAuthenticator) refreshKeys(ctx context.Context) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, a.jwksURL, nil)
 	if err != nil {
-		return fmt.Errorf("create JWKS request: %w", err)
+		return authenticationFailure("OIDC_JWKS_REQUEST_FAILED")
 	}
 	response, err := a.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("fetch JWKS: %w", err)
+		return authenticationFailure("OIDC_JWKS_FETCH_FAILED")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("fetch JWKS: status %d", response.StatusCode)
+		return authenticationFailure("OIDC_JWKS_HTTP_ERROR")
 	}
 	var keys jose.JSONWebKeySet
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&keys); err != nil {
-		return fmt.Errorf("decode JWKS: %w", err)
+		return authenticationFailure("OIDC_JWKS_INVALID")
 	}
 	if len(keys.Keys) == 0 {
-		return errors.New("JWKS contains no keys")
+		return authenticationFailure("OIDC_JWKS_INVALID")
 	}
 	a.keys = keys
 	a.fetchedAt = time.Now()

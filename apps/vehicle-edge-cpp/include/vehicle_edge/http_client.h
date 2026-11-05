@@ -11,6 +11,8 @@ namespace vehicle_edge {
 struct HTTPResponse {
   long status;
   std::string body;
+  std::string request_id;
+  std::string error_code;
 };
 
 Json::Value ParseHTTPJSON(const std::string &text);

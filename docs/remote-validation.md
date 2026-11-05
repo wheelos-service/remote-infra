@@ -55,9 +55,12 @@ sim-006 在 20 秒恢复及 sim-008 unknown。开发者工具 Network 应只有�
                          ^ Gateway 控制授权和交接栅栏
 ```
 
-服务端使用**独立测试配置和资源**，先登记模拟车辆，配置
-`VEHICLE_REGISTRY_JSON`、`VEHICLE_SUBJECT_MAP_JSON` 和操作员
-`VEHICLE_ACL_JSON`，将 `CLIENT_ORIGIN` 与前端 origin 精确对齐。
+服务端使用**独立测试配置和资源**，先登记模拟车辆。优先使用
+`AUTHORIZATION_POLICY_FILE` 指向的单一授权策略文件，在文件内配置车辆
+注册、设备 OIDC subject 映射和操作员 ACL；`CLIENT_ORIGIN` 与前端 origin
+必须精确对齐。旧的 `VEHICLE_REGISTRY_JSON`、
+`VEHICLE_SUBJECT_MAP_JSON`、`VEHICLE_ACL_JSON` 仅用于兼容迁移，不要与策略
+文件同时设置。
 不要直接覆盖现有 `.env` 或重启共享部署。受控测试环境启动示例：
 
 ```bash
@@ -164,8 +167,17 @@ OIDC_JWKS_URL=https://casdoor.example.com/.well-known/jwks.json
 CLIENT_ORIGIN=http://127.0.0.1:8000
 API_DOMAIN=api.example.com
 RTC_DOMAIN=rtc.example.com
-VEHICLE_ACL_JSON=[{"user_id":"operator-001","tenant_id":"fleet-a","vehicle_id":"car-001","permissions":["observe","control"]}]
+AUTHORIZATION_POLICY_DIR=/path/to/teleop-auth
+AUTHORIZATION_POLICY_FILE=/etc/teleop-auth/authorization-policy.json
 ```
+
+将车辆注册、OIDC subject 映射和操作员 ACL 放入该文件。不要同时设置
+`VEHICLE_REGISTRY_JSON`、`VEHICLE_SUBJECT_MAP_JSON` 或 `VEHICLE_ACL_JSON`；
+迁移时清空这些旧变量。文件格式见
+[`authentication.md`](authentication.md)。
+先将 `infra/local-dev/authorization-policy/authorization-policy.example.json`
+复制为挂载目录中的 `authorization-policy.json`，再填写隔离测试的设备
+subject 和操作员 ACL。
 
 Start all server services, including the TLS reverse proxy:
 

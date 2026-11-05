@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { organizationHeaders, requestOrganization } from './organization-context'
 import {
   base64, controlCommandSchema, controlFeedbackSchema, neutralCommand, signControl,
   type ControlCommand, type ControlFeedback,
@@ -47,6 +48,7 @@ export class SimulationController {
   private mediaReady = true
   private releaseTask?: Promise<void>
   private readonly instanceId = crypto.randomUUID()
+  private readonly organizationId = requestOrganization()
 
   constructor(
     readonly vehicleId: string,
@@ -65,7 +67,7 @@ export class SimulationController {
         (async () => {
           const response = await this.request(`${this.gateway.replace(/\/$/, '')}${path}`, {
             method: body === undefined ? 'GET' : 'POST',
-            headers: { Authorization: `Bearer ${this.bearer}`, 'Content-Type': 'application/json' },
+            headers: { Authorization: `Bearer ${this.bearer}`, ...organizationHeaders(this.organizationId), 'Content-Type': 'application/json' },
             body: body === undefined ? undefined : JSON.stringify(body),
             signal: abort.signal,
             cache: 'no-store',

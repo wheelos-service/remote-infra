@@ -57,7 +57,7 @@ func (api *VehicleTelemetryAPI) post(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden: vehicle identity mismatch", http.StatusForbidden)
 		return
 	}
-	if _, ok := api.registry.byID[vehicleID]; !ok {
+	if _, ok := requestVehicleRegistry(r, api.registry).byID[vehicleID]; !ok {
 		http.Error(w, "vehicle not registered", http.StatusNotFound)
 		return
 	}
@@ -119,7 +119,7 @@ func (api *VehicleTelemetryAPI) post(w http.ResponseWriter, r *http.Request) {
 
 func (api *VehicleTelemetryAPI) list(w http.ResponseWriter, r *http.Request) {
 	claims := r.Context().Value("user").(*UserClaims)
-	if !canObserve(claims) {
+	if !canReadVehicles(claims) {
 		http.Error(w, "forbidden: observer role required", http.StatusForbidden)
 		return
 	}
@@ -127,8 +127,8 @@ func (api *VehicleTelemetryAPI) list(w http.ResponseWriter, r *http.Request) {
 		Vehicles []vehicleStateResponse `json:"vehicles"`
 	}{Vehicles: make([]vehicleStateResponse, 0)}
 	now := api.states.now()
-	for _, vehicle := range api.registry.vehicles {
-		if !api.authorizer.Authorize(claims, vehicle.VehicleID, ObservePermission) {
+	for _, vehicle := range requestVehicleRegistry(r, api.registry).vehicles {
+		if !api.authorizer.Authorize(claims, vehicle.VehicleID, VehicleReadPermission) {
 			continue
 		}
 		entry, err := api.entry(r, vehicle, now)
@@ -144,11 +144,11 @@ func (api *VehicleTelemetryAPI) list(w http.ResponseWriter, r *http.Request) {
 func (api *VehicleTelemetryAPI) get(w http.ResponseWriter, r *http.Request) {
 	claims := r.Context().Value("user").(*UserClaims)
 	vehicleID := r.PathValue("vehicle_id")
-	if !canObserve(claims) || !api.authorizer.Authorize(claims, vehicleID, ObservePermission) {
+	if !canReadVehicles(claims) || !api.authorizer.Authorize(claims, vehicleID, VehicleReadPermission) {
 		http.Error(w, "forbidden: vehicle observe permission required", http.StatusForbidden)
 		return
 	}
-	vehicle, ok := api.registry.byID[vehicleID]
+	vehicle, ok := requestVehicleRegistry(r, api.registry).byID[vehicleID]
 	if !ok {
 		http.Error(w, "vehicle not registered", http.StatusNotFound)
 		return

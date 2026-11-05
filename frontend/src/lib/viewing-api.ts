@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { teleopConfig } from './teleop-config'
+import { organizationHeaders, requestOrganization } from './organization-context'
 
 export const VIEWING_REQUEST_TIMEOUT_MS = 5_000
 const gatewayUrl = teleopConfig.gatewayUrl.replace(/\/$/, '')
@@ -35,7 +36,7 @@ export function isVehicleVideoSender(identity: string, vehicleId: string): boole
   return identity === `vehicle-${vehicleId}`
 }
 
-async function post(path: string, bearer: string, body?: object, keepalive = false): Promise<unknown> {
+async function post(path: string, bearer: string, body?: object, keepalive = false, organizationId = requestOrganization()): Promise<unknown> {
   const controller = new AbortController()
   let timeout: ReturnType<typeof setTimeout> | undefined
   try {
@@ -45,6 +46,7 @@ async function post(path: string, bearer: string, body?: object, keepalive = fal
           method: 'POST',
           headers: {
             Authorization: `Bearer ${bearer}`,
+            ...organizationHeaders(organizationId),
             ...(body ? { 'Content-Type': 'application/json' } : {}),
           },
           body: body ? JSON.stringify(body) : undefined,
@@ -97,8 +99,8 @@ function withDeadline<T extends z.infer<typeof viewingLeaseSchema>>(
   return { ...lease, deadlineMs }
 }
 
-export async function releaseViewing(vehicleId: string, sessionId: string, bearer: string) {
-  await post(`${path(vehicleId, sessionId)}/release`, bearer, undefined, true)
+export async function releaseViewing(vehicleId: string, sessionId: string, bearer: string, organizationId = requestOrganization()) {
+  await post(`${path(vehicleId, sessionId)}/release`, bearer, undefined, true, organizationId)
 }
 
 export async function acquireViewing(
@@ -106,6 +108,7 @@ export async function acquireViewing(
   bearer: string,
   requestId: string,
   clientInstanceId: string,
+  organizationId = requestOrganization(),
 ): Promise<ViewingAcquire> {
   const uuidV4 = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
   uuidV4.parse(requestId)
@@ -114,7 +117,7 @@ export async function acquireViewing(
   const raw = await post(`${path(vehicleId)}/acquire`, bearer, {
     request_id: requestId,
     client_instance_id: clientInstanceId,
-  })
+  }, false, organizationId)
   try {
     return withDeadline(viewingAcquireSchema.parse(raw), vehicleId, startedAt)
   } catch {
@@ -124,7 +127,7 @@ export async function acquireViewing(
       viewing_session_id: z.string().uuid(),
     }).safeParse(raw)
     if (identity.success) {
-      await releaseViewing(vehicleId, identity.data.viewing_session_id, bearer).catch(() => {
+      await releaseViewing(vehicleId, identity.data.viewing_session_id, bearer, organizationId).catch(() => {
         console.error('释放无效监看租约失败；租约将在 30 秒 TTL 后失效')
       })
     }
@@ -136,9 +139,10 @@ export async function renewViewing(
   vehicleId: string,
   sessionId: string,
   bearer: string,
+  organizationId = requestOrganization(),
 ): Promise<ViewingLease> {
   const startedAt = performance.now()
-  const raw = await post(`${path(vehicleId, sessionId)}/renew`, bearer)
+  const raw = await post(`${path(vehicleId, sessionId)}/renew`, bearer, undefined, false, organizationId)
   try {
     return withDeadline(viewingLeaseSchema.parse(raw), vehicleId, startedAt, sessionId)
   } catch {

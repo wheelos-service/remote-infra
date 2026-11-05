@@ -7,7 +7,7 @@
 }
 
 {$RTC_DOMAIN} {
-    reverse_proxy livekit:7880
+    reverse_proxy {$RTC_UPSTREAM:livekit:7880}
 }
 
 {$CASDOOR_DOMAIN} {

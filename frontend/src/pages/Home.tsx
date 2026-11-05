@@ -7,7 +7,7 @@ import FleetOverviewPage from './FleetOverview'
 import RemoteDriving from './RemoteDriving'
 import VehicleAlertCenter from './VehicleAlertCenter'
 import VehicleMonitor from './VehicleMonitor'
-import { SideNav, TopBar, type MainSection } from '../features/layout/OperationsLayout'
+import { OperationsShell, TopBar, type MainSection } from '../features/layout/OperationsLayout'
 import TaskCenter from '../features/tasks/TaskCenter'
 
 const HomePage: React.FC = () => {
@@ -129,11 +129,7 @@ const HomePage: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-50 flex">
-      <SideNav activeSection={activeSection} onChangeSection={handleChangeSection} />
-      <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
-        <TopBar />
-        <main className="flex-1 p-4 xl:p-6 overflow-hidden">
+    <OperationsShell activeSection={activeSection} onChangeSection={handleChangeSection} topBar={<TopBar />}>
           {returnToAlerts && (activeSection === 'monitor' || activeSection === 'drive') &&
             <button type="button" onClick={() => { setActiveSection('alerts'); setReturnToAlerts(false) }}
               className="mb-3 rounded border border-sky-800 px-3 py-1.5 text-xs text-sky-200">← 返回告警处置</button>}
@@ -148,9 +144,7 @@ const HomePage: React.FC = () => {
                 setActiveSection('monitor')
               }} />
           </div>}
-        </main>
-      </div>
-    </div>
+    </OperationsShell>
   )
 }
 

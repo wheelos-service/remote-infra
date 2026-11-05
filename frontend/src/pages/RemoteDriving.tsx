@@ -3,6 +3,7 @@ import { useMockFleet } from '../app/MockFleetProvider'
 import { overviewVehicle } from '../lib/fleet-overview'
 import type { MonitorListState } from '../lib/vehicle-monitor'
 import TeleopWorkbench from './TeleopWorkbench'
+import type { OverviewVehicle } from '../lib/fleet-overview'
 
 interface Props {
   vehicleId: string | null
@@ -35,10 +36,21 @@ export default function RemoteDriving({ vehicleId, list, onListChange, onEnter, 
   }
   const visible = rows.filter((row) => `${row.id} ${row.name}`.toLowerCase().includes(list.query.trim().toLowerCase()) &&
     (list.filter !== 'offline' || !row.online))
+  return <RemoteDrivingList rows={rows} visibleRows={visible} list={list} onListChange={onListChange} onEnter={onEnter} />
+}
+
+export function RemoteDrivingList({ rows, visibleRows, list, onListChange, onEnter, authenticated = false, canObserve = true }: {
+  rows: OverviewVehicle[]; visibleRows?: OverviewVehicle[]; list: MonitorListState; onListChange: Props['onListChange'];
+  onEnter: Props['onEnter']; authenticated?: boolean; canObserve?: boolean
+}) {
+  const scroll = useRef<HTMLDivElement>(null)
+  useEffect(() => { if (scroll.current) scroll.current.scrollTop = list.scrollTop }, [list.query, list.filter])
+  const visible = visibleRows ?? rows.filter(row => `${row.id} ${row.name}`.toLowerCase().includes(list.query.trim().toLowerCase()) &&
+    (list.filter !== 'offline' || !row.online))
   return <div data-testid="remote-driving-list" className="flex h-full min-h-0 flex-col gap-4">
     <header className="flex flex-wrap items-center justify-between gap-2"><h1 className="text-base font-semibold">远程驾驶</h1>
       <span className="text-xs text-slate-400">选择车辆进入工作台 · 不自动申请控制权</span>
-      <a href="#/teleop" className="text-xs text-sky-200">C++ 实时三相机工作台（独立授权目录）</a></header>
+      {!authenticated && <span className="text-xs text-amber-200">布局预览 · 非真实车辆</span>}</header>
     <div className="flex flex-wrap gap-3">
       <input aria-label="搜索远程驾驶车辆" placeholder="搜索车辆编号或名称" value={list.query}
         onChange={(event) => onListChange({ ...list, query: event.target.value, scrollTop: 0 })}
@@ -54,18 +66,18 @@ export default function RemoteDriving({ vehicleId, list, onListChange, onEnter, 
         <thead className="border-b border-slate-800 text-slate-500"><tr>
           {['车辆', '连接', '驾驶模式', '远程会话', '视频状态'].map((label) => <th key={label} className="px-4 py-3 font-normal">{label}</th>)}
         </tr></thead>
-        <tbody>{visible.map((row) => <tr key={row.id} onClick={() => onEnter(row.id)}
+        <tbody>{visible.map((row) => <tr key={row.id} onClick={() => { if (canObserve) onEnter(row.id) }}
           className="cursor-pointer border-b border-slate-800 hover:bg-slate-800/50 focus-within:bg-slate-800/50">
-          <td className="px-4 py-4"><button type="button" aria-label={`进入 ${row.id} 工作台`} className="w-full text-left">
+          <td className="px-4 py-4"><button type="button" disabled={!canObserve} aria-label={`进入 ${row.id} 工作台`} className="w-full text-left disabled:opacity-40">
             <strong>{row.id}</strong><span className="mt-1 block text-[10px] text-slate-500">{row.name.replace(`${row.id} · `, '')}</span>
           </button></td>
           <td className={`px-4 py-4 ${row.online ? 'text-emerald-300' : 'text-slate-400'}`}>{row.online ? '在线' : '离线'}</td>
           <td className="px-4 py-4">{row.modeLabel}</td><td className="px-4 py-4">{row.control}</td>
-          <td className="px-4 py-4 text-slate-400">未接入</td>
+          <td className="px-4 py-4 text-slate-400">{authenticated ? canObserve ? '未连接 · 选择后开始监看' : '当前角色无视频权限' : '未接入'}</td>
         </tr>)}</tbody>
       </table>
       {!visible.length && <p className="p-8 text-center text-xs text-slate-400">没有匹配车辆</p>}
     </section>
-    <p className="text-[11px] text-slate-500">Mock 演示 · 视频与控制未接入，工作台仅供监看布局预览。远程会话状态不代表车辆可控制。</p>
+    {!authenticated && <p className="text-[11px] text-slate-500">Mock 演示 · 视频与控制未接入，工作台仅供监看布局预览。远程会话状态不代表车辆可控制。</p>}
   </div>
 }

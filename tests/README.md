@@ -1,5 +1,53 @@
 # Tests
 
+## Managed authentication acceptance
+
+```bash
+python3 tests/casdoor-contract.py
+python3 tests/managed-auth-chain.py
+```
+
+Requires Docker and Linux host networking, plus Go 1.24 or the `golang:1.24`
+image. Both runners create uniquely named disposable services on loopback,
+never use production credentials or modify the Compose deployment, and clean
+their containers on exit. Docker fallback caches Go dependencies under the
+ignored C++ build directory. The opt-in Go tests skip in ordinary unit runs.
+
+The Casdoor runner pins `casbin/casdoor:v4.25.0`. It verifies management
+credentials in Basic headers (not URLs), person/application creation and
+reconciliation, actual public-client S256 PKCE, incorrect verifier/code replay,
+independent vehicle client credentials, scope/secret rejection and rotation.
+Actual provider JWTs pass through the production Gateway JWKS verifier and
+PostgreSQL subject binding/role enforcement. It uses disposable SQLite for
+Casdoor and PostgreSQL for Gateway; it does not migrate Casdoor's deployed DB.
+The same runner starts actual Gateway HTTP onboarding routes, configures
+Casdoor's native Email provider against a loopback SMTP sink, consumes the
+invitation verification code, completes native account recovery with browser
+cookie continuity from the actual delivered setup link and performs a new
+email/password public S256 PKCE login. It verifies default no-vehicle authority,
+later explicit selected authorization, generated organization/number/random
+vehicle IDs and idempotent submissions without stopping a live
+RTC reader. The actual Python installer redeems a one-time ticket, saves a
+mode-0600 configuration, obtains OAuth credentials and verifies identity/
+vehicle mapping before reporting completion. Explicit recovery rotates a
+previously delivered secret; ticket replay is rejected.
+It does not prove production email delivery, camera/actuation readiness, or
+an existing deployment using another version.
+
+Installer rejection and filesystem checks can also run without services:
+
+```bash
+python3 -m unittest discover -s tests -p test_vehicle_auth_installer.py
+```
+
+The RTC runner pins `livekit/livekit-server:v1.13.11`. It verifies a real
+WebSocket upgrade/join, server-issued reconnect-token signature/expiry,
+maintenance rejection for old and refreshed tokens, actual RoomService drain,
+and PostgreSQL quiet state across runtime reconstruction. It waits the actual
+**11-minute interval**, without advancing a test clock. Allow about 15 minutes
+plus cold dependency downloads. It verifies signaling/authorization, not
+camera media, physical control, or an external production proxy topology.
+
 ## C++ Data SDK chain
 
 ```bash

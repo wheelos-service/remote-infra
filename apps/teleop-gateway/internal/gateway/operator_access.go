@@ -38,14 +38,27 @@ func resolveOperatorAccess(claims *UserClaims, requested string) (OperatorAccess
 }
 
 func canObserve(claims *UserClaims) bool {
+	if claims.managed != nil {
+		return claims.UserID != ""
+	}
 	return hasRole(claims.Roles, "observer") || canControl(claims)
 }
 
 func canControl(claims *UserClaims) bool {
+	if claims.managed != nil {
+		return hasRole(claims.Roles, "remote_operator")
+	}
 	return hasRole(claims.Roles, "controller") ||
 		hasRole(claims.Roles, "supervisor") ||
 		hasRole(claims.Roles, "operator") ||
 		hasRole(claims.Roles, "admin")
+}
+
+func canReadVehicles(claims *UserClaims) bool {
+	if claims.managed != nil {
+		return claims.UserID != ""
+	}
+	return canObserve(claims)
 }
 
 func operatorVideoGrant(vehicleID string, access OperatorAccess) *auth.VideoGrant {

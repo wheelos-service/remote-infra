@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { organizationHeaders } from './organization-context'
 import { teleopConfig } from './teleop-config'
 import { newViewingId as newRequestId } from './viewing-api'
 
@@ -127,7 +128,7 @@ async function request(vehicle: string, path: string, bearer: string, method: 'G
   try {
     return await Promise.race([(async () => {
       const response = await fetch(`${gateway}/api/vehicles/${encodeURIComponent(vehicle)}/data${path}`, {
-        method, headers: { Authorization: `Bearer ${bearer}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        method, headers: { Authorization: `Bearer ${bearer}`, ...organizationHeaders(), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
         body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal, cache: 'no-store',
       })
       const raw = await response.text()

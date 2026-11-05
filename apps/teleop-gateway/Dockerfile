@@ -11,13 +11,15 @@ COPY . .
 # ensure module requirements are populated and deps downloaded
 RUN go mod tidy
 # static build for smaller, portable binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /teleop-backend ./cmd/teleop-gateway
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /teleop-backend ./cmd/teleop-gateway \
+    && CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /auth-admin ./cmd/auth-admin
 
 FROM alpine:3.20
 RUN addgroup -S app && adduser -S app -G app \
     && mkdir -p /var/lib/teleop && chown app:app /var/lib/teleop \
     && chmod 0700 /var/lib/teleop
 COPY --from=build /teleop-backend /usr/local/bin/teleop-backend
+COPY --from=build /auth-admin /usr/local/bin/auth-admin
 ENV OPERATIONS_DB_PATH=/var/lib/teleop/operations.db
 USER app
 EXPOSE 8080

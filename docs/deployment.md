@@ -51,7 +51,22 @@ CLIENT_ORIGIN=https://client.example.com
 CLIENT_DOMAIN=client.example.com
 API_DOMAIN=api.example.com
 RTC_DOMAIN=rtc.example.com
+AUTHORIZATION_POLICY_DIR=/etc/teleop-auth
+AUTHORIZATION_POLICY_FILE=/etc/teleop-auth/authorization-policy.json
 ```
+
+Place the non-secret vehicle/operator authorization policy at
+`AUTHORIZATION_POLICY_DIR/authorization-policy.json` on the host. It replaces
+the three legacy `VEHICLE_REGISTRY_JSON`, `VEHICLE_SUBJECT_MAP_JSON`, and
+`VEHICLE_ACL_JSON` settings; do not configure both forms. Keep per-vehicle
+OAuth client secrets in each vehicle's protected config, not this server-side
+policy file. See [authentication.md](authentication.md) for its schema and
+the distinct operator and vehicle token flows.
+
+For example, copy
+`infra/local-dev/authorization-policy/authorization-policy.example.json` to
+`/etc/teleop-auth/authorization-policy.json` before starting Compose, then
+populate it with registered vehicle subjects and operator grants.
 
 Start the services and verify health:
 
@@ -62,6 +77,51 @@ curl https://api.example.com/healthz
 curl https://api.example.com/readyz
 docker compose logs -f teleop-backend livekit caddy
 ```
+
+## Optional managed authorization pilot
+
+The default deployment above keeps static authorization. The separate
+`docker-compose.authorization.yml` overlay opts into the single-Gateway
+managed deployment and adds PostgreSQL 16 with a persistent volume and
+no host-published database port. It clears the static policy/JSON variables
+and requires OIDC. Do not mix the two sources or fall back to static policy
+when the authorization database is unavailable.
+
+The overlay also pins LiveKit `v1.13.11` and changes the cloud RTC proxy to the
+Gateway's signaling gate. For managed mode, **all** public `/rtc` signaling
+must pass through that gate; do not combine this overlay with
+`docker-compose.no-domain.yml` or expose LiveKit `7880` directly. The version
+and ingress assertion flags must describe the actual deployed topology.
+Use `--profile cloud` to start the Caddy entry after bootstrap and frontend
+configuration; an alternative external HTTPS proxy needs the same exclusive
+Gateway RTC routing.
+
+Set `AUTHORIZATION_POSTGRES_PASSWORD` to a dedicated database password in the
+protected `.env`, and set `AUTHORIZATION_DATABASE_URL` to the corresponding
+PostgreSQL URL with host `authorization-db`, database/user
+`teleop_authorization`. URL-encode password components; never put the actual
+URL in documentation, browser runtime configuration or logs. For this
+private Compose network only, the URL may select `sslmode=disable`; use
+verified TLS when crossing hosts.
+
+For optional automatic onboarding, use the existing protected authorization
+directory mount and set `AUTHORIZATION_ONBOARDING_CONFIG_FILE` to its
+container-side configuration path. Casdoor alone owns Email/SMTP and personnel
+recovery; no second mail service is needed. See the exact protected configuration
+and installation workflow in [auth-management.md](auth-management.md).
+
+Validate the merged configuration without starting services:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.authorization.yml config --quiet
+```
+
+Keep the same overlay on subsequent commands. Do not start a second Gateway
+against the same database or bypass a rejected drain by restarting with a
+different policy source. Retain the Redis persistence and operations volume.
+See [managed pilot workflow and limitations](auth-management.md) before
+provisioning any identities. This overlay is not a production online-revocation
+or physical-driving qualification.
 
 ## Client Deployment
 
@@ -117,12 +177,13 @@ frontend; no HTTP mixed-content endpoint is used.
 The production real-time entry is:
 
 ```text
-https://client.example.com/#/teleop
+https://client.example.com/#/?page=drive
 ```
 
 Use OIDC Authorization Code + PKCE. The client may receive public OIDC values such as `clientId` and endpoint URLs, but never a client secret, access token, or LiveKit API secret.
 
-The home route remains an isolated Mock. Configure the public runtime settings
+The home route is the authenticated unified platform; Mock requires explicit
+development preview. Configure the public runtime settings
 as described in [`frontend/README.md`](../frontend/README.md); enable simulation
 control explicitly and only for allowlisted simulated vehicles.
 

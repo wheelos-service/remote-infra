@@ -34,6 +34,13 @@ edge_sdk_library(transport VehicleAuthSDK auth src/common/http_client.cc)
 target_link_libraries(edge_transport PUBLIC edge_config CURL::libcurl)
 edge_sdk_library(auth VehicleAuthSDK auth src/auth/auth_client.cc)
 target_link_libraries(edge_auth PUBLIC edge_transport)
+edge_sdk_library(auth_diagnostics VehicleAuthSDK auth
+  src/apps/vehicle_auth_diagnostics.cc)
+target_link_libraries(edge_auth_diagnostics PUBLIC edge_auth)
+add_executable(vehicle_auth_check src/apps/vehicle_auth_check.cc)
+target_link_libraries(vehicle_auth_check PRIVATE edge_auth_diagnostics)
+target_compile_options(vehicle_auth_check PRIVATE -Wall -Wextra -Wpedantic -Werror)
+install(TARGETS vehicle_auth_check RUNTIME DESTINATION bin COMPONENT auth)
 edge_sdk_library(teleop VehicleTeleopSDK teleop
   src/teleop/teleop_client.cc src/teleop/media_demand.cc
   src/teleop/media_service.cc src/teleop/encoded_video.cc)
@@ -62,6 +69,7 @@ endif()
 
 install(FILES include/vehicle_edge/state_cache.h include/vehicle_edge/config.h
   include/vehicle_edge/http_client.h include/vehicle_edge/auth_client.h
+  include/vehicle_edge/diagnostics.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vehicle_edge COMPONENT auth)
 install(FILES include/vehicle_edge/teleop_client.h include/vehicle_edge/media_demand.h
   include/vehicle_edge/media_service.h include/vehicle_edge/encoded_video.h
@@ -200,6 +208,11 @@ if(BUILD_TESTING)
   target_link_libraries(telemetry_test PRIVATE edge_telemetry)
   target_compile_options(telemetry_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME telemetry_test COMMAND telemetry_test)
+  add_executable(auth_diagnostics_test tests/auth_diagnostics_test.cc)
+  target_link_libraries(auth_diagnostics_test PRIVATE edge_auth_diagnostics)
+  target_compile_options(auth_diagnostics_test PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME auth_diagnostics_test COMMAND auth_diagnostics_test)
   add_executable(media_test tests/media_test.cc)
   target_link_libraries(media_test PRIVATE edge_telemetry)
   target_compile_options(media_test PRIVATE -Wall -Wextra -Wpedantic -Werror)

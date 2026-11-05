@@ -11,7 +11,7 @@ alternative runtime specifications.
 
 | Component | Status | Ownership |
 | --- | --- | --- |
-| `frontend/` | Primary browser | Mock home; authorized three-front-camera `/#/teleop` with explicit v2 simulation |
+| `frontend/` | Primary browser | Unified authenticated `/#/?page=…` operations; three-front-camera drive workbench with explicit v2 simulation; explicit development Mock preview only |
 | `packages/teleop-shared/` | Shared library | Input/gamepad/view state machines only; no protocol or authorization |
 | `apps/teleop-gateway/` | Primary server | Identity/ACL, Redis leases and handover fences, HTTPS data and SQLite persistence |
 | `apps/vehicle-edge-cpp/` | Primary vehicle SDK | Separate Auth/Data/Teleop, native adapters and isolated RTC worker |
@@ -21,6 +21,16 @@ alternative runtime specifications.
 Legacy runtimes are not built or launched by the primary frontend/Compose path.
 Do not remove them while explicit legacy tests/deployment consumers remain.
 The shared library no longer depends on either legacy runtime.
+
+The opt-in [managed authorization pilot](auth-management.md) is a new,
+single-Gateway deployment mode, not a transparent import of legacy JWT roles
+or static ACLs. Its `/#/admin` UI supports opt-in automatic Casdoor onboarding,
+with manually verified identity bindings as the fallback, fixed business roles
+and vehicle ranges. Fresh automatic onboarding may run online; existing rights
+changes retain the maintenance/drain boundary. Default static mode remains
+compatible. Managed mode is limited to monitoring and explicitly allowlisted
+v2 simulation; it must not enable legacy physical control or general task
+dispatch merely because a user can request simulation control.
 
 ## Gateway surfaces
 

@@ -19,10 +19,11 @@ integer command contract; only allowlisted simulation is enabled. Gear/mode
 actions are rejected, never downgraded to v1. Actual actuation and physical
 handover remain disabled pending approved interfaces and bench evidence.
 
-The routed React `/#/teleop` workbench uses three independent front cameras
+The unified React `/#/?page=drive` workbench uses three independent front cameras
 (`camera-left/center/right`), center focus and decoded-frame staleness; it has
 no stitching, rear view or single-camera fallback. All three feeds must be fresh
-to enable simulation control. The default home remains an isolated Mock.
+to enable simulation control. Mock is available only through explicit development
+preview; the default entry is the authenticated organization operations platform.
 Neither video readiness nor a signed request is an actuator acknowledgement.
 Device publication remains governed by media demand in the C++ SDK.
 
@@ -46,6 +47,41 @@ docs/                     Current contracts, architecture and operations
 skills, knowledge indexes and implementation notes that point here, not parallel
 architecture specifications. CMake owns portable C++ SDK packaging; Bazel owns
 native Cyber builds. They use the same source implementations.
+
+## Identity and authorization architecture
+
+[authentication-plan.md](authentication-plan.md) defines the full target:
+Casdoor authenticates people and per-vehicle machine clients; the Gateway owns
+business authorization and embeds Go Casbin as its policy engine. Admin APIs,
+the policy enforcement point (PEP), provisioning orchestration and Control Lease
+remain modules in the same backend, not separate authorization microservices.
+
+The PEP validates JWTs/scopes, resolves trusted identity and resource ownership,
+checks lifecycle state, then calls Casbin for role/action/vehicle-range decisions.
+PostgreSQL stores business lifecycle records and the single authoritative Casbin
+policy set; no parallel RBAC or ACL tables are synchronized with it. Policy
+versions, durable revocation and multi-instance freshness checks are required.
+Redis remains authoritative for live control leases, revisions and handover
+fences. Vehicle-side session/signature/sequence/expiry checks remain independent.
+Existing SQLite operations storage is not migrated as part of this design.
+
+After one-time platform setup, the target administrator workflow is to invite
+people, register vehicles and assign organization roles plus vehicle ranges.
+The backend handles identity binding, independent machine credentials, policy
+persistence and diagnostics. Invitation acceptance and secure vehicle credential
+installation/verification remain necessary; enrollment is not driving readiness.
+Current runtime configuration remains documented in
+[authentication.md](authentication.md). The default deployment retains static
+authorization. An opt-in, single-Gateway
+[managed deployment](auth-management.md) connects Casbin/PostgreSQL to controlled
+registration and fixed-role assignment. Optional single-entry onboarding adds
+a durable Gateway worker, Casdoor-native invitations and protected vehicle
+installation, without a second SMTP configuration or per-vehicle deployment
+audience edits. Manual identity binding remains the fallback. Only fresh
+onboarding runs online; existing rights changes retain conservative session
+drain boundaries. Production online revocation and multi-instance convergence
+are not implied. The current phased plan and evolution triggers are
+in [`.agents/auth-management-plan.md`](../.agents/auth-management-plan.md).
 
 ## Legacy v1 integration reference
 
@@ -119,6 +155,7 @@ Operators request either `access=observer` or `access=controller`. Observers can
 
 - `AUTH_MODE=dev` is for local development only. Production uses `AUTH_MODE=oidc` with JWT signature, issuer, audience, expiry, subject, tenant, role, and scope validation.
 - Vehicle ACLs independently authorize each operator for a vehicle and `observe`/`control` permission. No matching ACL entry means deny.
+- Preferred vehicle/operator policy configuration is one non-secret authorization policy file containing the registered vehicle, device OIDC subject mapping, and operator ACL. OAuth client secrets remain outside that file; see [authentication.md](authentication.md).
 - The LiveKit API secret remains in the Gateway. Browsers and vehicles receive only short-lived room tokens.
 - Device credentials belong in a root-owned `0600` configuration file on the vehicle and must not be passed through command-line arguments, environment variables, or images.
 - Production traffic must use HTTPS/WSS. Redis must not be publicly exposed.

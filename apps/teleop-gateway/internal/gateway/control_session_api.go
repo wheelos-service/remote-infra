@@ -59,6 +59,10 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid Ed25519 public key", http.StatusBadRequest)
 		return
 	}
+	if claims.managed != nil && request.ProtocolVersion != 2 {
+		http.Error(w, "managed control requires v2 simulation", http.StatusForbidden)
+		return
+	}
 
 	now := time.Now()
 	session := ControlSession{
@@ -89,6 +93,9 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to issue LiveKit token", http.StatusInternalServerError)
 		return
 	}
+	if !reserveManagedToken(w, r, token) {
+		return
+	}
 	if err := controlLeases.AcquireControlSession(r.Context(), session); err != nil {
 		writeControlSessionError(w, err)
 		return
@@ -117,8 +124,13 @@ func handleRenewControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := r.Context().Value("user").(*UserClaims)
-	if _, err := controlRequestOwner(r, r.PathValue("session_id")); err != nil {
+	current, err := controlRequestOwner(r, r.PathValue("session_id"))
+	if err != nil {
 		writeControlSessionError(w, err)
+		return
+	}
+	if claims.managed != nil && (current.ProtocolVersion != 2 || !simulationControlEnabled(current.VehicleID)) {
+		http.Error(w, "managed renewal requires allowlisted v2 simulation", http.StatusForbidden)
 		return
 	}
 	session, err := controlLeases.RenewControlSession(r.Context(), r.PathValue("session_id"), claims.Name)
@@ -195,7 +207,7 @@ func vehicleSelfMatches(claims *UserClaims, vehicleID string, identities *Vehicl
 	if claims == nil || identities == nil || !hasRole(claims.Roles, "vehicle") {
 		return false
 	}
-	resolvedVehicleID, registered := identities.Resolve(claims.Name)
+	resolvedVehicleID, registered := resolveVehicleClaims(claims, identities)
 	return (registered && resolvedVehicleID == vehicleID) ||
 		(!identities.Strict() && claims.Name == vehicleID)
 }

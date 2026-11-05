@@ -32,6 +32,20 @@ Short-lived operator and vehicle LiveKit tokens, Casdoor access tokens, and TURN
 
 API domains, RTC domains, LiveKit key IDs, Casdoor client IDs, room names, vehicle IDs, and operator public keys may be shared as runtime public configuration when appropriate.
 
+Operator and vehicle authentication are separate OAuth client flows over the
+same Gateway OIDC verifier. Use a unique client-credentials identity per
+vehicle; use browser Authorization Code + PKCE for operators. For the request
+flows, one-file vehicle/operator authorization policy, and device auth checker,
+see [authentication.md](authentication.md).
+
+The opt-in [managed pilot](auth-management.md) replaces the static authorization
+source with PostgreSQL-backed bindings and Casbin policies, not the OAuth
+flows or live control Lease. Follow its deployment overlay and protected
+bootstrap procedure consistently. Do not mix static/managed configuration,
+run a second managed Gateway, edit policy tables directly or clear Redis
+fences to force a permission change. Database URLs and bootstrap input files
+are operator-only configuration and must never reach frontend runtime config.
+
 ## Cloud Startup
 
 Set `.env` using server-side environment or a Secret Manager:
@@ -162,7 +176,7 @@ python3 -m http.server 8000 --directory dist
 For production, host the static client at `https://client.example.com/` and use:
 
 ```text
-https://client.example.com/#/teleop
+https://client.example.com/#/?page=drive
 ```
 
 Production authentication uses OIDC Authorization Code + PKCE. The browser receives only public OIDC configuration; access tokens and Ed25519 private keys remain in page memory.
@@ -174,8 +188,12 @@ in [deployment.md](deployment.md).
 
 The current C++ simulator setup is documented in
 [`apps/vehicle-edge-cpp/README.md`](../apps/vehicle-edge-cpp/README.md).
-The home route is Mock; only the authorized `/#/teleop` entry connects to RTC.
+The home route is the unified authenticated operations platform; monitor and
+drive workbenches connect to RTC. Mock requires explicit development preview.
 Simulation control must be explicitly enabled and does not actuate a real vehicle.
+Run `vehicle_auth_check /etc/teleop/device.json` to validate the vehicle's
+protected config, Gateway authentication, device mapping, and token issuance
+without joining a LiveKit room.
 
 ### Legacy Python v1 reference
 

@@ -113,15 +113,17 @@ services:
       OIDC_ISSUER: "${OIDC_ISSUER:-}"
       OIDC_AUDIENCE: "${OIDC_AUDIENCE:-}"
       OIDC_JWKS_URL: "${OIDC_JWKS_URL:-}"
-      VEHICLE_ACL_JSON: "${VEHICLE_ACL_JSON:-[]}"
-      VEHICLE_SUBJECT_MAP_JSON: "${VEHICLE_SUBJECT_MAP_JSON:-{}}"
-      VEHICLE_REGISTRY_JSON: "${VEHICLE_REGISTRY_JSON:-[]}"
+      AUTHORIZATION_POLICY_FILE: "${AUTHORIZATION_POLICY_FILE:-}"
+      VEHICLE_ACL_JSON: "${VEHICLE_ACL_JSON:-}"
+      VEHICLE_SUBJECT_MAP_JSON: "${VEHICLE_SUBJECT_MAP_JSON:-}"
+      VEHICLE_REGISTRY_JSON: "${VEHICLE_REGISTRY_JSON:-}"
       CONTROL_HANDOVER_ACK_ENABLED: "${CONTROL_HANDOVER_ACK_ENABLED:-false}"
       SIMULATED_CONTROL_VEHICLES_JSON: "${SIMULATED_CONTROL_VEHICLES_JSON:-[]}"
       OPERATIONS_DB_PATH: "/var/lib/teleop/operations.db"
       ALLOWED_ORIGINS: "${CLIENT_ORIGIN:-http://localhost:8000}"
     volumes:
       - operations-data:/var/lib/teleop
+      - ${AUTHORIZATION_POLICY_DIR:-./infra/local-dev/authorization-policy}:/etc/teleop-auth:ro
     depends_on:
       livekit:
         condition: service_started
@@ -135,6 +137,7 @@ services:
     environment:
       API_DOMAIN: "${API_DOMAIN:-api.example.com}"
       RTC_DOMAIN: "${RTC_DOMAIN:-rtc.example.com}"
+      RTC_UPSTREAM: "${RTC_UPSTREAM:-livekit:7880}"
       CASDOOR_DOMAIN: "${CASDOOR_DOMAIN:-casdoor.example.com}"
       CASDOOR_UPSTREAM: "${CASDOOR_UPSTREAM:-casdoor:8000}"
       CLIENT_DOMAIN: "${CLIENT_DOMAIN:-client.example.com}"

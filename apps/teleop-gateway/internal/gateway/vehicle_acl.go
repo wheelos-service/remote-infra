@@ -10,8 +10,9 @@ import (
 type VehiclePermission string
 
 const (
-	ObservePermission VehiclePermission = "observe"
-	ControlPermission VehiclePermission = "control"
+	VehicleReadPermission VehiclePermission = "read"
+	ObservePermission     VehiclePermission = "observe"
+	ControlPermission     VehiclePermission = "control"
 )
 
 type VehicleACL struct {
@@ -54,6 +55,12 @@ func NewVehicleAuthorizerFromEnvironment() (*VehicleAuthorizer, error) {
 func (a *VehicleAuthorizer) Authorize(claims *UserClaims, vehicleID string, permission VehiclePermission) bool {
 	if claims == nil || vehicleID == "" {
 		return false
+	}
+	if claims.managed != nil {
+		return claims.managed.permissions[vehicleID][permission]
+	}
+	if permission == VehicleReadPermission {
+		permission = ObservePermission
 	}
 	for _, entry := range a.entries {
 		if entry.UserID != claims.Name || entry.VehicleID != vehicleID {

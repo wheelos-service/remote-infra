@@ -32,6 +32,23 @@ go build -o teleop-backend ./cmd/teleop-gateway
 The Docker Compose service and `infra/scripts/build-backend.sh` use the same
 `./cmd/teleop-gateway` entrypoint.
 
+## Managed authorization pilot
+
+Static mode remains the default. The opt-in single-Gateway pilot uses
+`AUTHORIZATION_MODE=managed`, `AUTHORIZATION_DATABASE_URL`, `AUTH_MODE=oidc`
+and the configured trusted issuer. It rejects mixed static policy settings.
+`AUTHORIZATION_MANAGED_MAINTENANCE=true` is required for management writes;
+the runtime also checks persisted token expiry, Redis session/handover state
+and LiveKit room drain. A rejection is not an asynchronously queued change.
+
+The image includes `auth-admin` (`go build ./cmd/auth-admin`) for explicit,
+operator-only bootstrap using protected files. It does not create IdP users
+or credentials. `/#/admin` provides people/vehicle bindings and the three fixed
+roles; basic org_admin vehicle status visibility does not grant live video or
+control. The pilot allows simulation only and does not authorize business task
+dispatch. See [the complete pilot procedure](../../docs/auth-management.md)
+and [optional Compose overlay](../../docker-compose.authorization.yml).
+
 ## Opt-in v2 simulation control
 
 Legacy acquire remains compatible. V2 acquire additionally requires
@@ -55,10 +72,18 @@ cross-end acceptance runner and the
 
 ## Registered vehicle snapshots
 
-Set `VEHICLE_REGISTRY_JSON` to an array of `{"vehicle_id":"car-1","name":"First"}`.
-Invalid entries, unknown configuration fields, and duplicate IDs fail startup.
-An unset value or `[]` registers no vehicles. Device packets never register cars.
-IDs must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`.
+For new deployments, configure vehicle registration, device OIDC subject
+mapping, and operator ACL together in the read-only file selected by
+`AUTHORIZATION_POLICY_FILE`. This makes the subject-to-vehicle mapping strict,
+including when the policy has no vehicles. The three JSON environment variables
+remain supported for migration, but cannot be combined with the file.
+Invalid entries, unknown configuration fields, and duplicate IDs or subjects
+fail startup. An empty policy registers no vehicles and denies access. Device
+packets never register cars. IDs must match
+`[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`.
+`GET /api/vehicles/{vehicle_id}/device-auth-check` returns `204` only when the
+authenticated vehicle subject maps to that registered vehicle; it is intended
+for the vehicle auth diagnostic and does not issue a token or grant control.
 
 - `POST /api/vehicles/{vehicle_id}/state`: authenticated device identity must
   match the registered path and payload vehicle. Uses the existing

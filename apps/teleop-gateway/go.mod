@@ -8,11 +8,18 @@ require github.com/livekit/protocol v1.44.1
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/casbin/casbin/v2 v2.135.0
+	github.com/jackc/pgx/v5 v5.7.6
 	modernc.org/sqlite v1.34.5
 )
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.6.1 // indirect
+	github.com/casbin/govaluate v1.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

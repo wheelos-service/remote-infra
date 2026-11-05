@@ -107,7 +107,7 @@ func (api *OperationsAPI) get(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden: vehicle observe permission required", http.StatusForbidden)
 		return
 	}
-	if _, ok := api.registry.byID[vehicleID]; !ok {
+	if _, ok := requestVehicleRegistry(r, api.registry).byID[vehicleID]; !ok {
 		http.Error(w, "vehicle not registered", http.StatusNotFound)
 		return
 	}
@@ -137,7 +137,7 @@ func (api *OperationsAPI) postMission(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden: vehicle identity mismatch", http.StatusForbidden)
 		return
 	}
-	if _, ok := api.registry.byID[vehicleID]; !ok {
+	if _, ok := requestVehicleRegistry(r, api.registry).byID[vehicleID]; !ok {
 		http.Error(w, "vehicle not registered", http.StatusNotFound)
 		return
 	}

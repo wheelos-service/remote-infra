@@ -3,7 +3,7 @@
 LiveKit remote vehicle supervision prototype with three runtime boundaries:
 
 ```text
-frontend/               React operator platform (Mock home; authorized /#/teleop)
+frontend/               Unified authenticated React operations platform
 apps/teleop-gateway/    Go Gateway
 apps/vehicle-edge-cpp/  C++ vehicle SDKs (simulation control only)
 infra/                  Compose, Kubernetes, and LiveKit configuration
@@ -20,11 +20,13 @@ cp .env.example .env
 docker compose config
 docker compose up -d --build redis livekit-config livekit teleop-backend
 docker compose up -d --build frontend
-# Open http://127.0.0.1:8000/ (Mock) or /#/teleop (authorized RTC).
+# Open http://127.0.0.1:8000/#/ (authenticated operations).
 ```
 
-The default home is an isolated Mock. `/#/teleop` is the authorized three-camera
-entry; it requires a configured Gateway and a publishing C++ simulator.
+The default entry is the unified authenticated operations platform. Use
+`/#/?page=monitor` for viewing and `/#/?page=drive` for the three-camera
+workbench; it requires a configured Gateway and a publishing C++ simulator.
+Mock preview is available only through explicit `?preview=1` outside the hash.
 See [`frontend/README.md`](frontend/README.md) for runtime configuration and
 explicit simulation-control enablement. Compose binds the frontend to loopback;
 the cloud Caddy profile serves it at `CLIENT_DOMAIN`.
@@ -36,6 +38,9 @@ Documentation:
 - [`docs/operations.md`](docs/operations.md): runtime configuration and secret boundaries.
 - [`docs/deployment.md`](docs/deployment.md): Docker Compose deployment, DNS, Caddy, and network ports.
 - [`docs/architecture.md`](docs/architecture.md): module boundaries and data flow.
+- [`docs/auth-management.md`](docs/auth-management.md): opt-in organization,
+  people, vehicle and permission management pilot; manual IdP provisioning
+  and safe rollout boundaries.
 
 The current implementation covers OIDC/JWKS authentication, vehicle ACLs, Redis
 control leases, ControlSession signing, VideoSession standby/active orchestration,

@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { teleopConfig } from '../lib/teleop-config'
+import { fetchMemberContext, safeReturnPath, setRequestOrganization, type MemberContext, type MemberOrganization } from '../lib/organization-context'
 
 export interface OperatorClaims {
   Name?: string
@@ -16,12 +17,31 @@ interface AuthContextValue {
   signIn: () => Promise<void>
   signInWithDevToken: () => Promise<void>
   signOut: () => void
+  organizations: MemberOrganization[]
+  authorizationContext?: MemberContext
+  organizationId: string
+  selectOrganization: (id: string) => void
+  controlBusy: boolean
+  setControlBusy: (busy: boolean) => void
+  refreshOrganizations: () => void
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
 
+export function authCallbackRoute(search: string, returnPath: string | null): string | undefined {
+  const query = new URLSearchParams(search)
+  if (!query.has('code') && !query.has('error')) return undefined
+  return safeReturnPath(returnPath)
+}
+
 function redirectUri(): string {
   return `${window.location.origin}${window.location.pathname}`
+}
+
+export function restoreAuthenticatedRoute(returnPath: string): void {
+  window.history.replaceState({}, document.title, `${redirectUri()}#${safeReturnPath(returnPath)}`)
+  // HashRouter listens to popstate; replaceState does not emit it.
+  window.dispatchEvent(new PopStateEvent('popstate'))
 }
 
 function randomBase64Url(byteLength: number): string {
@@ -63,7 +83,45 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
   const [operator, setOperator] = useState<OperatorClaims>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
+  const [organizations, setOrganizations] = useState<MemberOrganization[]>([])
+  const [authorizationContext, setAuthorizationContext] = useState<MemberContext>()
+  const [organizationId, setOrganizationId] = useState('')
+  const [controlBusy, setControlBusy] = useState(false)
+  const [contextRevision, setContextRevision] = useState(0)
   const isDevLoginAvailable = isLocalHost() && new URLSearchParams(window.location.search).get('dev') === '1'
+  const selectOrganization = useCallback((id: string) => {
+    if (controlBusy || !organizations.some(org => org.org_id === id)) return
+    setRequestOrganization(id)
+    setOrganizationId(id)
+    sessionStorage.setItem('teleop.organization', id)
+  }, [controlBusy, organizations])
+  const refreshOrganizations = useCallback(() => {
+    if (!controlBusy) setContextRevision(value => value + 1)
+  }, [controlBusy])
+
+  useEffect(() => {
+    setOrganizations([])
+    setAuthorizationContext(undefined)
+    setOrganizationId('')
+    setRequestOrganization('')
+    if (!accessToken) return
+    const controller = new AbortController()
+    void fetchMemberContext(accessToken, controller.signal).then(context => {
+      if (controller.signal.aborted) return
+      const stored = sessionStorage.getItem('teleop.organization')
+      const id = context.organizations.find(org => org.org_id === stored)?.org_id ?? context.organizations[0]?.org_id ?? ''
+      setOrganizations(context.organizations)
+      setAuthorizationContext(context)
+      setRequestOrganization(id)
+      setOrganizationId(id)
+      if (id) sessionStorage.setItem('teleop.organization', id)
+      else sessionStorage.removeItem('teleop.organization')
+      setError(undefined)
+    }).catch(cause => {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : '组织上下文不可用')
+    })
+    return () => controller.abort()
+  }, [accessToken, contextRevision])
 
   const acceptToken = useCallback(async (token: string) => {
     const claims = await validateAccessToken(token)
@@ -82,6 +140,10 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
       }
       try {
         const callback = new URLSearchParams(window.location.search)
+        const returnPath = safeReturnPath(sessionStorage.getItem('teleop.oidc.return-path'))
+        if (callback.has('code') || callback.has('error')) {
+          sessionStorage.removeItem('teleop.oidc.return-path')
+        }
         const oauthError = callback.get('error')
         if (oauthError) {
           sessionStorage.removeItem('teleop.oidc.state')
@@ -119,7 +181,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
         if (cancelled) return
         setAccessToken(tokenResponse.access_token)
         setOperator(claims)
-        window.history.replaceState({}, document.title, `${redirectUri()}${window.location.hash}`)
+        restoreAuthenticatedRoute(returnPath)
       } catch (cause) {
         if (!cancelled) {
           setError(cause instanceof Error ? cause.message : '登录状态校验失败')
@@ -143,6 +205,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
       const state = randomBase64Url(24)
       sessionStorage.setItem('teleop.oidc.verifier', verifier)
       sessionStorage.setItem('teleop.oidc.state', state)
+      sessionStorage.setItem('teleop.oidc.return-path', safeReturnPath(window.location.hash.slice(1)))
       const query = new URLSearchParams({
         response_type: 'code',
         client_id: teleopConfig.clientId,
@@ -174,10 +237,15 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
   }, [acceptToken, isDevLoginAvailable])
 
   const signOut = useCallback(() => {
+    if (controlBusy) return
     setAccessToken(undefined)
     setOperator(undefined)
     setError(undefined)
-  }, [])
+    setRequestOrganization('')
+    setOrganizationId('')
+    setOrganizations([])
+    setAuthorizationContext(undefined)
+  }, [controlBusy])
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -189,8 +257,10 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
       signIn,
       signInWithDevToken,
       signOut,
+      organizations, authorizationContext, organizationId, selectOrganization, controlBusy, setControlBusy, refreshOrganizations,
     }),
-    [accessToken, operator, loading, error, isDevLoginAvailable, signIn, signInWithDevToken, signOut],
+    [accessToken, operator, loading, error, isDevLoginAvailable, signIn, signInWithDevToken, signOut,
+      organizations, authorizationContext, organizationId, selectOrganization, controlBusy, refreshOrganizations],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

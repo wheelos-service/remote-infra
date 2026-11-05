@@ -4,6 +4,9 @@ import { useMockFleet } from '../app/MockFleetProvider'
 import { fleetMetrics, markerColor, overviewVehicle, type OverviewVehicle } from '../lib/fleet-overview'
 import { groupVehicleAlerts } from '../lib/vehicle-alerts'
 import DevFleetMap from './DevFleetMap'
+import type { FleetMap } from '../lib/fleet-map'
+import type { ReceivedVehicle } from '../lib/vehicle-telemetry'
+import type { VehicleData } from '../lib/vehicle-data-api'
 
 interface Props {
   selected: string
@@ -19,13 +22,18 @@ const duration = (age: number | null) => age === null ? '未知' : `${(age / 100
 
 export default function FleetOverview({ selected, onSelect, onAlerts, initialFocus, query, filter, onQuery, onFilter }: Props) {
   const mock = useMockFleet()
+  return <FleetOverviewContent selected={selected} onSelect={onSelect} onAlerts={onAlerts} initialFocus={initialFocus}
+    query={query} filter={filter} onQuery={onQuery} onFilter={onFilter} map={mock.map} entries={mock.vehicles.entries} data={mock.data} />
+}
+
+export function FleetOverviewContent({ selected, onSelect, onAlerts, initialFocus, query, filter, onQuery, onFilter, map, entries, data, authenticated = false }: Props & {
+  map?: FleetMap; entries: ReceivedVehicle[]; data: Record<string, VehicleData>; authenticated?: boolean
+}) {
   const [focusPosition, setFocusPosition] = useState(initialFocus)
-  const map = mock.map
-  if (!map) return null
   const now = performance.now()
-  const rows = mock.vehicles.entries.map((entry) => overviewVehicle(entry, mock.data[entry.vehicle_id], map, now))
-  const metrics = fleetMetrics(rows, mock.data)
-  const affected = groupVehicleAlerts(mock.data).filter((group) => group.pending > 0).length
+  const rows = entries.map((entry) => overviewVehicle(entry, data[entry.vehicle_id], map, now))
+  const metrics = fleetMetrics(rows, data)
+  const affected = groupVehicleAlerts(data).filter((group) => group.pending > 0).length
   const target = rows.find((row) => row.id === selected)
   const visible = rows.filter((row) => {
     const match = `${row.id} ${row.name}`.toLowerCase().includes(query.trim().toLowerCase())
@@ -39,7 +47,7 @@ export default function FleetOverview({ selected, onSelect, onAlerts, initialFoc
     { label: '在线车辆', value: `${metrics.online} / ${metrics.total}`, detail: `离线 ${metrics.total - metrics.online} 辆`, icon: Car, color: 'text-emerald-300' },
     { label: '自动驾驶', value: metrics.auto, detail: '处于自动驾驶模式，含停车车辆', icon: Gauge, color: 'text-sky-300' },
     { label: '人工驾驶', value: metrics.manual, detail: `驾驶模式未知 ${metrics.unknown} 辆`, icon: Activity, color: 'text-amber-300' },
-    { label: '待恢复告警', value: metrics.faults, detail: `${affected} 辆车受影响 · 最近记录，非全量统计`, icon: AlertTriangle, color: 'text-rose-300', action: () => onAlerts() },
+    { label: '待恢复告警', value: authenticated ? '未接入' : metrics.faults, detail: authenticated ? '告警处置引擎尚不可用' : `${affected} 辆车受影响 · 最近记录，非全量统计`, icon: AlertTriangle, color: 'text-rose-300', action: () => onAlerts() },
   ]
   return <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto" data-testid="fleet-overview">
     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -60,7 +68,10 @@ export default function FleetOverview({ selected, onSelect, onAlerts, initialFoc
       </section>)}
     </div>
     <div className="grid min-h-[640px] grid-cols-1 gap-4 xl:h-[calc(100vh-296px)] xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
-      <DevFleetMap key={map.id} map={map} rows={visible} selected={selected} focusPosition={focusPosition} onSelect={(id) => onSelect(id)} />
+      {map ? <DevFleetMap key={map.id} map={map} rows={visible} selected={selected} focusPosition={focusPosition} onSelect={(id) => onSelect(id)} />
+        : <section className="flex min-h-[380px] items-center justify-center rounded-xl border border-slate-800 bg-slate-900/70 p-8 text-center text-sm text-slate-400">
+          组织地图未接入；不使用演示地图投影真实车辆。请从右侧授权车辆列表选择车辆。
+        </section>}
       <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70">
         <header className="border-b border-slate-800 p-3">
           <div className="flex items-center justify-between"><h2 className="text-sm font-medium">车辆 · 异常优先</h2><span className="text-[11px] text-slate-400">需关注 {metrics.attention} / {metrics.total}</span></div>

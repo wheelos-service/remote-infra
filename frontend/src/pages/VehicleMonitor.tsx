@@ -6,6 +6,7 @@ import { groupVehicleAlerts, pendingAlertCount, severityLabel, type VehicleAlert
 import { vehicleHealthChecks, type MonitorListState } from '../lib/vehicle-monitor'
 import type { ReceivedVehicle } from '../lib/vehicle-telemetry'
 import type { VehicleData } from '../lib/vehicle-data-api'
+import type { FleetMap } from '../lib/fleet-map'
 import VehicleBev from './VehicleBev'
 
 interface Props {
@@ -44,8 +45,19 @@ export default function VehicleMonitor({ selected, mode, list, onListChange, onM
     <button type="button" onClick={() => onModeChange('list')} className="text-sky-300">返回车辆列表</button>
   </section>
   if (mode === 'detail' && row && entry) return <VehicleMonitorDetail key={`${map.id}:${row.id}`} row={row} entry={entry} data={mock.data[row.id]}
-    group={groups.find((value) => value.vehicleId === row.id)} onBack={() => onModeChange('list')} onDrive={() => onDrive(row.id)}
+    map={map} group={groups.find((value) => value.vehicleId === row.id)} onBack={() => onModeChange('list')} onDrive={() => onDrive(row.id)}
     onAlerts={() => onAlerts(row.id)} />
+  return <VehicleMonitorList rows={rows} list={list} onListChange={onListChange} onSelect={show} onAlerts={onAlerts} groups={groups} visibleRows={visible} />
+}
+
+export function VehicleMonitorList({ rows, list, onListChange, onSelect: show, onAlerts, groups = [], visibleRows, authenticated = false, canObserve = true }: {
+  rows: OverviewVehicle[]; list: MonitorListState; onListChange: Props['onListChange']; onSelect: Props['onSelect'];
+  onAlerts: Props['onAlerts']; groups?: VehicleAlertGroup[]; visibleRows?: OverviewVehicle[]; authenticated?: boolean; canObserve?: boolean
+}) {
+  const scroll = useRef<HTMLDivElement>(null)
+  useEffect(() => { if (scroll.current) scroll.current.scrollTop = list.scrollTop }, [list.query, list.filter])
+  const visible = visibleRows ?? rows.filter(row => `${row.id} ${row.name}`.toLowerCase().includes(list.query.trim().toLowerCase()) &&
+    (list.filter === 'all' || list.filter === 'offline' && !row.online))
   return <div className="flex h-full min-h-0 flex-col gap-4" data-testid="vehicle-monitor-list">
     <header className="flex flex-wrap items-center justify-between gap-2">
       <h1 className="text-base font-semibold">车辆监控</h1>
@@ -58,7 +70,7 @@ export default function VehicleMonitor({ selected, mode, list, onListChange, onM
           placeholder="搜索车辆编号或名称" className="w-full rounded-lg border border-slate-700 bg-slate-900 py-2 pl-9 pr-3 text-xs focus:outline-none focus:ring-1 focus:ring-sky-500" />
       </label>
       <div role="group" aria-label="车辆列表筛选" className="flex gap-1 text-xs">
-        {(['all', 'alerts', 'offline'] as const).map((filter) => <button key={filter} type="button" aria-pressed={list.filter === filter}
+        {(['all', 'alerts', 'offline'] as const).map((filter) => <button key={filter} type="button" aria-pressed={list.filter === filter} disabled={authenticated && filter === 'alerts'}
           onClick={() => onListChange({ ...list, filter, scrollTop: 0 })}
           className={`rounded px-3 py-2 ${list.filter === filter ? 'bg-sky-900 text-sky-200' : 'bg-slate-900 text-slate-400'}`}>
           {filter === 'all' ? '全部' : filter === 'alerts' ? '有告警' : '离线'}
@@ -77,15 +89,15 @@ export default function VehicleMonitor({ selected, mode, list, onListChange, onM
           </div>
           {visible.map((value) => {
             const group = groups.find((item) => item.vehicleId === value.id)
-            return <div key={value.id} onClick={() => show(value.id)}
+            return <div key={value.id} onClick={() => { if (canObserve) show(value.id) }}
               className="grid w-full cursor-pointer grid-cols-[minmax(160px,2fr)_1fr_1fr_1fr_1fr_80px_100px] items-center gap-3 border-b border-slate-800 px-4 py-4 text-left text-xs hover:bg-slate-800/50 focus-within:bg-slate-800/50">
-              <button type="button" aria-label={`查看车辆 ${value.id}`} className="min-w-0 text-left"><strong>{value.id}</strong><span className="mt-1 block truncate text-[10px] text-slate-500">{value.name.replace(`${value.id} · `, '')}</span></button>
+              <button type="button" disabled={!canObserve} aria-label={`查看车辆 ${value.id}`} className="min-w-0 text-left disabled:opacity-40"><strong>{value.id}</strong><span className="mt-1 block truncate text-[10px] text-slate-500">{value.name.replace(`${value.id} · `, '')}</span></button>
               <span className={value.online ? 'text-emerald-300' : 'text-slate-400'}>{value.online ? '在线' : '离线'}</span>
               <span>{value.modeLabel}</span>
               <span>{value.speed === null ? '状态未知' : Math.abs(value.speed) < 0.1 ? '停车' : '行驶'}<span className="mt-1 block text-[10px] text-slate-500">{value.speed?.toFixed(1) ?? '—'} km/h</span></span>
               <button type="button" aria-label={`查看 ${value.id} 告警`} onClick={(event) => { event.stopPropagation(); onAlerts(value.id) }}
                 className={`text-left hover:underline ${group?.pending ? statusClass(group.severity) : 'text-slate-400'}`}>
-                {group?.pending ? `${severityLabel(group.severity)} · ${group.pending} 项` : '记录中无待恢复告警'}
+                {authenticated ? '未接入' : group?.pending ? `${severityLabel(group.severity)} · ${group.pending} 项` : '记录中无待恢复告警'}
               </button>
               <span className={value.battery !== null && value.battery < 20 ? 'text-amber-300' : 'text-slate-300'}>{value.battery === null ? '未知' : `${value.battery}%`}</span>
               <span className="text-[11px] text-slate-400">{duration(value.receiptAge)}</span>
@@ -106,11 +118,14 @@ interface DetailProps {
   onBack: () => void
   onDrive: () => void
   onAlerts: () => void
+  map?: FleetMap
+  cameraView?: React.ReactNode
+  authenticated?: boolean
+  dataError?: string
+  dataLoading?: boolean
 }
-function VehicleMonitorDetail({ row, entry, data, group, onBack, onDrive, onAlerts }: DetailProps) {
-  const mock = useMockFleet()
+export function VehicleMonitorDetail({ row, entry, data, group, onBack, onDrive, onAlerts, map, cameraView, authenticated = false, dataError, dataLoading }: DetailProps) {
   const [tab, setTab] = useState('realtime')
-  const [imageFailed, setImageFailed] = useState(false)
   const checks = vehicleHealthChecks(entry, data, performance.now())
   const pending = group?.pending ?? 0
   const profile = data?.profile
@@ -122,7 +137,7 @@ function VehicleMonitorDetail({ row, entry, data, group, onBack, onDrive, onAler
         <h1 className="text-base font-semibold">{row.id}</h1>
         <span className={`text-xs ${row.online ? 'text-emerald-300' : 'text-slate-400'}`}>{row.online ? '在线' : '离线'}</span>
         <span className="text-xs text-slate-300">{row.modeLabel}</span>
-        <button type="button" onClick={onAlerts} className={`text-xs ${pending ? 'text-amber-300' : 'text-slate-400'}`}>待恢复告警 {pending}{pending && group ? ` · 最高${severityLabel(group.severity)}` : ''} · 查看告警 →</button>
+        <button type="button" onClick={onAlerts} className={`text-xs ${pending ? 'text-amber-300' : 'text-slate-400'}`}>{authenticated && !data ? '告警数据暂不可用' : `待恢复告警 ${pending}`}{pending && group ? ` · 最高${severityLabel(group.severity)}` : ''} · 查看告警 →</button>
       </div>
     </header>
     <nav aria-label="车辆详情页签" className="flex gap-1 overflow-x-auto border-b border-slate-800">
@@ -131,25 +146,24 @@ function VehicleMonitorDetail({ row, entry, data, group, onBack, onDrive, onAler
       ] as const).map(([value, label]) => <button key={value} type="button" aria-current={tab === value ? 'page' : undefined} onClick={() => setTab(value)}
         className={`whitespace-nowrap border-b-2 px-4 py-2.5 text-xs ${tab === value ? 'border-sky-400 text-sky-200' : 'border-transparent text-slate-400 hover:text-slate-200'}`}>{label}</button>)}
     </nav>
+    {dataError && <p role="alert" className="text-xs text-red-300">{dataError}</p>}
+    {dataLoading && <p role="status" className="text-xs text-slate-400">正在加载车辆数据…</p>}
     {tab === 'realtime' && <>
       <div className="grid gap-4 xl:min-h-[380px] xl:grid-cols-[minmax(0,2fr)_minmax(300px,1fr)]">
         <section className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70">
           <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 p-3">
             <h2 className="flex items-center gap-2 text-sm"><Camera className="h-4 w-4 text-slate-400" />前视相机</h2>
-            <span className="text-[11px] text-amber-200">示例图片 · 未接入实时视频</span>
+            <button type="button" onClick={onDrive} className="inline-flex items-center gap-2 text-xs text-sky-200">进入远程驾驶<ArrowUpRight className="h-4 w-4" /></button>
           </header>
-          <button type="button" aria-label={`进入 ${row.id} 远程驾驶监看`} onClick={onDrive}
-            className="group relative flex min-h-[300px] flex-1 items-center justify-center overflow-hidden bg-slate-950">
-            {!imageFailed && <img src="https://pub-cdn.sider.ai/u/U06XHJ80209/web-coder/6add4e269654c16911758e99/resource/9fffc6cd-027d-472a-b2f1-f93d7593b500.jpg"
-              onError={() => setImageFailed(true)} alt="前视相机示例，非实时画面" className="absolute inset-0 h-full w-full object-contain opacity-80" />}
-            {imageFailed && <span className="absolute top-8 text-xs text-slate-500">示例图片不可用 · 未接入视频</span>}
-            <span className="absolute bottom-4 right-4 inline-flex items-center gap-2 rounded-lg border border-sky-500/60 bg-slate-950/90 px-4 py-2.5 text-sm text-sky-200 group-hover:bg-sky-950">
-              进入远程驾驶<ArrowUpRight className="h-4 w-4" />
-            </span>
-          </button>
-          <footer className="border-t border-slate-800 px-3 py-2 text-[10px] text-slate-500">进入后为监看模式，不自动接管车辆</footer>
+          <div className="relative min-h-[300px] flex-1 bg-slate-950">
+            {cameraView ?? <div className="flex min-h-[300px] items-center justify-center text-xs text-slate-500">未接入实时视频</div>}
+          </div>
         </section>
-        {mock.map && <VehicleBev key={`${mock.map.id}:${row.id}`} map={mock.map} row={row} />}
+        {map ? <VehicleBev key={`${map.id}:${row.id}`} map={map} row={row} />
+          : <section className="flex flex-col rounded-xl border border-slate-800 bg-slate-900/70">
+            <h2 className="border-b border-slate-800 p-3 text-sm">BEV / 地图</h2>
+            <p className="flex flex-1 items-center justify-center p-8 text-xs text-slate-500">地图暂不可用</p>
+          </section>}
       </div>
       <section className="grid grid-cols-2 gap-3 xl:grid-cols-5">
         {[

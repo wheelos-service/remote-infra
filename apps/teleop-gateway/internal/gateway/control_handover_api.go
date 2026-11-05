@@ -39,7 +39,7 @@ func handleAcknowledgeHandover(w http.ResponseWriter, r *http.Request) {
 	}
 	// No generic stop/speed heuristic can prove an Apollo handover. This endpoint
 	// stays disabled until the deployment's native policy is bench-validated.
-	if os.Getenv("CONTROL_HANDOVER_ACK_ENABLED") != "true" {
+	if claims.managed != nil || os.Getenv("CONTROL_HANDOVER_ACK_ENABLED") != "true" {
 		http.Error(w, "native handover policy has not been enabled", http.StatusServiceUnavailable)
 		return
 	}

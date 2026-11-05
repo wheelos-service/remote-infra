@@ -26,10 +26,12 @@ var (
 	lkApiSecret       = os.Getenv("LIVEKIT_API_SECRET")
 	controlLeases     *ControlLeaseStore
 	videoSessions     *VideoSessionStore
+	vehicleRegistry   *VehicleRegistry
 	authenticator     Authenticator
 	vehicleAuthorizer *VehicleAuthorizer
 	vehicleIdentities *VehicleIdentityResolver
 	auditSink         AuditSink
+	managedRuntime    *ManagedRuntime
 
 	teleopAuthFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "teleop_auth_failures_total",
@@ -46,6 +48,11 @@ type UserClaims struct {
 	Roles        []string
 	Scopes       []string
 	Organization string
+	Issuer       string   `json:"-"`
+	UserID       string   `json:"-"`
+	Audiences    []string `json:"-"`
+	TokenType    string   `json:"-"`
+	managed      *managedRequestClaims
 }
 
 func init() {
@@ -58,21 +65,37 @@ func init() {
 // ==========================================
 func Run() {
 	var err error
-	vehicleRegistry, err := NewVehicleRegistryFromEnvironment()
-	if err != nil {
-		log.Fatalf("configure vehicle registry: %v", err)
-	}
 	authenticator, err = NewAuthenticatorFromEnvironment()
 	if err != nil {
 		log.Fatalf("configure authenticator: %v", err)
 	}
-	vehicleAuthorizer, err = NewVehicleAuthorizerFromEnvironment()
+	vehicleRegistry, vehicleIdentities, vehicleAuthorizer, err = NewAuthorizationPolicyFromEnvironment()
 	if err != nil {
-		log.Fatalf("configure vehicle ACL: %v", err)
+		log.Fatalf("configure vehicle authorization policy: %v", err)
 	}
-	vehicleIdentities, err = NewVehicleIdentityResolverFromEnvironment()
+	managedRuntime, err = NewManagedRuntimeFromEnvironment(context.Background())
 	if err != nil {
-		log.Fatalf("configure vehicle identity map: %v", err)
+		log.Fatalf("configure managed authorization: %v", err)
+	}
+	if managedRuntime != nil {
+		defer managedRuntime.Close()
+	}
+	var onboarding *OnboardingService
+	if managedRuntime != nil {
+		onboarding, err = NewOnboardingServiceFromEnvironment(
+			managedRuntime.store, managedRuntime.issuer, managedRuntime.BeforeAdditive)
+		if err != nil {
+			log.Fatalf("configure automated onboarding: %v", err)
+		}
+		if onboarding != nil {
+			verifier, ok := authenticator.(*OIDCAuthenticator)
+			if !ok {
+				log.Fatal("automated onboarding requires OIDC authentication")
+			}
+			verifier.machineAudience = managedRuntime.store.MachineAudienceAllowed
+		}
+	} else if strings.TrimSpace(os.Getenv("AUTHORIZATION_ONBOARDING_CONFIG_FILE")) != "" {
+		log.Fatal("automated onboarding requires managed authorization")
 	}
 	auditSink = NewJSONAuditSink(os.Stdout)
 	controlLeases, err = NewControlLeaseStore(
@@ -100,6 +123,27 @@ func Run() {
 	defer operations.Close()
 
 	mux := http.NewServeMux()
+	if managedRuntime != nil {
+		(&ManagedAdminAPI{Store: managedRuntime.store, TrustedIssuer: managedRuntime.issuer,
+			BeforeMutation: managedRuntime.BeforeMutation, OnboardingEnabled: onboarding != nil}).Register(mux, AuthenticationMiddleware)
+		mux.HandleFunc("/rtc", managedRuntime.RTCIngress)
+		mux.HandleFunc("/rtc/", managedRuntime.RTCIngress)
+	} else {
+		registerStaticOrganizationContext(mux, vehicleRegistry, vehicleAuthorizer)
+	}
+	if onboarding != nil {
+		onboarding.Register(mux, AuthenticationMiddleware)
+		workerContext, stopWorker := context.WithCancel(context.Background())
+		workerDone := make(chan struct{})
+		go func() {
+			defer close(workerDone)
+			onboarding.Run(workerContext)
+		}()
+		defer func() {
+			stopWorker()
+			<-workerDone
+		}()
+	}
 	telemetryAPI := &VehicleTelemetryAPI{
 		registry: vehicleRegistry, states: NewVehicleTelemetryStore(controlLeases.client, nil),
 		leases: controlLeases, authorizer: vehicleAuthorizer, identities: vehicleIdentities,
@@ -126,6 +170,7 @@ func Run() {
 	mux.Handle("POST /api/control/{session_id}/renew", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleRenewControl))))
 	mux.Handle("POST /api/control/{session_id}/release", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleReleaseControl))))
 	mux.Handle("GET /api/auth/me", AuthenticationMiddleware(http.HandlerFunc(handleAuthMe)))
+	registerDeviceAuthCheck(mux)
 	mux.Handle("POST /api/vehicles/{vehicle_id}/video/acquire", AuthenticationMiddleware(http.HandlerFunc(handleAcquireVideo)))
 	mux.Handle("POST /api/video/{session_id}/release", AuthenticationMiddleware(http.HandlerFunc(handleReleaseVideo)))
 	mux.Handle("GET /api/vehicles/{vehicle_id}/video", AuthenticationMiddleware(http.HandlerFunc(handleGetVideo)))
@@ -147,6 +192,12 @@ func Run() {
 			http.Error(w, "operations database unavailable", http.StatusServiceUnavailable)
 			return
 		}
+		if managedRuntime != nil {
+			if _, err := managedRuntime.store.Version(r.Context()); err != nil {
+				http.Error(w, "authorization database unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
@@ -157,7 +208,7 @@ func Run() {
 	mux.Handle("POST /api/audit/events", AuthenticationMiddleware(http.HandlerFunc(handleVehicleAudit)))
 
 	log.Println("🚀 Industrial Teleop Gateway running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", withCORS(mux)))
+	log.Fatal(http.ListenAndServe(":8080", withRequestID(withCORS(mux))))
 }
 
 func withCORS(next http.Handler) http.Handler {
@@ -181,7 +232,8 @@ func withCORS(next http.Handler) http.Handler {
 			}
 		} else if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Organization-ID")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, X-Error-Code")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Vary", "Origin")
 		}
@@ -195,34 +247,53 @@ func withCORS(next http.Handler) http.Handler {
 }
 
 func AuthenticationMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return withRequestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
 			teleopAuthFailuresTotal.Inc()
-			http.Error(w, "Unauthorized: Missing or invalid Bearer token", http.StatusUnauthorized)
+			writeDiagnosticError(w, r, "Unauthorized: Missing or invalid Bearer token", "AUTH_BEARER_REQUIRED", http.StatusUnauthorized)
 			return
 		}
 
 		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 
-		claims, err := authenticator.Authenticate(r.Context(), tokenString)
-		if err != nil {
-			teleopAuthFailuresTotal.Inc()
-			http.Error(w, "Unauthorized: invalid bearer token", http.StatusUnauthorized)
+		if authenticator == nil {
+			writeDiagnosticError(w, r, "authentication service unavailable", "AUTH_SERVICE_UNAVAILABLE", http.StatusServiceUnavailable)
 			return
+		}
+		claims, err := authenticator.Authenticate(r.Context(), tokenString)
+		if err != nil || claims == nil {
+			teleopAuthFailuresTotal.Inc()
+			logAuthenticationFailure(r, err)
+			writeDiagnosticError(w, r, "Unauthorized: invalid bearer token", "AUTH_INVALID_TOKEN", http.StatusUnauthorized)
+			return
+		}
+		if managedRuntime != nil {
+			// Authenticators may share immutable identity results; never overwrite
+			// their claims when installing a request-local authorization snapshot.
+			requestClaims := *claims
+			claims = &requestClaims
+			release, err := managedRuntime.authorizeRequest(r, claims)
+			if err != nil {
+				writeManagedError(w, r, err)
+				return
+			}
+			defer release()
 		}
 
 		// Pass authenticated claims to the handler through the request context.
 		ctx := context.WithValue(r.Context(), "user", claims)
 		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+	}))
 }
 
 func handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, r.Context().Value("user").(*UserClaims))
 }
 
 func recordAudit(ctx context.Context, event AuditEvent) {
+	event.RequestID, _ = ctx.Value(requestIDContextKey{}).(string)
 	if err := auditSink.Record(ctx, event); err != nil {
 		log.Printf("audit write failed: %v", err)
 	}
@@ -263,6 +334,10 @@ func handleOperatorConnect(w http.ResponseWriter, r *http.Request) {
 	permission := ObservePermission
 	if access == ControllerAccess {
 		permission = ControlPermission
+		if userClaims.managed != nil {
+			http.Error(w, "managed control requires an allowlisted v2 simulation session", http.StatusForbidden)
+			return
+		}
 	}
 	if !vehicleAuthorizer.Authorize(userClaims, vehicleID, permission) {
 		http.Error(w, "forbidden: vehicle ACL denied", http.StatusForbidden)
@@ -272,6 +347,9 @@ func handleOperatorConnect(w http.ResponseWriter, r *http.Request) {
 	lkToken, err := issueOperatorToken(vehicleID, operatorID, access)
 	if err != nil {
 		http.Error(w, "failed to issue LiveKit token", http.StatusInternalServerError)
+		return
+	}
+	if !reserveManagedToken(w, r, lkToken) {
 		return
 	}
 	recordAudit(r.Context(), AuditEvent{OperatorID: operatorID, VehicleID: vehicleID, Event: "login", Result: "success"})
@@ -291,27 +369,32 @@ func handleOperatorConnect(w http.ResponseWriter, r *http.Request) {
 // 4. Vehicle machine-to-machine connection
 // ==========================================
 func handleVehicleConnect(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	ctx := r.Context()
 	userClaims := ctx.Value("user").(*UserClaims)
 
-	vehicleID, ok := vehicleIdentities.Resolve(userClaims.Name)
+	if vehicleIdentities == nil {
+		writeDiagnosticError(w, r, "vehicle identity service unavailable", "VEHICLE_IDENTITY_SERVICE_UNAVAILABLE", http.StatusServiceUnavailable)
+		return
+	}
+	vehicleID, ok := resolveVehicleClaims(userClaims, vehicleIdentities)
 	// Casdoor client-credentials tokens may omit roles; a registered subject
 	// with the vehicle scope is equivalent to the vehicle role.
 	if !hasRole(userClaims.Roles, "vehicle") && !(ok && hasScope(userClaims.Scopes, "teleop:vehicle")) {
-		http.Error(w, "Forbidden: vehicle role required", http.StatusForbidden)
+		writeDiagnosticError(w, r, "Forbidden: vehicle role required", "VEHICLE_IDENTITY_REQUIRED", http.StatusForbidden)
 		return
 	}
 
 	if !ok {
 		// Legacy fallback is disabled whenever a subject map is configured.
 		if vehicleIdentities.Strict() {
-			http.Error(w, "forbidden: vehicle identity is not registered", http.StatusForbidden)
+			writeDiagnosticError(w, r, "forbidden: vehicle identity is not registered", "VEHICLE_IDENTITY_UNBOUND", http.StatusForbidden)
 			return
 		}
 		vehicleID = userClaims.Name
 	}
 	if requestedVehicleID := r.URL.Query().Get("vid"); requestedVehicleID != "" && requestedVehicleID != vehicleID {
-		http.Error(w, "forbidden: vehicle identity does not match vid", http.StatusForbidden)
+		writeDiagnosticError(w, r, "forbidden: vehicle identity does not match vid", "VEHICLE_IDENTITY_MISMATCH", http.StatusForbidden)
 		return
 	}
 
@@ -319,7 +402,10 @@ func handleVehicleConnect(w http.ResponseWriter, r *http.Request) {
 
 	lkToken, err := issueVehicleToken(vehicleID)
 	if err != nil {
-		http.Error(w, "failed to issue LiveKit token", http.StatusInternalServerError)
+		writeDiagnosticError(w, r, "failed to issue LiveKit token", "MEDIA_TOKEN_ISSUANCE_FAILED", http.StatusInternalServerError)
+		return
+	}
+	if !reserveManagedToken(w, r, lkToken) {
 		return
 	}
 	recordAudit(r.Context(), AuditEvent{VehicleID: vehicleID, Event: "login", Result: "success"})

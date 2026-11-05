@@ -4,6 +4,18 @@ import { useMockFleet } from '../../app/MockFleetProvider'
 
 export type MainSection = 'fleet' | 'monitor' | 'drive' | 'alerts' | 'tasks'
 
+export function OperationsShell({ activeSection, onChangeSection, topBar, children }: React.PropsWithChildren<{
+  activeSection: MainSection; onChangeSection: (section: MainSection) => void; topBar: React.ReactNode
+}>) {
+  return <div className="min-h-screen bg-slate-950 text-slate-50 flex">
+    <SideNav activeSection={activeSection} onChangeSection={onChangeSection} />
+    <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
+      {topBar}
+      <main className="flex-1 p-4 xl:p-6 overflow-hidden">{children}</main>
+    </div>
+  </div>
+}
+
 /**
  * Props for the side navigation component.
  */
@@ -111,6 +123,8 @@ export const TopBar: React.FC = () => {
         </span>
       </div>
       <div className="flex items-center gap-4 text-xs text-slate-400">
+        <a href={`${window.location.pathname}#/?page=monitor`} className="text-sky-200">退出预览并登录平台</a>
+        <a href={`${window.location.pathname}#/admin`} className="text-sky-200">组织管理（非预览）</a>
         <span>{mock.vehicles.updatedAtWallMs ? new Date(mock.vehicles.updatedAtWallMs).toLocaleString('zh-CN', { hour12: false }) : '等待数据'}</span>
         <div className="flex items-center gap-1">
           <Wifi className="w-3 h-3" />

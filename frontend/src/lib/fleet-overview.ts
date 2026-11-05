@@ -31,7 +31,7 @@ export function activeFaults(data: VehicleData | undefined): number {
   return pendingAlertCount(data)
 }
 
-export function overviewVehicle(entry: ReceivedVehicle, data: VehicleData | undefined, map: FleetMap, now: number): OverviewVehicle {
+export function overviewVehicle(entry: ReceivedVehicle, data: VehicleData | undefined, map: FleetMap | undefined, now: number): OverviewVehicle {
   const online = directoryOnline(entry, false, now)
   const chassisFresh = online && getSampleFreshness(entry.state?.chassis, entry, now).state === 'fresh'
   const localization = getSampleFreshness(entry.state?.localization, entry, now)
@@ -58,8 +58,8 @@ export function overviewVehicle(entry: ReceivedVehicle, data: VehicleData | unde
     checks.some((check) => !check || check.status === null || check.status === 'UNKNOWN')
   const rawPosition = entry.state?.localization.message
   const position = rawPosition?.position
-  const matches = rawPosition?.frame_id === map.frame_id
-  const valid = matches && typeof position?.x === 'number' && typeof position.y === 'number' &&
+  const matches = Boolean(map && rawPosition?.frame_id === map.frame_id)
+  const valid = map && matches && typeof position?.x === 'number' && typeof position.y === 'number' &&
     position.x >= map.bounds[0] && position.x <= map.bounds[2] &&
     position.y >= map.bounds[1] && position.y <= map.bounds[3]
   const health: FleetHealth = fault ? 'fault' : degraded ? 'degraded' : incomplete || !valid ? 'unknown' : 'ok'
@@ -73,7 +73,7 @@ export function overviewVehicle(entry: ReceivedVehicle, data: VehicleData | unde
       : health === 'unknown' ? '健康未知' : '已采集项正常',
     localizationFresh, sourceAge: localization.sourceAgeMs,
     position: valid ? { x: position.x!, y: position.y!, heading: rawPosition?.heading_rad ?? undefined } : undefined,
-    locationReason: !matches ? '坐标系不匹配 / 缺失' : !valid ? '定位缺失 / 超出地图范围'
+    locationReason: !map ? '组织地图未接入 · 不投影车辆位置' : !matches ? '坐标系不匹配 / 缺失' : !valid ? '定位缺失 / 超出地图范围'
       : !online ? '离线 · 最后已知位置' : !localizationFresh ? '定位过期 / 未知 · 非当前位置' : '定位新鲜',
     speed: chassisFresh && typeof chassis?.speed_mps === 'number' ? chassis.speed_mps * 3.6 : null,
     battery: chassisFresh ? chassis?.battery_soc_percentage ?? null : null,

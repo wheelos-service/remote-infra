@@ -4,6 +4,9 @@ import * as esbuild from 'esbuild'
 import { webcrypto } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { convertMap, parseMapText } from './prepare-maps.mjs'
+import './admin-test.mjs'
+import './platform-test.mjs'
+import './auth-context-test.mjs'
 globalThis.crypto ??= webcrypto
 
 globalThis.window = {
@@ -66,6 +69,50 @@ const fleetOverview = await loadBundle('fleet-overview')
 const vehicleAlerts = await loadBundle('vehicle-alerts')
 const vehicleMonitor = await loadBundle('vehicle-monitor')
 const navigation = await loadBundle('operations-navigation')
+
+const authBundle = await esbuild.build({
+  entryPoints: ['src/app/AuthProvider.tsx'],
+  bundle: true, format: 'cjs', platform: 'node', write: false,
+})
+const authModule = { exports: {} }
+new Function('require', 'module', 'exports', authBundle.outputFiles[0].text)(
+  createRequire(import.meta.url), authModule, authModule.exports,
+)
+const { authCallbackRoute, restoreAuthenticatedRoute } = authModule.exports
+
+test('callback restoration notifies HashRouter after replacing browser history', () => {
+  const previousWindow = globalThis.window
+  const previousDocument = globalThis.document
+  const previousEvent = globalThis.PopStateEvent
+  try {
+    const calls = []
+    globalThis.PopStateEvent = class { constructor(type) { this.type = type } }
+    globalThis.document = { title: 'Platform' }
+    globalThis.window = {
+      location: { origin: 'https://platform.test.invalid', pathname: '/' },
+      history: { replaceState: (...args) => calls.push(args) },
+      dispatchEvent: event => calls.push(event.type),
+    }
+    restoreAuthenticatedRoute('/?page=drive')
+    assert.deepEqual(calls, [[{}, 'Platform', 'https://platform.test.invalid/#/?page=drive'], 'popstate'])
+  } finally {
+    globalThis.window = previousWindow
+    globalThis.document = previousDocument
+    globalThis.PopStateEvent = previousEvent
+  }
+})
+
+test('root OAuth callbacks safely restore unified platform routes', () => {
+  assert.equal(authCallbackRoute('?code=one-time&state=state', '/admin'), '/admin')
+  assert.equal(authCallbackRoute('?code=one-time&state=state', '/teleop'), '/')
+  assert.equal(authCallbackRoute('?error=access_denied', '/teleop'), '/')
+  assert.equal(authCallbackRoute('?code=one-time&state=state', '/?page=monitor&vehicle=car-one'), '/?page=monitor&vehicle=car-one')
+  for (const route of [null, '/', '//outside.invalid', 'https://outside.invalid']) {
+    assert.equal(authCallbackRoute('?code=one-time&state=state', route), '/')
+  }
+  assert.equal(authCallbackRoute('?preview=1', '/admin'), undefined)
+  assert.equal(authCallbackRoute('', '/teleop'), undefined)
+})
 
 test('operations navigation round-trips vehicle/filter context and rejects invalid routes', () => {
   const state = { ...navigation.defaultNavigation, page: 'alerts', vehicle: 'sim-004',

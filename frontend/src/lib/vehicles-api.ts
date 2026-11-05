@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { teleopConfig } from './teleop-config'
+import { organizationHeaders } from './organization-context'
 
 const safeInteger = z.number().int().safe().nonnegative()
 const nullableNumber = z.number().nullable()
@@ -148,7 +149,7 @@ async function fetchEntry(path: string, token: string, signal?: AbortSignal): Pr
 
   try {
     const response = await fetch(`${gatewayUrl}${path}`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, ...organizationHeaders() },
       signal: controller.signal,
       cache: 'no-store',
     })

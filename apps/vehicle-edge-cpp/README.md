@@ -673,9 +673,12 @@ instance registration/recovery is a later milestone.
 
 Start from [`config/device.example.json`](config/device.example.json), replace
 the public endpoints and supply a registered device's OAuth client credentials.
-The server must register the vehicle in `VEHICLE_REGISTRY_JSON` and map its
-authenticated subject using `VEHICLE_SUBJECT_MAP_JSON`. Operator access still
-requires the existing vehicle ACL.
+The preferred Gateway configuration is one authorization policy file
+containing the vehicle registration, authenticated OIDC subject mapping, and
+operator ACL. The legacy `VEHICLE_REGISTRY_JSON`,
+`VEHICLE_SUBJECT_MAP_JSON`, and `VEHICLE_ACL_JSON` variables remain available
+for migration, but cannot be used with the policy file. Operator access still
+requires a vehicle-specific ACL grant.
 
 The real config must be a root-owned regular file with mode `0600`, not a symlink.
 The service needs permission to read that file; do not weaken ownership or mode
@@ -699,6 +702,31 @@ local tests; production endpoints must use HTTPS.
 The OAuth server must issue the existing Gateway-compatible vehicle role/scope
 and registered subject. This service does not invent an alternative identity
 format or fall back to an anonymous/development token.
+
+Build and run `vehicle_auth_check` before starting the vehicle runtime to check
+the protected configuration, OAuth/Gateway authentication, registered
+subject-to-vehicle mapping, and LiveKit token issuance:
+
+```bash
+bazel build //:vehicle_auth_check
+bazel-bin/vehicle_auth_check /etc/teleop/device.json
+# Machine-readable report for onboarding and support tooling:
+bazel-bin/vehicle_auth_check --json /etc/teleop/device.json
+```
+
+The checker discards the short-lived LiveKit token and does not join a room. It
+does not validate Cyber connectivity, camera/media operation, operator ACLs,
+or control-session behavior. See
+[`docs/authentication.md`](../../docs/authentication.md) for the unified
+operator/device flow and Gateway authorization policy format.
+
+The default text form is retained. `--json` emits only fixed diagnostic codes,
+stage timing, HTTP status, and safe `X-Request-ID`/known `X-Error-Code` response
+headers; it never includes OAuth/LiveKit tokens, config secrets, response bodies,
+or provider exception details. It requests `Accept: application/json`, while
+also supporting Gateway errors returned as legacy text with structured headers.
+The report only describes the observed failing stage and does not infer a
+specific credential or issuer problem.
 
 ## Portable tests
 

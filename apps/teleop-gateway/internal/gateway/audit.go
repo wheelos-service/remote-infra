@@ -12,6 +12,7 @@ import (
 
 type AuditEvent struct {
 	Timestamp  time.Time `json:"timestamp"`
+	RequestID  string    `json:"request_id,omitempty"`
 	OperatorID string    `json:"operator_id,omitempty"`
 	VehicleID  string    `json:"vehicle_id,omitempty"`
 	SessionID  string    `json:"session_id,omitempty"`
