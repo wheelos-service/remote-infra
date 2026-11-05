@@ -113,7 +113,7 @@ authctl all 2>&1 | tee "$AUTH_STATE/deploy-tmux.log"
 printf '%s\n' "${PIPESTATUS[0]}" > "$AUTH_STATE/deploy-tmux.exit"
 ```
 
-Check the exit code and run `authctl verify` before considering deployment complete. If the tmux session is absent, create it with `tmux new-session -s account-authentication-deploy -c /home/whl/01code/remote-infra` first. The old directory `/home/whl/01code/remote-infra-account-authentication` is retained but no longer used for builds. Reuse the same state directory, project, CA, encryption key and database volumes. `prepare`/`all` preserve the stored maintenance setting; `verify` does not regenerate configuration. Do not run `docker compose down -v` unless deliberately discarding the entire test environment.
+Check the exit code and run `authctl verify` before considering deployment complete. If the tmux session is absent, create it with `tmux new-session -s account-authentication-deploy -c /home/whl/01code/remote-infra` first. The obsolete source directory `/home/whl/01code/remote-infra-account-authentication` and temporary migration bundles were removed after verifying that no container or process used them. The Git clone and protected state directory remain the active deployment. Reuse the same state directory, project, CA, encryption key and database volumes. `prepare`/`all` preserve the stored maintenance setting; `verify` does not regenerate configuration. Do not run `docker compose down -v` unless deliberately discarding the entire test environment.
 
 ## 3. Create an organization and establish its administrator
 
