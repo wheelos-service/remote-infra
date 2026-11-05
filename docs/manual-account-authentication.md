@@ -188,65 +188,70 @@ v-d41a620e-apollo-120-e3b129db601b4d2e
 
 Do not try to reinstall that completed operation. Use a new registration for a fresh-install test, or the replacement workflow in section 10 for the installed device.
 
-### Install any new Apollo vehicle with the existing installer
+### Install directly inside the new car's Apollo container
 
-Use `infra/scripts/install-vehicle-auth.py` inside the new car's Ubuntu Apollo container. The package already contains the full vehicle ID and Gateway origin; the command below passes those values explicitly so the installer can enforce the identity boundary. No car IP is needed by the installer. Packages are single-use and expire after five minutes, so issue a fresh package immediately before transfer.
+Use the existing `infra/scripts/install-vehicle-auth.py`. It needs Python 3.8 or newer, the downloaded JSON package, and HTTPS trust for the Gateway and identity provider. The vehicle's IP address is not an installation parameter. Run the installation on the vehicle, not on the Mac or deployment server, so the permanent credential is created on the correct machine.
 
-On the client holding the downloaded package, obtain the public CA and installer from the deployment server, then transfer all three files to the new car host:
+**Prepare files and CA trust before downloading a fresh ticket.** Obtain the installer from this repository and the public `root.crt` from the server operator (section 1). Place them in the Apollo container using its mounted filesystem or `docker cp`. Do not copy the server's state directory or private keys. The examples below run **as root inside the Ubuntu Apollo container**, from the repository directory containing `infra/scripts/install-vehicle-auth.py`. Adjust the two input paths to where you placed the files.
+
+First verify and install the public CA; this is needed once per container:
 
 ```bash
-chmod 600 ./v-<vehicle>-enrollment.json
-scp ./v-<vehicle>-enrollment.json <vehicle-ssh-host>:/path/to/apollo-base/.account-authentication/enrollment.json
-scp whl@10.0.39.103:/home/whl/01code/account-authentication-state/root.crt \
-  <vehicle-ssh-host>:/path/to/apollo-base/.account-authentication/root.crt
-scp /home/whl/01code/remote-infra/infra/scripts/install-vehicle-auth.py \
-  <vehicle-ssh-host>:/path/to/apollo-base/.account-authentication/install-vehicle-auth.py
+CA=/path/inside/container/root.crt
+openssl x509 -in "$CA" -noout -fingerprint -sha256
 ```
 
-Verify the CA fingerprint before trusting it. Then SSH to the vehicle host and replace only the host mount and container name below:
+The fingerprint must match `6C:23:3A:C6:66:26:96:B7:B8:E6:FE:3E:74:F0:8F:A7:3D:7A:5D:C0:EC:C1:C9:FF:E7:EB:F9:40:8D:96:24:FD` for the current deployment. Only after checking it, run:
 
 ```bash
-CONTAINER=<apollo-container-name>
-MOUNT=/path/to/apollo-base/.account-authentication
-VEHICLE_ID='v-<full vehicle ID from the package filename>'
+install -m 0644 "$CA" /usr/local/share/ca-certificates/account-authentication-remote.crt
+update-ca-certificates
+curl --fail https://10.0.39.103:9443/readyz
+```
+
+Now issue/download a fresh installation package for the same vehicle row and transfer it to this container within five minutes. The file downloaded earlier for `car-001` has expired; do not edit its expiry or create another vehicle to work around this. Preserve owner-only permissions during transfer. If using `docker cp`, run `chmod 600` on the package on the vehicle host first, then copy it into the container as root.
+
+For your `car-001`, run these commands inside the container:
+
+```bash
+PACKAGE=/path/inside/container/v-d41a620e-car-001-171a5f3f662e4b19-enrollment.json
+VEHICLE_ID=v-d41a620e-car-001-171a5f3f662e4b19
 GATEWAY=https://10.0.39.103:9443
+DEVICE_DIR="/apollo/.account-authentication/vehicles/$VEHICLE_ID"
 
-# Copy the public CA and installer into the container.
-docker cp "$MOUNT/root.crt" "$CONTAINER":/tmp/account-authentication-root.crt
-docker cp "$MOUNT/install-vehicle-auth.py" "$CONTAINER":/tmp/install-vehicle-auth.py
-docker cp "$MOUNT/enrollment.json" "$CONTAINER":/tmp/enrollment.json
+umask 077
+install -d -m 700 "$DEVICE_DIR"
+install -m 600 "$PACKAGE" "$DEVICE_DIR/enrollment.json"
 
-# Trust only the public CA in this Ubuntu container.
-docker exec -u 0 "$CONTAINER" install -m 0644 \
-  /tmp/account-authentication-root.crt \
-  /usr/local/share/ca-certificates/account-authentication-remote.crt
-docker exec -u 0 "$CONTAINER" update-ca-certificates
-
-# Keep each car's credential in its own protected directory.
-docker exec -u 0 "$CONTAINER" install -d -m 700 \
-  "/apollo/.account-authentication/vehicles/$VEHICLE_ID"
-docker exec -u 0 "$CONTAINER" install -m 600 /tmp/enrollment.json \
-  "/apollo/.account-authentication/vehicles/$VEHICLE_ID/enrollment.json"
-
-docker exec -u 0 "$CONTAINER" python3 /tmp/install-vehicle-auth.py \
+python3 infra/scripts/install-vehicle-auth.py \
   --gateway "$GATEWAY" \
   --vehicle-id "$VEHICLE_ID" \
-  --package "/apollo/.account-authentication/vehicles/$VEHICLE_ID/enrollment.json" \
-  --output "/apollo/.account-authentication/vehicles/$VEHICLE_ID/device.json"
+  --package "$DEVICE_DIR/enrollment.json" \
+  --output "$DEVICE_DIR/device.json"
 ```
 
-Expected: the existing installer validates the single-use package, exchanges the ticket, verifies OAuth, `/api/auth/me`, device mapping and installation completion, and writes a root-owned 0600 `device.json`. It refuses a foreign Gateway/vehicle, expired/reused ticket, unsafe permissions, symlinks, or an existing output path. The generated configuration has control, tasks and media disabled.
+For another car, change `PACKAGE` and `VEHICLE_ID` to that car's package and full ID. Keep `GATEWAY` set to the operator's trusted deployment origin. The installer checks that both values match the package before redeeming it. `--package` accepts the downloaded JSON; `--ticket-file` is for a raw ticket and must not be used for this JSON file. If you copied just the standalone installer instead of the repository, use its actual path after `python3`; it has no third-party Python dependencies.
 
-After a successful run, remove only the enrollment package and temporary copies. Keep `device.json`:
+Expected: `Vehicle authentication installed and verified`. The installer writes a root-owned 0600 `device.json` and verifies OAuth, `/api/auth/me`, vehicle mapping and installation completion. It refuses expired/reused tickets, unsafe package permissions, mismatched vehicle/Gateway values and existing output paths. Control, tasks and media are disabled in the generated configuration. Keep this directory outside Git or covered by an ignore-all `.gitignore`, and use a persistent Apollo mount so container recreation does not lose the credential.
+
+After success, remove the consumed package copies, retaining the credential:
 
 ```bash
-docker exec -u 0 "$CONTAINER" rm -f \
-  /apollo/.account-authentication/vehicles/$VEHICLE_ID/enrollment.json \
-  /tmp/enrollment.json /tmp/account-authentication-root.crt /tmp/install-vehicle-auth.py
-rm -f "$MOUNT/enrollment.json" "$MOUNT/root.crt" "$MOUNT/install-vehicle-auth.py"
+rm -- "$DEVICE_DIR/enrollment.json"
+rm -- "$PACKAGE"
 ```
 
-If the installer saved `device.json` but verification was interrupted, do not redeem another package. Run the same command with `--verify-existing`, omitting `--package`. If no configuration was saved and the ticket was consumed, issue a fresh package through the vehicle onboarding operation.
+If `device.json` was saved but verification failed, keep it and resume without redeeming a ticket:
+
+```bash
+python3 infra/scripts/install-vehicle-auth.py \
+  --gateway "$GATEWAY" \
+  --vehicle-id "$VEHICLE_ID" \
+  --output "$DEVICE_DIR/device.json" \
+  --verify-existing
+```
+
+If no configuration was saved and the ticket was consumed, issue a fresh package through the existing vehicle onboarding operation. Never overwrite another car's credential or put a secret in command-line arguments. Installation alone does not start telemetry or make the vehicle online; see section 6.
 
 ## 6. Verify the device and distinguish installation from online status
 
@@ -259,13 +264,15 @@ docker exec apollo_dev_zj env -u LD_LIBRARY_PATH \
   --json /apollo/.account-authentication/config/device.json
 ```
 
-For a newly installed vehicle, the setup script has already performed the same protected configuration, OAuth token acquisition, Gateway identity, vehicle mapping and installation-completion checks. If the container has a matching prebuilt read-only binary, start it explicitly with `--telemetry-bin` on the setup command; otherwise run the native checker and runtime using the installed path:
+For a new vehicle, the direct installer already checks OAuth, Gateway identity, vehicle mapping and installation completion. To report online, run the native read-only telemetry executable with that vehicle's `device.json`. From inside the Apollo container, after building the native target as described in the C++ README:
 
 ```bash
-docker exec -u 0 "$CONTAINER" env -u LD_LIBRARY_PATH \
-  /apollo/.account-authentication/source/apps/vehicle-edge-cpp/bazel-bin/vehicle_auth_check \
-  --json /apollo/.account-authentication/vehicles/<full-vehicle-id>/device.json
+cd /path/to/remote-infra/apps/vehicle-edge-cpp
+env -u LD_LIBRARY_PATH ./bazel-bin/vehicle_auth_check --json "$DEVICE_DIR/device.json"
+env -u LD_LIBRARY_PATH ./bazel-bin/vehicle_telemetry "$DEVICE_DIR/device.json"
 ```
+
+Use only one runtime per credential. The second command runs in the foreground; use the vehicle's service manager or a dedicated tmux session to keep it running. The deployment-specific build and detached-runtime example in section 12 applies to the existing test car; adjust config/PID/log paths for a new car.
 
 The native client explicitly requests `teleop:vehicle`. The checker does not join a room or verify a camera, Cyber discovery or driving. It issues a short-lived RTC token, so it can extend the next maintenance/drain waiting period.
 
