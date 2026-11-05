@@ -13,7 +13,9 @@ const { outputFiles } = await esbuild.build({
       import {StaticRouter} from 'react-router';
       import Admin, {AdminForms, AdminNotice, RoleRangeFields, OnboardingForms, OnboardingOperations, InstallationInstructions, OnboardingManager, AdminTabs, AdminDirectory} from './src/pages/Admin';
       import * as api from './src/lib/admin-api';
-      export {api, RoleRangeFields, OnboardingForms, OnboardingOperations, OnboardingManager, AdminTabs, AdminDirectory};
+      import {AdminLifecycle} from './src/pages/AdminLifecycle';
+      export {AdminLifecycle, api, RoleRangeFields, OnboardingForms, OnboardingOperations, OnboardingManager, AdminTabs, AdminDirectory};
+      export const renderLifecycle = props => renderToStaticMarkup(<AdminLifecycle {...props} />);
       export const renderTabs = props => renderToStaticMarkup(<AdminTabs {...props} />);
       export const renderDirectory = props => renderToStaticMarkup(<AdminDirectory {...props} />);
       export const render = () => renderToStaticMarkup(<StaticRouter location="/admin"><Admin /></StaticRouter>);
@@ -90,7 +92,7 @@ try {
 } finally {
   globalThis.window = previousWindow
 }
-const { api, render, renderForms, renderError, formTree, componentTree, RoleRangeFields,
+const { AdminLifecycle, renderLifecycle, api, render, renderForms, renderError, formTree, componentTree, RoleRangeFields,
   OnboardingForms, OnboardingOperations, OnboardingManager, renderOnboarding, renderOperations, renderInstallation,
   AdminTabs, AdminDirectory, renderTabs, renderDirectory } = module.exports
 globalThis.crypto ??= webcrypto
@@ -589,4 +591,136 @@ test('installation tickets are explicit, transient, expire, and never reach pers
     globalThis.localStorage = originalStorage; globalThis.sessionStorage = originalSessionStorage
     context.mock.timers.reset()
   }
+})
+
+test('lifecycle controls explain scoped removal and restrict vehicle reactivation', () => {
+  const props = { orgId: 'org', token: 'bearer', people: [person, { ...person, user_id: 'removed', status: 'removed' }],
+    vehicles: [{ ...vehicle, status: 'disabled' }], platformAdmin: false, authorizationVersion: 4, onChange() {} }
+  const html = renderLifecycle(props)
+  assert.match(html, /移除成员/)
+  assert.match(html, /重新加入/)
+  assert.match(html, /维护排空/)
+  assert.match(html, /吊销凭据/)
+  assert.doesNotMatch(html, /核实并重新加入<\/button>/)
+  assert.doesNotMatch(html, /转移组织（保持禁用）|替换凭据<\/button>/)
+  assert.match(renderLifecycle({ ...props, platformAdmin: true }), /核实并重新加入<\/button>/)
+  assert.match(renderLifecycle({ ...props, platformAdmin: true }), /转移组织（保持禁用）/)
+  assert.match(renderLifecycle({ ...props, onboardingEnabled: true }), /替换凭据<\/button>/)
+})
+
+test('lifecycle submissions retain their key and observed version after an uncertain response', async () => {
+  const original = globalThis.fetch
+  const posts = []
+  let refreshes = 0
+  globalThis.fetch = async (_url, options) => {
+    if (options.method === 'POST') { posts.push(JSON.parse(options.body)); throw new Error('lost response') }
+    return new Response('[]')
+  }
+  const props = { orgId: 'org', token: 'bearer', people: [person], vehicles: [], platformAdmin: true, authorizationVersion: 4, onChange() { refreshes++ } }
+  const harness = componentTree(AdminLifecycle, props)
+  try {
+    let tree = harness.render(); harness.flushEffects(); await settle()
+    elements(tree, 'button').find(node => node.props.children === '移除成员').props.onClick()
+    tree = harness.render()
+    elements(tree, 'input').find(node => node.props.maxLength === 500).props.onChange({ target: { value: 'Access review' } })
+    tree = harness.render()
+    elements(tree, 'form')[0].props.onSubmit({ preventDefault() {} }); await settle()
+    tree = harness.render()
+    elements(tree, 'form')[0].props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(posts.length, 2)
+    assert.equal(posts[0].idempotency_key, posts[1].idempotency_key)
+    assert.equal(posts[0].expected_version, 4)
+    assert.equal(posts[0].reason, 'Access review')
+    assert.equal(refreshes, 0)
+  } finally { harness.unmount(); globalThis.fetch = original }
+})
+
+test('lifecycle cleanup aborts pending diagnostics and rejects stale responses', async () => {
+  const original = globalThis.fetch
+  const signals = []
+  globalThis.fetch = async (url, options) => {
+    signals.push(options.signal)
+    if (!url.endsWith('/registration')) return new Response('[]')
+    return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }))
+  }
+  const harness = componentTree(AdminLifecycle, { orgId: 'org', token: 'bearer', people: [person], vehicles: [], platformAdmin: true, authorizationVersion: 4, onChange() {} })
+  try {
+    let tree = harness.render(); harness.flushEffects(); await settle()
+    tree = harness.render()
+    elements(tree, 'button').find(node => node.props.children === '注册诊断').props.onClick()
+    await settle(); harness.unmount(); await settle()
+    assert.equal(signals.at(-1).aborted, true)
+  } finally { harness.unmount(); globalThis.fetch = original }
+})
+
+test('replacement polling refreshes directory after activation and stops when complete', async context => {
+  const original = globalThis.fetch
+  const id = '11111111-1111-4111-8111-111111111111'
+  const op = { id, org_id: id, actor_user_id: id, action: 'credential_rotate', target_id: 'car-1', reason: 'Replace',
+    authorization_version: 4, installation_status: 'awaiting_install', provider_status: 'confirmed', error_code: '', attempts: 1,
+    created_at: '2030-01-01T00:00:00Z', updated_at: '2030-01-01T00:00:00Z' }
+  let requests = 0
+  let refreshes = 0
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  globalThis.fetch = async () => new Response(JSON.stringify([{ ...op, installation_status: requests++ === 0 ? 'awaiting_install' : 'completed' }]))
+  const harness = componentTree(AdminLifecycle, { orgId: id, token: 'bearer', people: [], vehicles: [vehicle], platformAdmin: true,
+    onboardingEnabled: true, authorizationVersion: 4, onChange() { refreshes++ } })
+  try {
+    harness.render(); harness.flushEffects(); await settle()
+    assert.equal(requests, 1)
+    assert.equal(refreshes, 0)
+    assert.ok(elements(harness.render(), 'button').some(node => node.props.children === '轮换并下载替换安装包'))
+    context.mock.timers.tick(5000); await settle()
+    assert.equal(refreshes, 1)
+    assert.ok(!elements(harness.render(), 'button').some(node => node.props.children === '轮换并下载替换安装包'))
+    context.mock.timers.tick(60000); await settle()
+    assert.equal(requests, 2)
+  } finally { harness.unmount(); globalThis.fetch = original; context.mock.timers.reset() }
+})
+
+test('diagnostics distinguish authenticated observation and unavailable vehicle presence', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async url => {
+    if (url.endsWith('/lifecycle-operations')) return new Response('[]')
+    if (url.endsWith('/registration')) return new Response(JSON.stringify({ kind: url.includes('/people/') ? 'person' : 'vehicle',
+      target_id: 'fixture', status: 'active', binding_status: 'active', operation_id: '', stage: 'manual', provisioning_status: 'manual',
+      error_code: '', updated_at: null, first_authenticated_at: '2030-01-01T00:00:00Z' }))
+    return new Response('{}', { status: 503 })
+  }
+  const harness = componentTree(AdminLifecycle, { orgId: 'org', token: 'bearer', people: [person], vehicles: [vehicle],
+    platformAdmin: false, authorizationVersion: 4, onChange() {} })
+  const text = node => typeof node === 'string' ? node : Array.isArray(node) ? node.map(text).join('') : node?.props ? text(node.props.children) : ''
+  try {
+    harness.render(); harness.flushEffects(); await settle()
+    elements(harness.render(), 'button').filter(node => node.props.children === '注册诊断')[0].props.onClick(); await settle()
+    assert.match(text(harness.render()), /首次成功 Gateway 认证请求：2030-01-01/)
+    assert.match(text(harness.render()), /不是 IdP 登录时间/)
+    elements(harness.render(), 'button').filter(node => node.props.children === '注册诊断')[1].props.onClick(); await settle()
+    assert.match(text(harness.render()), /数据在线状态：未知或不可用/)
+    assert.doesNotMatch(text(harness.render()), /首次成功 Gateway/)
+  } finally { harness.unmount(); globalThis.fetch = original }
+})
+
+test('audit filters are scoped and changing a filter clears the page cursor', async () => {
+  const original = globalThis.fetch
+  const urls = []
+  globalThis.fetch = async url => {
+    urls.push(url)
+    return new Response(JSON.stringify(url.includes('/audit?') ? { items: [], next_cursor: 'fixture-cursor' } : []))
+  }
+  const harness = componentTree(AdminLifecycle, { orgId: 'scoped-org', token: 'bearer', people: [], vehicles: [],
+    platformAdmin: true, authorizationVersion: 4, onChange() {} })
+  try {
+    harness.render(); harness.flushEffects(); await settle()
+    elements(harness.render(), 'button').find(node => node.props.children === '操作审计').props.onClick()
+    harness.render(); harness.flushEffects(); await settle()
+    elements(harness.render(), 'button').find(node => node.props.children === '下一页').props.onClick()
+    harness.render(); harness.flushEffects(); await settle()
+    assert.match(urls.at(-1), /organizations\/scoped-org\/audit\?.*cursor=fixture-cursor/)
+    elements(harness.render(), 'input')[2].props.onChange({ target: { value: 'vehicle_remove' } })
+    elements(harness.render(), 'form')[0].props.onSubmit({ preventDefault() {} })
+    harness.render(); harness.flushEffects(); await settle()
+    assert.match(urls.at(-1), /action=vehicle_remove/)
+    assert.doesNotMatch(urls.at(-1), /cursor=/)
+  } finally { harness.unmount(); globalThis.fetch = original }
 })

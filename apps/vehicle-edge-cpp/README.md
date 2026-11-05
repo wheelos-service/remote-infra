@@ -912,3 +912,17 @@ actuator channels.
 Before deployment, verify actual Cyber discovery/domain, topic overrides, source
 clock synchronization and coordinate frames against an isolated simulator or
 approved bench. No such runtime readiness is implied by a successful compile.
+
+### Downloaded credential installation package
+
+The organization admin page can download a five-minute single-use JSON package.
+Set its mode to `0600`, transfer it through a controlled channel, then run
+`infra/scripts/install-vehicle-auth.py --gateway <trusted-https-origin> --vehicle-id <id> --package <path>`.
+The public origin and vehicle ID must match the package. The utility creates
+`/etc/teleop/device.json` without overwriting, with control/tasks/media disabled.
+If configuration was saved but verification was interrupted, use
+`--verify-existing` instead of consuming another ticket. Delete the package after
+success. See [the lifecycle guide](../../docs/account-lifecycle.md) for recovery,
+revocation, and the distinction between installation, online, and driving readiness.
+
+The native OAuth client explicitly requests `teleop:vehicle` on acquisition and refresh. See the [local manual verification guide](../../docs/manual-account-authentication.md) for the deployed Apollo container, local CA, Python 3.8 package installation, and isolated GCC toolchain used for read-only telemetry verification.

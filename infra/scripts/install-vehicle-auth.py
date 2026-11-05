@@ -2,15 +2,18 @@
 """Install a single-use vehicle enrollment without exposing permanent secrets."""
 
 import argparse
+import datetime
 import getpass
 import json
 import os
 import pathlib
+import re
 import stat
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 
 class InstallationError(Exception):
@@ -36,7 +39,7 @@ def endpoint(value, allow_local=False):
 
 
 def protected_read(path):
-    flags = os.O_RDONLY | os.O_NOFOLLOW
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
         fd = os.open(path, flags)
     except OSError:
@@ -63,6 +66,52 @@ def protected_write(path, config):
             os.fsync(stream.fileno())
     except OSError:
         raise InstallationError("configuration write failed; inspect the protected file before retrying") from None
+
+
+def package_ticket(path, gateway, vehicle_id, allow_local=False):
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise InstallationError("duplicate installation package field")
+            result[key] = value
+        return result
+
+    raw = protected_read(path)
+    if len(raw) > 65536:
+        raise InstallationError("installation package exceeded size limit")
+    try:
+        value = json.loads(raw, object_pairs_hook=unique_object)
+        fields = {"schema_version", "gateway_url", "vehicle_id", "operation_id",
+                  "expires_at", "installation_ticket"}
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError()
+        if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+            raise ValueError()
+        for key in fields - {"schema_version"}:
+            if not isinstance(value[key], str) or not value[key] or len(value[key]) > 4096:
+                raise ValueError()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value["vehicle_id"]):
+            raise ValueError()
+        if str(uuid.UUID(value["operation_id"])) != value["operation_id"]:
+            raise ValueError()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", value["expires_at"]):
+            raise ValueError()
+        timestamp = re.sub(r"\.(\d+)", lambda match: "." + match.group(1)[:6].ljust(6, "0"), value["expires_at"])
+        expiry = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if expiry.tzinfo is None or expiry <= datetime.datetime.now(datetime.timezone.utc):
+            raise ValueError()
+        supplied = endpoint(value["gateway_url"], allow_local)
+        if urllib.parse.urlsplit(supplied).path or supplied != gateway:
+            raise InstallationError("package Gateway does not match the trusted installation endpoint")
+        if value["vehicle_id"] != vehicle_id:
+            raise InstallationError("package vehicle does not match the requested vehicle")
+        token = value["installation_ticket"]
+        if any(ord(char) <= 32 or ord(char) > 126 for char in token):
+            raise ValueError()
+        return token
+    except (ValueError, TypeError, UnicodeError):
+        raise InstallationError("invalid or expired version-1 installation package") from None
 
 
 def request(url, *, method="GET", token=None, body=None, form=False, expected=200):
@@ -152,8 +201,10 @@ def main():
     parser.add_argument("--gateway", required=True, help="trusted public Gateway HTTPS origin")
     parser.add_argument("--vehicle-id", required=True)
     parser.add_argument("--output", default="/etc/teleop/device.json")
-    parser.add_argument("--ticket-file", help="owner-only file; otherwise enrollment token is prompted without echo")
-    parser.add_argument("--verify-existing", action="store_true", help="resume checks without consuming another ticket")
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--ticket-file", help="owner-only file; otherwise enrollment token is prompted without echo")
+    inputs.add_argument("--package", help="owner-only version-1 installation package")
+    inputs.add_argument("--verify-existing", action="store_true", help="resume checks without consuming another ticket")
     parser.add_argument("--allow-insecure-localhost", action="store_true", help="isolated loopback tests only")
     args = parser.parse_args()
     gateway = endpoint(args.gateway, args.allow_insecure_localhost)
@@ -169,8 +220,11 @@ def main():
         info = parent.stat()
         if info.st_mode & 0o022 or not parent.is_dir():
             raise InstallationError("configuration directory must not be group/world-writable")
-        token = (protected_read(args.ticket_file).decode().strip() if args.ticket_file
-                 else getpass.getpass("Single-use installation token: ").strip())
+        if args.package:
+            token = package_ticket(args.package, gateway, args.vehicle_id, args.allow_insecure_localhost)
+        else:
+            token = (protected_read(args.ticket_file).decode().strip() if args.ticket_file
+                     else getpass.getpass("Single-use installation token: ").strip())
         if not token or len(token) > 4096 or any(ord(char) <= 32 or ord(char) > 126 for char in token):
             raise InstallationError("invalid installation token")
         value = request(gateway + "/api/vehicle/install", method="POST", token=token, body={})

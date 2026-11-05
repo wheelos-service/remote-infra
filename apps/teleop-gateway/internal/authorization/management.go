@@ -47,6 +47,7 @@ type Vehicle struct {
 }
 
 type ManagementContext struct {
+	AuthorizationVersion int64          `json:"authorization_version"`
 	Mode                 string         `json:"mode"`
 	Organizations        []Organization `json:"organizations"`
 	PlatformAdmin        bool           `json:"platform_admin"`
@@ -140,6 +141,7 @@ func (s *Store) ManagedContext(ctx context.Context, userID string) (ManagementCo
 	if err != nil {
 		return result, err
 	}
+	result.AuthorizationVersion = version
 	snapshot, err := s.snapshotFor(ctx, tx, version)
 	if err != nil {
 		return result, err

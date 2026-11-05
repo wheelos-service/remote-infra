@@ -202,3 +202,12 @@ static 模式的兼容迁移要求，也不代表全量目标已经实现。
 10. LiveKit participant/旧 token 的撤销与重连语义、Redis Lease 并发撤销和设备 ACK 必须在实际部署组合中验收；权限撤销、媒体关闭、车辆确认是不同完成条件。
 
 与本契约并行的 Casbin/PostgreSQL 包、C++ JSON 诊断和 Gateway 请求诊断仍需集成验证。本次文档不读取其他工作者的新实现，也不声称这些组件已经组合工作。尤其 P0 的外部 Casdoor issuer/audience/Scope、真实机器主体 claim、Management API 最小权限、邀请/客户端创建/轮换/吊销能力及 LiveKit 撤销行为，必须在目标部署的隔离环境和实际版本核实；没有测试记录前只保留受控人工 provisioning 过渡，不能说“Casdoor/Go Adapter 已测试”或“全自动 onboarding 已完成”。
+
+## Lifecycle mutation contracts
+
+The [account lifecycle contract](account-lifecycle.md#lifecycle-apis) defines the
+new scoped lifecycle routes, expected-version and idempotency rules, cancellation
+and provider-revocation states. Removal must not restore prior selected grants on
+rejoin. Revoked bindings remain denied across provider failure and restart.
+
+The implementation and disposable acceptance evidence dated 2026-11-05 are recorded in [plan.md](../plan.md#implementation-evidence), including replacement rotation, platform-only transfer, authenticated observation, and the real RTC drain interval. Earlier planning/validation caveats in this document are historical; production rollout still requires the documented maintenance and pilot procedure.

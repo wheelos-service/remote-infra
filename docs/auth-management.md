@@ -471,3 +471,14 @@ Management failures expose the Gateway correlation ID when available. Locate
 the corresponding server event without logging bearer tokens, raw provider
 responses, client secrets or database URLs. Authentication, authorization,
 media readiness and physical safety are distinct states.
+
+## Account lifecycle extension
+
+See [account lifecycle and installation packages](account-lifecycle.md) for the
+managed removal/rejoin, credential revocation, registration diagnostics, scoped
+audit, version/idempotency contracts, and downloadable installation package.
+Existing manual/additive provisioning boundaries and maintenance drain still apply.
+
+The implementation and disposable acceptance evidence dated 2026-11-05 are recorded in [plan.md](../plan.md#implementation-evidence), including replacement rotation, platform-only transfer, authenticated observation, and the real RTC drain interval. Earlier planning/validation caveats in this document are historical; production rollout still requires the documented maintenance and pilot procedure.
+
+For the deployed account-authentication LAN environment on `10.0.39.138`, including browser certificate trust and the Apollo container at `zj@10.0.39.120`, follow [Manual account-authentication verification](manual-account-authentication.md). This is a separate protected Compose project from the older `10.0.39.103` example.

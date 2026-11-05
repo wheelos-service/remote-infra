@@ -21,21 +21,25 @@ import (
 )
 
 type managedRequestClaims struct {
-	registry    *VehicleRegistry
-	deviceID    string
-	permissions map[string]map[VehiclePermission]bool
+	installationOnly    bool
+	installationSubject string
+	installationClient  string
+	registry            *VehicleRegistry
+	deviceID            string
+	permissions         map[string]map[VehiclePermission]bool
 }
 
 type ManagedRuntime struct {
-	store       *authorization.Store
-	db          *sql.DB
-	instance    *sql.Conn
-	issuer      string
-	maintenance bool
-	mu          sync.RWMutex
-	additiveMu  sync.Mutex
-	roomsEmpty  func(context.Context) error
-	rtcProxy    http.Handler
+	store         *authorization.Store
+	db            *sql.DB
+	instance      *sql.Conn
+	issuer        string
+	maintenance   bool
+	mu            sync.RWMutex
+	additiveMu    sync.Mutex
+	observedUsers sync.Map
+	roomsEmpty    func(context.Context) error
+	rtcProxy      http.Handler
 }
 
 var (
@@ -188,6 +192,9 @@ func (m *ManagedRuntime) authorizeRequest(r *http.Request, claims *UserClaims) (
 		bound, err = m.resolveIdentityClaims(r.Context(), claims)
 	} else {
 		bound, err = m.resolveClaims(r.Context(), claims, strings.TrimSpace(r.Header.Get("X-Organization-ID")))
+	}
+	if errors.Is(err, errManagedDenied) {
+		bound, err = m.installingClaims(r, claims)
 	}
 	if err != nil {
 		return fail(err)
@@ -664,4 +671,13 @@ func managedRoomDrainCheck(rawURL string) (func(context.Context) error, error) {
 		}
 		return nil
 	}, nil
+}
+
+func (m *ManagedRuntime) observeAuthenticatedUser(ctx context.Context, user string) {
+	if _, seen := m.observedUsers.Load(user); seen {
+		return
+	}
+	if err := m.store.RecordAuthenticatedUser(ctx, user); err == nil {
+		m.observedUsers.Store(user, true)
+	}
 }

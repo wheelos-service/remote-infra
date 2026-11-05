@@ -17,10 +17,13 @@ type ManagedAdminAPI struct {
 	Store             *authorization.Store
 	TrustedIssuer     string
 	BeforeMutation    func(context.Context, string) (func(), error)
+	Onboarding        *OnboardingService
 	OnboardingEnabled bool
 }
 
 func (api *ManagedAdminAPI) Register(mux *http.ServeMux, authenticate func(http.Handler) http.Handler) {
+	api.registerLifecycle(mux, authenticate)
+	api.registerReads(mux, authenticate)
 	for _, pattern := range []string{
 		"GET /api/organizations/context",
 		"GET /api/admin/context",
@@ -105,10 +108,11 @@ func (api *ManagedAdminAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		Subject   string `json:"subject"`
 	}
 	var assignment struct {
-		UserID     string              `json:"user_id"`
-		Role       authorization.Role  `json:"role"`
-		Scope      authorization.Scope `json:"scope"`
-		VehicleIDs []string            `json:"vehicle_ids"`
+		UserID          string              `json:"user_id"`
+		Role            authorization.Role  `json:"role"`
+		Scope           authorization.Scope `json:"scope"`
+		VehicleIDs      []string            `json:"vehicle_ids"`
+		ExpectedVersion *int64              `json:"expected_version,omitempty"`
 	}
 	switch r.Pattern {
 	case "POST /api/admin/organizations/{org_id}/members":
@@ -118,7 +122,7 @@ func (api *ManagedAdminAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case "POST /api/admin/organizations/{org_id}/vehicles":
 		err = decodeManagedBody(w, r, &vehicle, "vehicle_id", "name", "subject")
 	default:
-		err = decodeManagedBody(w, r, &assignment, "user_id", "role", "scope", "vehicle_ids")
+		err = decodeManagedBody(w, r, &assignment, "user_id", "role", "scope", "vehicle_ids", "expected_version")
 	}
 	if err != nil {
 		writeDiagnosticError(w, r, "expected a bounded JSON object with unique, recognized fields", "MANAGED_INVALID_REQUEST", http.StatusBadRequest)
@@ -177,7 +181,7 @@ func (api *ManagedAdminAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, result)
 	default:
 		version, err := api.Store.AssignManagedRole(r.Context(), authorization.Assignment{ActorUserID: claims.UserID, UserID: assignment.UserID, OrganizationID: orgID,
-			Role: assignment.Role, Scope: assignment.Scope, VehicleIDs: assignment.VehicleIDs})
+			Role: assignment.Role, Scope: assignment.Scope, VehicleIDs: assignment.VehicleIDs, ExpectedVersion: assignment.ExpectedVersion})
 		if err != nil {
 			managedAdminError(w, r, err)
 			return

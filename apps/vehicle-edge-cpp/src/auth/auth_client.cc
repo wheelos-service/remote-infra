@@ -23,7 +23,8 @@ void AuthenticatedClient::RefreshToken() {
         http_.Post(config_.token_url, "application/x-www-form-urlencoded",
                    "grant_type=client_credentials&client_id=" +
                        http_.Escape(config_.client_id) +
-                       "&client_secret=" + http_.Escape(config_.client_secret),
+                       "&client_secret=" + http_.Escape(config_.client_secret) +
+                       "&scope=teleop%3Avehicle",
                    "", config_.allow_insecure_localhost);
   } catch (...) {
     throw AuthClientError("oauth_transport_error",

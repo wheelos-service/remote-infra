@@ -1,3 +1,4 @@
+import datetime
 import importlib.util
 import json
 import pathlib
@@ -13,6 +14,30 @@ spec.loader.exec_module(installer)
 
 
 class VehicleAuthInstallerTest(unittest.TestCase):
+    def test_package_validation_and_identity_boundary(self):
+        value = {"schema_version": 1, "gateway_url": "https://api.example",
+                 "vehicle_id": "car-one", "operation_id": "11111111-1111-4111-8111-111111111111",
+                 "expires_at": (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=5)).isoformat(),
+                 "installation_ticket": "fixture-ticket"}
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "package.json"
+            installer.protected_write(path, value)
+            self.assertEqual(installer.package_ticket(path, "https://api.example", "car-one"), "fixture-ticket")
+            for fraction in ("1", "123", "123456", "123456789"):
+                path.write_text(json.dumps({**value, "expires_at": "2099-01-01T00:00:00." + fraction + "Z"}))
+                self.assertEqual(installer.package_ticket(path, "https://api.example", "car-one"), "fixture-ticket")
+            for replacement in ({"schema_version": True}, {"schema_version": 2}, {"vehicle_id": "other"},
+                                {"gateway_url": "https://other.example"}, {"operation_id": "bad"},
+                                {"expires_at": "2000-01-01T00:00:00Z"}, {"expires_at": "2030-01-01"},
+                                {"installation_ticket": "bad token"}, {"client_secret": "never-allowed"}):
+                path.write_text(json.dumps({**value, **replacement}))
+                with self.subTest(replacement=replacement), self.assertRaises(installer.InstallationError):
+                    installer.package_ticket(path, "https://api.example", "car-one")
+            for raw in ('{"schema_version":1,"schema_version":1}', '[]', '{', ' ' * 65537):
+                path.write_text(raw)
+                with self.assertRaises(installer.InstallationError):
+                    installer.package_ticket(path, "https://api.example", "car-one")
+
     def test_endpoints_refuse_credentials_redirects_and_insecure_remote(self):
         for value in ("http://remote.example", "https://u:p@remote.example",
                       "https://remote.example/?token=secret", "https://remote.example/#secret"):

@@ -2,6 +2,9 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { Car, Users, ShieldCheck, Plus, Search, RefreshCw, ArrowLeft, LogOut } from 'lucide-react'
 import { useAuth } from '../app/AuthProvider'
+import { AdminLifecycle } from './AdminLifecycle'
+import { teleopConfig } from '../lib/teleop-config'
+import { buildInstallationPackage, downloadInstallationPackage } from '../lib/installation-package'
 import {
   adminErrorMessage, createAdminPerson, createAdminVehicle, fetchAdminContext, fetchAdminPeople,
   fetchAdminVehicles, saveAdminAssignment, type AdminContext, type Assignment, type ManagedPerson, type ManagedVehicle,
@@ -290,11 +293,20 @@ export function OnboardingOperations({ operations, busy, onRetry, onTicket }: {
   </section>
 }
 
-export function InstallationInstructions({ ticket, vehicleId, onClear }: {
-  ticket: InstallationTicket; vehicleId: string; onClear: () => void
+export function InstallationInstructions({ ticket, vehicleId, operationId, onClear }: {
+  ticket: InstallationTicket; vehicleId: string; operationId: string; onClear: () => void
 }) {
+  const [error, setError] = useState('')
   return <section className="space-y-3 rounded border border-amber-600 p-4">
     <h2>单次安装令牌（仅本次显示）</h2>
+    {error && <AdminNotice error={error} />}
+    <button className={buttonClass} onClick={() => {
+      try {
+        downloadInstallationPackage(buildInstallationPackage(ticket, vehicleId, operationId, teleopConfig.gatewayUrl), vehicleId)
+        setError('')
+      } catch { setError('安装包无效或已过期，请检查 Gateway HTTPS 地址并重新签发。') }
+    }}>下载安装包</button>
+    <p>下载后运行 chmod 600，将安装包通过受控渠道传至车辆。使用 --package 路径，并显式指定可信 --gateway 和 --vehicle-id。完成后删除安装包。</p>
     <p>到期时间：{ticket.expires_at}。仅复制至受保护的本地文件/终端输入；勿放入 URL、命令参数、历史记录、日志或共享文档。</p>
     <label>短期安装令牌 <textarea className={`${fieldClass} block w-full`} readOnly autoComplete="off" spellCheck={false} value={ticket.token} /></label>
     <button className={buttonClass} onClick={onClear}>清除令牌显示</button>
@@ -418,7 +430,7 @@ export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disab
     })} />
       </div>
     </details>
-    {ticket && <InstallationInstructions ticket={ticket.value} vehicleId={ticket.vehicleId} onClear={() => setTicket(undefined)} />}
+    {ticket && <InstallationInstructions ticket={ticket.value} vehicleId={ticket.vehicleId} operationId={ticket.operationId} onClear={() => setTicket(undefined)} />}
   </div>
 }
 
@@ -563,8 +575,10 @@ export default function Admin() {
           onboardingEnabled={context.onboarding_enabled}
           disabled={loading || saving} onPerson={input => void mutate(() => createAdminPerson(orgId, token, input))}
           onVehicle={input => void mutate(() => createAdminVehicle(orgId, token, input))}
-          onAssignment={input => void mutate(() => saveAdminAssignment(orgId, token, input))} />
+          onAssignment={input => void mutate(() => saveAdminAssignment(orgId, token, { ...input, expected_version: context.authorization_version }))} />
           </div>}
+          {ready && <AdminLifecycle key={orgId + ':' + token} orgId={orgId} token={token} people={people} vehicles={vehicles} platformAdmin={context.platform_admin} authorizationVersion={context.authorization_version ?? 0} onboardingEnabled={context.onboarding_enabled}
+            onChange={() => { setRevision(value => value + 1); setContextRevision(value => value + 1); auth.refreshOrganizations() }} />}
           {ready && tab === 'permissions' && <AdminDirectory tab={tab} people={people} vehicles={vehicles} query={query} onEdit={userId => setEditingUserId(userId)} />}
           {tab === 'permissions' && <details className="rounded-xl border border-slate-800 p-5 text-sm text-slate-400">
             <summary className="cursor-pointer">角色说明与授权规则</summary>

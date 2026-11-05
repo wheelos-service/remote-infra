@@ -292,3 +292,12 @@ bearer tokens, private keys, or device secrets.
 
 This prototype's simulation/control features are not production safety
 certification.
+
+## Installation and revocation status
+
+The [account lifecycle guide](account-lifecycle.md) documents temporary package
+installation and provider revocation. Successful invitation, credential installation,
+authenticated data freshness, video readiness, and control authority are separate
+facts. Previously issued JWTs remain cryptographically valid until expiry; local
+managed binding denial and the existing RTC maintenance/drain boundary enforce
+revoked access.

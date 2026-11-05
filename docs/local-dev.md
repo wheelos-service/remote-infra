@@ -91,3 +91,5 @@ Development credentials are for integration testing only. Production requires `A
 - Deployment workflow: `docs/deployment.md`
 - Runtime configuration: `docs/operations.md`
 - Authentication: `docs/authentication.md`
+
+For the deployed account-authentication LAN environment on `10.0.39.138`, including browser certificate trust and the Apollo container at `zj@10.0.39.120`, follow [Manual account-authentication verification](manual-account-authentication.md). This is a separate protected Compose project from the older `10.0.39.103` example.

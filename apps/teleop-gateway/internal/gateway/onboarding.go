@@ -22,6 +22,7 @@ type OnboardingService struct {
 	config          onboardingConfig
 	aead            cipher.AEAD
 	acquireAdditive func(context.Context, string) (func(), error)
+	acquireMutation func(context.Context, string) (func(), error)
 	providerHTTP    *http.Client
 	workMu          sync.Mutex
 }
@@ -45,6 +46,7 @@ func NewOnboardingServiceFromEnvironment(store *authorization.Store, trustedIssu
 }
 
 func (s *OnboardingService) Register(mux *http.ServeMux, authenticate func(http.Handler) http.Handler) {
+	mux.Handle("POST /api/admin/organizations/{org_id}/lifecycle-operations/{operation_id}/installation-ticket", authenticate(http.HandlerFunc(s.serveRotationTicket)))
 	for _, pattern := range []string{
 		"GET /api/admin/organizations/{org_id}/onboarding",
 		"POST /api/admin/organizations/{org_id}/onboarding",
@@ -188,6 +190,8 @@ func (s *OnboardingService) Run(ctx context.Context) {
 		if err == nil {
 			s.process(ctx, op)
 		}
+		s.processRevocation(ctx)
+		s.processRotation(ctx)
 		s.workMu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -374,7 +378,20 @@ func (s *OnboardingService) serveInstallationComplete(w http.ResponseWriter, r *
 		managedAdminError(w, r, err)
 		return
 	}
-	err := s.mutate(r.Context(), claims.Organization, func() error { return s.store.CompleteInstallation(r.Context(), s.issuer, vehicleID) })
+	if claims.managed.installationOnly {
+		s.completeRotation(w, r, claims)
+		return
+	}
+	completed, err := s.store.RotationCompleted(r.Context(), s.issuer, vehicleID)
+	if err != nil {
+		onboardingHTTPError(w, r, err)
+		return
+	}
+	if completed {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	err = s.mutate(r.Context(), claims.Organization, func() error { return s.store.CompleteInstallation(r.Context(), s.issuer, vehicleID) })
 	if err != nil {
 		onboardingHTTPError(w, r, err)
 		return

@@ -10,6 +10,7 @@ Existing projects, ports 443/8000, real vehicles and external SMTP are untouched
 import argparse
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -50,6 +51,11 @@ def compose(state, *args, **kwargs):
 
 
 def prepare(state):
+    maintenance = "false"
+    if (state / "compose.json").exists():
+        previous = json.loads((state / "compose.json").read_text())
+        maintenance = previous["services"]["gateway"]["environment"].get(
+            "AUTHORIZATION_MANAGED_MAINTENANCE", "false")
     secrets_file = state / "secrets.json"
     if not secrets_file.exists():
         write(secrets_file, {
@@ -149,7 +155,7 @@ def prepare(state):
         "OIDC_JWKS_URL": AUTH + "/.well-known/jwks", "AUTHORIZATION_MODE": "managed",
         "AUTHORIZATION_DATABASE_URL":
             f"postgres://teleop:{values['postgres']}@postgres:5432/teleop?sslmode=disable",
-        "AUTHORIZATION_MANAGED_MAINTENANCE": "false",
+        "AUTHORIZATION_MANAGED_MAINTENANCE": maintenance,
         "AUTHORIZATION_LIVEKIT_SERVER_VERSION": "v1.13.11",
         "AUTHORIZATION_LIVEKIT_INGRESS_GATED": "true",
         "AUTHORIZATION_ONBOARDING_CONFIG_FILE": "/run/auth/onboarding.json",
@@ -191,7 +197,7 @@ def prepare(state):
             "depends_on": ["redis"],
         },
         "gateway": {
-            "image": "authentication-test-gateway:local", "environment": env,
+            "image": f"{PROJECT}-gateway:local", "environment": env,
             "user": f"{os.getuid()}:{os.getgid()}",
             "volumes": [volume(name, "/run/auth/" + name)
                         for name in ("onboarding.json", "onboarding.key", "root.crt")]
@@ -201,7 +207,7 @@ def prepare(state):
                            "livekit": {"condition": "service_started"}},
         },
         "frontend": {
-            "image": "authentication-test-frontend:local",
+            "image": f"{PROJECT}-frontend:local",
             "volumes": [volume("runtime-config.js", "/usr/share/nginx/html/runtime-config.js")],
         },
         "caddy": {
@@ -239,7 +245,7 @@ def build(state):
           "FROM golang:1.24\nCOPY apps/teleop-gateway/teleop-backend /usr/local/bin/\n"
           f"RUN mkdir -p /var/lib/teleop && chown {os.getuid()}:{os.getgid()} /var/lib/teleop\n"
           "ENTRYPOINT [\"/usr/local/bin/teleop-backend\"]\n")
-    run(["docker", "build", "--quiet", "-t", "authentication-test-gateway:local",
+    run(["docker", "build", "--quiet", "-t", f"{PROJECT}-gateway:local",
          "-f", str(state / "Gateway.Dockerfile"), "."], cwd=ROOT)
     if not had_backend:
         backend.unlink()
@@ -253,11 +259,13 @@ def build(state):
           "COPY nginx.conf /etc/nginx/conf.d/default.conf\n"
           "COPY dist/ /usr/share/nginx/html/\n"
           "RUN chmod -R a+rX /usr/share/nginx/html\n")
-    run(["docker", "build", "--quiet", "-t", "authentication-test-frontend:local",
+    run(["docker", "build", "--quiet", "-t", f"{PROJECT}-frontend:local",
          str(context)], cwd=ROOT)
 
 
-def request(state, path, body=None, admin=True, origin=AUTH, form=False, bearer=None):
+def request(state, path, body=None, admin=True, origin=None, form=False, bearer=None):
+    if origin is None:
+        origin = AUTH
     values = json.loads((state / "secrets.json").read_text())
     headers = {}
     if admin:
@@ -413,10 +421,22 @@ def verify(state, values):
 
 
 def main():
+    global IP, APP, AUTH, MAIL, PROJECT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", required=True, type=Path)
-    parser.add_argument("action", choices=("prepare", "build", "start", "verify", "all"))
+    parser.add_argument("--host", default=IP, help="this server's stable LAN IPv4 address")
+    parser.add_argument("--project", default=PROJECT, help="isolated Docker Compose project name")
+    parser.add_argument("action", choices=("prepare", "build", "start", "verify", "all", "maintenance-on", "maintenance-off"))
     args = parser.parse_args()
+    try:
+        IP = str(ipaddress.IPv4Address(args.host))
+    except ipaddress.AddressValueError:
+        parser.error("--host must be a LAN IPv4 address")
+    if not args.project or not args.project[0].isalnum() or any(
+            char not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for char in args.project):
+        parser.error("--project must use lowercase letters, digits, hyphens or underscores")
+    PROJECT = args.project
+    APP, AUTH, MAIL = (f"https://{IP}:{port}" for port in (8443, 8444, 8445))
     state = args.state.resolve(strict=True)
     if ROOT == state or ROOT in state.parents:
         parser.error("--state must be outside the repository")
@@ -424,7 +444,24 @@ def main():
     if not state.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o077:
         parser.error("--state must be owned by the current user with mode 0700")
     os.umask(0o077)
-    values = prepare(state)
+    if (state / "compose.json").exists():
+        previous = json.loads((state / "compose.json").read_text())
+        if previous["services"]["gateway"]["environment"]["OIDC_ISSUER"] != AUTH:
+            parser.error("existing identities use another issuer; use their original --host or a new state directory")
+    if (state / "deployment.json").exists():
+        if json.loads((state / "deployment.json").read_text()) != {"host": IP, "project": PROJECT}:
+            parser.error("state belongs to another host/project; do not reuse its identities or keys")
+    write(state / "deployment.json", {"host": IP, "project": PROJECT})
+    if args.action in ("verify", "maintenance-on", "maintenance-off"):
+        values = json.loads((state / "secrets.json").read_text())
+    else:
+        values = prepare(state)
+    if args.action in ("maintenance-on", "maintenance-off"):
+        config = json.loads((state / "compose.json").read_text())
+        config["services"]["gateway"]["environment"]["AUTHORIZATION_MANAGED_MAINTENANCE"] = (
+            "true" if args.action == "maintenance-on" else "false")
+        write(state / "compose.json", config)
+        compose(state, "up", "-d", "--no-deps", "--force-recreate", "gateway")
     if args.action in ("build", "all"):
         build(state)
     if args.action in ("start", "all"):

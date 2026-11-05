@@ -5,6 +5,7 @@ export const managedRole = z.enum(['org_admin', 'viewer', 'remote_operator'])
 export const managedScope = z.enum(['none', 'all', 'selected'])
 export const adminContextSchema = z.object({
   mode: z.literal('managed'),
+  authorization_version: z.number().int().nonnegative().optional(),
   organizations: z.array(z.object({ org_id: z.string().min(1), name: z.string() })),
   platform_admin: z.boolean(),
   manual_provisioning: z.boolean().default(true),
@@ -19,6 +20,7 @@ const vehicleSchema = z.object({
   vehicle_id: z.string(), name: z.string(), status: z.string(), subject: z.string(),
 })
 export const assignmentSchema = z.object({
+  expected_version: z.number().int().nonnegative().optional(),
   user_id: z.string().min(1), role: managedRole, scope: managedScope, vehicle_ids: z.array(z.string().min(1)),
 }).refine(value => value.scope !== 'selected' || value.vehicle_ids.length > 0, '请选择至少一辆车辆')
   .refine(value => value.scope !== 'none' || value.vehicle_ids.length === 0, '无操作权限范围不能包含车辆')
@@ -60,14 +62,14 @@ export const installationTicketSchema = z.object({ token: z.string().min(1), exp
 export type InstallationTicket = z.infer<typeof installationTicketSchema>
 
 export function onboardingNeedsPolling(operation: OnboardingOperation): boolean {
-  return !['completed', 'failed'].includes(operation.status)
+  return !['completed', 'failed', 'cancelled'].includes(operation.status)
 }
 
 export function onboardingStatusLabel(status: string): string {
   return ({
     pending: '等待处理（尚未完成）', processing: '正在处理（尚未完成）', running: '正在处理（尚未完成）',
     awaiting_install: '等待车辆安装（尚未接入）', completed: '接入流程已完成',
-    failed: '接入失败，可手动重试',
+    failed: '接入失败，可手动重试', cancelled: '接入已取消，权限已移除',
   } as Record<string, string>)[status] ?? '等待后端确认（未知状态，尚未完成）'
 }
 
@@ -175,4 +177,10 @@ export async function retryOnboarding(orgId: string, token: string, operationId:
 }
 export async function createInstallationTicket(orgId: string, token: string, operationId: string, signal?: AbortSignal): Promise<InstallationTicket> {
   return parse(installationTicketSchema, await request(`${onboardingPath(orgId)}/${encodeURIComponent(operationId)}/installation-ticket`, token, {}, signal))
+}
+
+export async function adminRequest<T, Input>(schema: z.ZodType<T, z.ZodTypeDef, Input>, path: string, token: string, body?: object, signal?: AbortSignal): Promise<T> {
+  const result = schema.safeParse(await request(path, token, body, signal))
+  if (!result.success) throw new AdminApiError('管理服务响应格式不符，请联系平台管理员。')
+  return result.data
 }

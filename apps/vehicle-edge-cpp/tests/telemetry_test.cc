@@ -325,6 +325,9 @@ void HTTPAndOAuthSemantics() {
   Require(server.requests[0].find("grant_type=client_credentials") !=
               std::string::npos,
           "OAuth form missing");
+  Require(server.requests[0].find("scope=teleop%3Avehicle") != std::string::npos &&
+              server.requests[3].find("scope=teleop%3Avehicle") != std::string::npos,
+          "vehicle scope missing from initial or refreshed OAuth request");
   Require(server.requests[1].find("POST /api/vehicles/car-a/state") !=
               std::string::npos,
           "wrong vehicle path");

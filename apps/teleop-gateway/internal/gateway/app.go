@@ -88,6 +88,7 @@ func Run() {
 			log.Fatalf("configure automated onboarding: %v", err)
 		}
 		if onboarding != nil {
+			onboarding.acquireMutation = managedRuntime.BeforeMutation
 			verifier, ok := authenticator.(*OIDCAuthenticator)
 			if !ok {
 				log.Fatal("automated onboarding requires OIDC authentication")
@@ -125,7 +126,7 @@ func Run() {
 	mux := http.NewServeMux()
 	if managedRuntime != nil {
 		(&ManagedAdminAPI{Store: managedRuntime.store, TrustedIssuer: managedRuntime.issuer,
-			BeforeMutation: managedRuntime.BeforeMutation, OnboardingEnabled: onboarding != nil}).Register(mux, AuthenticationMiddleware)
+			BeforeMutation: managedRuntime.BeforeMutation, OnboardingEnabled: onboarding != nil, Onboarding: onboarding}).Register(mux, AuthenticationMiddleware)
 		mux.HandleFunc("/rtc", managedRuntime.RTCIngress)
 		mux.HandleFunc("/rtc/", managedRuntime.RTCIngress)
 	} else {
@@ -283,6 +284,14 @@ func AuthenticationMiddleware(next http.Handler) http.Handler {
 
 		// Pass authenticated claims to the handler through the request context.
 		ctx := context.WithValue(r.Context(), "user", claims)
+		if managedRuntime != nil && claims.UserID != "" {
+			response := &authenticatedResponse{ResponseWriter: w}
+			next.ServeHTTP(response, r.WithContext(ctx))
+			if response.status == 0 || response.status >= 200 && response.status < 300 {
+				managedRuntime.observeAuthenticatedUser(ctx, claims.UserID)
+			}
+			return
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}))
 }

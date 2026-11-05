@@ -30,6 +30,12 @@ var managementMigrationText string
 //go:embed migrations/003_onboarding.sql
 var onboardingMigrationText string
 
+//go:embed migrations/004_lifecycle.sql
+var lifecycleMigrationText string
+
+//go:embed migrations/005_device_recovery.sql
+var recoveryMigrationText string
+
 type Role string
 type Scope string
 
@@ -89,12 +95,13 @@ var roleActions = map[Role][]string{
 }
 
 type Assignment struct {
-	ActorUserID    string
-	UserID         string
-	OrganizationID string
-	Role           Role
-	Scope          Scope
-	VehicleIDs     []string
+	ActorUserID     string
+	UserID          string
+	OrganizationID  string
+	Role            Role
+	Scope           Scope
+	VehicleIDs      []string
+	ExpectedVersion *int64
 }
 
 type Store struct {
@@ -157,7 +164,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	defer tx.Rollback()
 
-	for _, statement := range strings.Split(migrationText+"\n"+managementMigrationText+"\n"+onboardingMigrationText, ";") {
+	for _, statement := range strings.Split(migrationText+"\n"+managementMigrationText+"\n"+onboardingMigrationText+"\n"+lifecycleMigrationText+"\n"+recoveryMigrationText, ";") {
 		statement = strings.TrimSpace(statement)
 		if statement == "" {
 			continue
@@ -247,6 +254,9 @@ func (s *Store) AssignRole(ctx context.Context, assignment Assignment) (int64, e
 	version, err := readVersion(ctx, tx, true)
 	if err != nil {
 		return 0, err
+	}
+	if assignment.ExpectedVersion != nil && *assignment.ExpectedVersion != version {
+		return 0, ErrConflict
 	}
 	snapshot, err := s.snapshotFor(ctx, tx, version)
 	if err != nil {
