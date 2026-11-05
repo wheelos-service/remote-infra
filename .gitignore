@@ -16,3 +16,6 @@ tests/__pycache__/
 apps/teleop-gateway/data/
 apps/vehicle-edge/bazel-*
 apps/vehicle-edge/.apollo-local/
+
+/plan.md
+/research.md
