@@ -214,7 +214,8 @@ def prepare(state):
             "image": "caddy:2-alpine",
             "user": f"{os.getuid()}:{os.getgid()}",
             "environment": {"XDG_CONFIG_HOME": "/data/config"},
-            "ports": [f"{IP}:{port}:{port}" for port in (8443, 8444, 8445)],
+            "ports": [f"{IP}:{urllib.parse.urlsplit(origin).port}:{urllib.parse.urlsplit(origin).port}"
+                      for origin in (APP, AUTH, MAIL)],
             "volumes": [volume("Caddyfile", "/etc/caddy/Caddyfile"),
                         f"{state / 'caddy-data'}:/data", "caddy-config:/config"],
         },
@@ -426,6 +427,7 @@ def main():
     parser.add_argument("--state", required=True, type=Path)
     parser.add_argument("--host", default=IP, help="this server's stable LAN IPv4 address")
     parser.add_argument("--project", default=PROJECT, help="isolated Docker Compose project name")
+    parser.add_argument("--base-port", type=int, default=8443, help="first of three consecutive HTTPS ports")
     parser.add_argument("action", choices=("prepare", "build", "start", "verify", "all", "maintenance-on", "maintenance-off"))
     args = parser.parse_args()
     try:
@@ -436,7 +438,9 @@ def main():
             char not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for char in args.project):
         parser.error("--project must use lowercase letters, digits, hyphens or underscores")
     PROJECT = args.project
-    APP, AUTH, MAIL = (f"https://{IP}:{port}" for port in (8443, 8444, 8445))
+    if not 1024 <= args.base_port <= 65533:
+        parser.error("--base-port must be between 1024 and 65533")
+    APP, AUTH, MAIL = (f"https://{IP}:{args.base_port + offset}" for offset in range(3))
     state = args.state.resolve(strict=True)
     if ROOT == state or ROOT in state.parents:
         parser.error("--state must be outside the repository")
@@ -449,9 +453,11 @@ def main():
         if previous["services"]["gateway"]["environment"]["OIDC_ISSUER"] != AUTH:
             parser.error("existing identities use another issuer; use their original --host or a new state directory")
     if (state / "deployment.json").exists():
-        if json.loads((state / "deployment.json").read_text()) != {"host": IP, "project": PROJECT}:
+        previous = json.loads((state / "deployment.json").read_text())
+        if (previous.get("host") != IP or previous.get("project") != PROJECT or
+                previous.get("base_port", 8443) != args.base_port):
             parser.error("state belongs to another host/project; do not reuse its identities or keys")
-    write(state / "deployment.json", {"host": IP, "project": PROJECT})
+    write(state / "deployment.json", {"host": IP, "project": PROJECT, "base_port": args.base_port})
     if args.action in ("verify", "maintenance-on", "maintenance-off"):
         values = json.loads((state / "secrets.json").read_text())
     else:

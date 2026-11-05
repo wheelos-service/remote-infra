@@ -92,4 +92,4 @@ Development credentials are for integration testing only. Production requires `A
 - Runtime configuration: `docs/operations.md`
 - Authentication: `docs/authentication.md`
 
-For the deployed account-authentication LAN environment on `10.0.39.138`, including browser certificate trust and the Apollo container at `zj@10.0.39.120`, follow [Manual account-authentication verification](manual-account-authentication.md). This is a separate protected Compose project from the older `10.0.39.103` example.
+For the deployed account-authentication environment on `whl@10.0.39.103`, using HTTPS ports `9443–9445` and the Apollo container at `zj@10.0.39.120`, follow [Manual account-authentication verification](manual-account-authentication.md). Source is under `/home/whl/01code/remote-infra-account-authentication`; protected state is alongside it in `account-authentication-state`. The earlier Mac deployment is stopped. Other remote projects, including the stack on `8443–8445`, are unchanged.

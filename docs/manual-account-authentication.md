@@ -1,39 +1,49 @@
-# Manual account-authentication verification on the local LAN
+# Manual account-authentication verification on the remote LAN server
 
-This guide covers organization bootstrap, administrator login, personnel invitation, vehicle registration and installation, permission changes, diagnostics, removal/rejoin, revocation, replacement, and transfer. It describes the local deployment prepared on 2026-11-05; it does not enable physical driving.
+This guide covers organization bootstrap, administrator login, personnel invitation, vehicle registration and installation, permission changes, diagnostics, removal/rejoin, revocation, replacement, and transfer. It describes the remote deployment prepared on 2026-11-05; it does not enable physical driving.
 
 ## 1. Deployment and client
 
 | Component | Address or location |
 | --- | --- |
-| Application / fleet | <https://10.0.39.138:8443/> |
-| Administration | <https://10.0.39.138:8443/#/admin> |
-| Casdoor login | <https://10.0.39.138:8444> |
-| Captured invitation mailbox | <https://10.0.39.138:8445> |
-| Server | This Mac, `10.0.39.138` |
-| Compose project | `account-authentication-local` |
-| Protected server state | `/Users/jie/.local/state/remote-infra/account-authentication` |
+| Application / fleet | <https://10.0.39.103:9443/> |
+| Administration | <https://10.0.39.103:9443/#/admin> |
+| Casdoor login | <https://10.0.39.103:9444> |
+| Captured invitation mailbox | <https://10.0.39.103:9445> |
+| Server | `whl@10.0.39.103` |
+| Server source | `/home/whl/01code/remote-infra-account-authentication` |
+| Compose project | `account-authentication-remote` |
+| Protected server state | `/home/whl/01code/account-authentication-state` |
 | Vehicle SSH | `zj@10.0.39.120` |
 | Apollo container | `apollo_dev_zj` |
 | Vehicle host mount | `/home/zj/01code/apollo-base` → `/apollo` |
 | Isolated vehicle files | `/apollo/.account-authentication` inside the container |
 
-The client may be a different computer on the LAN. Open the deployed application URL; no separate frontend installation is needed. The browser needs JavaScript, Web Crypto for PKCE, and trusted HTTPS access to both ports 8443 and 8444. Use a current desktop browser for the first verification. Broad browser/device compatibility has not been exhaustively tested. Viewing video additionally requires WebRTC/network media support; this authentication deployment does not publish media ports and has simulation control disabled.
+The client may be a different computer on the LAN. Open the deployed application URL; no separate frontend installation is needed. The browser needs JavaScript, Web Crypto for PKCE, and trusted HTTPS access to both ports 9443 and 9444. Use a current desktop browser for the first verification. Broad browser/device compatibility has not been exhaustively tested. Viewing video additionally requires WebRTC/network media support; this authentication deployment does not publish media ports and has simulation control disabled.
 
-Use the same application origin on every client. Do not substitute `localhost`, another IP, or a locally copied HTML file: the OAuth redirect URI and allowed origin are registered for `https://10.0.39.138:8443/`. Reserve this IP for the Mac. Changing the issuer IP requires a deliberate new deployment/migration, not editing URLs against existing identities.
+Use the same application origin on every client. Do not substitute `localhost`, another IP, or a locally copied HTML file: the OAuth redirect URI and allowed origin are registered for `https://10.0.39.103:9443/`. Reserve this IP for the remote server. Changing the issuer IP requires a deliberate new deployment/migration, not editing URLs against existing identities.
 
-### Trust the local certificate
+The previous Mac project is stopped, with its volumes and protected state retained. Its test identities were not migrated: this remote stack has a new issuer, organization and credentials. The other user’s existing remote stack on ports 8443–8445 is unchanged. Use the new URLs, administrator credentials and CA below.
+
+### Trust the deployment certificate
 
 Obtain the **public** CA file from the operator at:
 
 ```text
-/Users/jie/.local/state/remote-infra/account-authentication/root.crt
+/home/whl/01code/account-authentication-state/root.crt
+```
+
+Copy only the public certificate to your client:
+
+```bash
+scp whl@10.0.39.103:/home/whl/01code/account-authentication-state/root.crt ./account-authentication-root.crt
+openssl x509 -in ./account-authentication-root.crt -noout -fingerprint -sha256
 ```
 
 Verify its SHA-256 certificate fingerprint before importing it:
 
 ```text
-B9:D4:AA:74:E3:90:1F:04:2F:A2:64:3E:76:27:A6:A3:93:03:03:76:0F:32:88:7A:92:0C:9F:AC:5F:B8:5B:83
+6C:23:3A:C6:66:26:96:B7:B8:E6:FE:3E:74:F0:8F:A7:3D:7A:5D:C0:EC:C1:C9:FF:E7:EB:F9:40:8D:96:24:FD
 ```
 
 On macOS, import the certificate into the testing user's Keychain and trust it for SSL. On Windows, use the testing user's Trusted Root Certification Authorities store. On Linux/Firefox, configure the trust store actually used by that browser. Restart the browser, then open the application, authentication and mailbox URLs. None should show a certificate error. Trust is needed on each client computer; it has already been configured inside the vehicle container.
@@ -48,26 +58,28 @@ Invitations are captured locally. An address such as `manual-viewer@example.test
 
 ## 2. Server commands and health
 
-Run these in the repository on the Mac:
+Connect to the deployment server and run these commands:
 
 ```bash
-export AUTH_STATE=/Users/jie/.local/state/remote-infra/account-authentication
+ssh whl@10.0.39.103
+cd /home/whl/01code/remote-infra-account-authentication
+export AUTH_STATE=/home/whl/01code/account-authentication-state
 
 authctl() {
   python3 infra/scripts/authentication-test.py \
-    --state "$AUTH_STATE" --host 10.0.39.138 \
-    --project account-authentication-local "$@"
+    --state "$AUTH_STATE" --host 10.0.39.103 \
+    --project account-authentication-remote --base-port 9443 "$@"
 }
 
 dc() {
-  docker compose -p account-authentication-local \
+  docker compose -p account-authentication-remote \
     -f "$AUTH_STATE/compose.json" "$@"
 }
 
 dc ps
 authctl verify
-curl --fail --cacert "$AUTH_STATE/root.crt" https://10.0.39.138:8443/healthz
-curl --fail --cacert "$AUTH_STATE/root.crt" https://10.0.39.138:8443/readyz
+curl --fail --cacert "$AUTH_STATE/root.crt" https://10.0.39.103:9443/healthz
+curl --fail --cacert "$AUTH_STATE/root.crt" https://10.0.39.103:9443/readyz
 ```
 
 Expected: all eight services run, PostgreSQL is healthy, both endpoints return 200, and `verify` reports successful TLS/discovery/S256 PKCE/platform-admin context. Redis, PostgreSQL and LiveKit signaling have no direct published port; `/rtc` goes through the Gateway.
@@ -78,13 +90,13 @@ To rebuild/redeploy this same environment, run `authctl all`. Reuse the same sta
 
 **There is currently no self-service “Create organization” button or organization-creation HTTP API.** The supported creation path is the protected offline `auth-admin` bootstrap. Creating a Casdoor organization alone does not create a Gateway organization.
 
-The local deployment has already performed initial bootstrap:
+The remote deployment has already performed initial bootstrap:
 
 - Organization: **Authentication test fleet**.
-- Gateway organization ID: `497d9f8e-7b60-4297-b694-83bcdf8c1cd8` (confirm against `bootstrap.json` if the environment is recreated).
+- Gateway organization ID: `d41a620e-39aa-46e3-b37b-c88de3cb4246` (confirm against `bootstrap.json` if the environment is recreated).
 - Platform administrator: the identity in `administrator.txt`.
 
-For a fresh independent test environment, create a mode-0700 state directory outside the repository and use the deployment helper's `all` action with an unused project and LAN address/ports. Bootstrap automatically creates a new organization and verified administrator. The existing local ports are already in use; do not run a second project on them simultaneously.
+For a fresh independent test environment, create a mode-0700 state directory outside the repository and use the deployment helper's `all` action with an unused project and LAN address/ports. Bootstrap automatically creates a new organization and verified administrator. Use `--base-port` to select three consecutive unused HTTPS ports. The existing deployment ports are already in use; do not run a second project on them simultaneously.
 
 For an **additional organization in the same Gateway**, the operator workflow is:
 
@@ -97,7 +109,7 @@ For an **additional organization in the same Gateway**, the operator workflow is
      "org_name": "Second verification fleet",
      "user_id": "<new canonical UUID>",
      "name": "Second fleet bootstrap administrator",
-     "issuer": "https://10.0.39.138:8444",
+     "issuer": "https://10.0.39.103:9444",
      "subject": "<verified new Casdoor user UUID>"
    }
    ```
@@ -129,7 +141,7 @@ For an **additional organization in the same Gateway**, the operator workflow is
 
 Expected: `none` means no execution authority; active members still have organization-wide observation. Invitation success is not proof of external delivery or password setup. Existing unbound identities are never silently claimed by email.
 
-An existing smoke-test invitation for `local-viewer@example.test` is already in the local mailbox; its password has not been set by the deployment agent. Use a fresh email for an independent manual run. For a failed operation, inspect the sanitized code and retry explicitly when eligible. Avoid duplicate invitations created with different identities just to hide a failure.
+An existing smoke-test invitation for `remote-viewer@example.test` is already in the local mailbox; its password has not been set by the deployment agent. Use a fresh email for an independent manual run. For a failed operation, inspect the sanitized code and retry explicitly when eligible. Avoid duplicate invitations created with different identities just to hide a failure.
 
 ## 5. Add a vehicle and download its package
 
@@ -142,7 +154,7 @@ An existing smoke-test invitation for `local-viewer@example.test` is already in 
 The deployment already registered and installed this smoke-test vehicle:
 
 ```text
-v-497d9f8e-apollo-120-26b2d9a13aa14b56
+v-d41a620e-apollo-120-e3b129db601b4d2e
 ```
 
 Do not try to reinstall that completed operation. Use a new registration for a fresh-install test, or the replacement workflow in section 10 for the installed device.
@@ -169,7 +181,7 @@ docker exec apollo_dev_zj install -m 600 \
 
 docker exec apollo_dev_zj python3 \
   /apollo/.account-authentication/source/infra/scripts/install-vehicle-auth.py \
-  --gateway https://10.0.39.138:8443 \
+  --gateway https://10.0.39.103:9443 \
   --vehicle-id "$VEHICLE_ID" \
   --package /apollo/.account-authentication/manual-config/enrollment.json \
   --output /apollo/.account-authentication/manual-config/device.json
@@ -293,9 +305,13 @@ In **操作审计**, filter by actor, target, action, outcome and RFC3339 time r
 
 ## 12. Deployment verification record
 
-The deployment performed actual TLS/discovery/PKCE/admin-context/health checks, created a dummy invitation in the local mailbox, registered the Apollo smoke-test vehicle, installed its credential inside `apollo_dev_zj`, and verified the native C++ authentication stages. The two native test targets `telemetry_test` and `auth_diagnostics_test` passed. The Python installer tests passed locally and the actual Python 3.8 installer completed in the container.
+The remote deployment passed TLS/discovery/S256 PKCE/admin-context and health/readiness verification with all eight services running. Its frontend build/typecheck passed, and the custom-port deployment/installer unit suite passed all eight checks. Browser interaction remains a manual verification step using this guide.
 
-Two compatibility fixes found during this deployment are included in the commit: fractional timestamp normalization for Python 3.8 and explicit `teleop:vehicle` on initial/refreshed C++ OAuth requests.
+The original Mac credential was moved to the root-owned mode-0700 `/apollo/.account-authentication/config/mac-deployment-backup` directory before installing the remote credential. The new public CA is installed as `/usr/local/share/ca-certificates/account-authentication-remote.crt`. The actual installer and native authentication checker passed against the remote server; consumed package copies were removed. Installation is completed, binding active, and server-observed telemetry online.
+
+Across the deployment checks, the agent performed actual TLS/discovery/PKCE/admin-context/health checks, created a dummy invitation in the local mailbox, registered the Apollo smoke-test vehicle, installed its credential inside `apollo_dev_zj`, and verified the native C++ authentication stages. The two native test targets `telemetry_test` and `auth_diagnostics_test` passed. The Python installer tests passed locally and the actual Python 3.8 installer completed in the container.
+
+The original feature commit `b9660ce` includes two compatibility fixes found during the earlier Mac deployment: fractional timestamp normalization for Python 3.8 and explicit `teleop:vehicle` on initial/refreshed C++ OAuth requests.
 
 The container's default GCC 9 cannot compile the pinned Cyber dependency's floating-point `std::to_chars`. GCC 11 packages from the [Ubuntu Toolchain PPA](https://launchpad.net/~ubuntu-toolchain-r/+archive/ubuntu/test) were verified against its published signing-key fingerprint and extracted under `/apollo/.account-authentication/toolchain`. They were **not installed system-wide**; the default compiler and shared libraries remain unchanged. The isolated build gives only its own build actions and executables an explicit path to the extracted C++ runtime:
 
@@ -314,9 +330,9 @@ docker exec -u zj \
       //:vehicle_telemetry'
 ```
 
-The native telemetry executable built successfully and is running as a dedicated read-only process. Stopping the dedicated runtime changed presence to **offline**; restarting it restored **online** with a newer server receipt timestamp. The Gateway reports the enrolled vehicle **online**; installation is **completed** and binding **active**. Its startup log reports `read-only C++ telemetry started; no control writer`. Chassis/localization values are present only when real Cyber samples are available. No physical-control or video-readiness claim is made.
+The native telemetry executable built successfully and is running as a dedicated read-only process. The earlier Mac verification confirmed that stopping/restarting this runtime changes offline/online presence. The remote deployment reuses that verified executable with a newly enrolled identity and has confirmed fresh online telemetry. The Gateway reports the enrolled vehicle **online**; installation is **completed** and binding **active**. Its startup log reports `read-only C++ telemetry started; no control writer`. Chassis/localization values are present only when real Cyber samples are available. No physical-control or video-readiness claim is made.
 
-Runtime files are root-owned under `/apollo/.account-authentication/config`: `device.json`, `telemetry.pid`, and `telemetry.log`. The standalone process survives closing SSH, but it is not an installed service; after recreating/restarting the Apollo container, start it deliberately. Preserve the mounted directory and local CA when rebuilding that container.
+Runtime files are root-owned under `/apollo/.account-authentication/config`: `device.json`, `telemetry.pid`, and `telemetry.log`. The standalone process survives closing SSH, but it is not an installed service; after recreating/restarting the Apollo container, start it deliberately. Preserve the mounted directory and deployment CA when rebuilding that container.
 
 To stop **only this test process**, run from the vehicle host:
 

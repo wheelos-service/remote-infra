@@ -108,14 +108,14 @@ form inputs. Casdoor still owns passwords, login and account recovery.
 ### One-time operator setup
 
 For the isolated LAN acceptance environment on `10.0.39.103`, use
-`https://10.0.39.103:8443/#/admin` and click **管理员登录**. The account in
+`https://10.0.39.103:9443/#/admin` and click **管理员登录**. The account in
 `administrator.txt` belongs to the test organization, not Casdoor's built-in
 system console. Trust the generated `root.crt` on the testing workstation first.
 The public certificate is also served at `/test-root-ca.crt`; verify it against
-the server copy before trusting it. `https://10.0.39.103:8445` is an authenticated
+the server copy before trusting it. `https://10.0.39.103:9445` is an authenticated
 test mailbox: messages are captured locally, not delivered to real email accounts.
 
-`infra/scripts/authentication-test.py --state <protected-directory> all` prepares,
+`python3 infra/scripts/authentication-test.py --state /home/whl/01code/account-authentication-state --host 10.0.39.103 --project account-authentication-remote --base-port 9443 all` prepares,
 builds, starts and verifies this simulation-only stack. The existing state directory
 must be outside Git, owned by the operator and mode `0700`. It holds the generated
 Compose configuration, CA and protected `administrator.txt` and
@@ -481,4 +481,4 @@ Existing manual/additive provisioning boundaries and maintenance drain still app
 
 The implementation and disposable acceptance evidence dated 2026-11-05 are recorded in [plan.md](../plan.md#implementation-evidence), including replacement rotation, platform-only transfer, authenticated observation, and the real RTC drain interval. Earlier planning/validation caveats in this document are historical; production rollout still requires the documented maintenance and pilot procedure.
 
-For the deployed account-authentication LAN environment on `10.0.39.138`, including browser certificate trust and the Apollo container at `zj@10.0.39.120`, follow [Manual account-authentication verification](manual-account-authentication.md). This is a separate protected Compose project from the older `10.0.39.103` example.
+For the deployed account-authentication environment on `whl@10.0.39.103`, using HTTPS ports `9443–9445` and the Apollo container at `zj@10.0.39.120`, follow [Manual account-authentication verification](manual-account-authentication.md). Source is under `/home/whl/01code/remote-infra-account-authentication`; protected state is alongside it in `account-authentication-state`. The earlier Mac deployment is stopped. Other remote projects, including the stack on `8443–8445`, are unchanged.

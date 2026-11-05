@@ -17,15 +17,16 @@ class AuthenticationDeploymentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(deployment, "compose"), \
                 patch.multiple(deployment, IP="192.0.2.10", PROJECT="test-isolation",
-                               APP="https://192.0.2.10:8443", AUTH="https://192.0.2.10:8444",
-                               MAIL="https://192.0.2.10:8445"):
+                               APP="https://192.0.2.10:9443", AUTH="https://192.0.2.10:9444",
+                               MAIL="https://192.0.2.10:9445"):
             state = Path(directory)
             deployment.prepare(state)
             config = json.loads((state / "compose.json").read_text())
             services = config["services"]
             self.assertEqual(services["gateway"]["environment"]["OIDC_ISSUER"], deployment.AUTH)
             self.assertEqual(services["gateway"]["image"], "test-isolation-gateway:local")
-            self.assertEqual(services["caddy"]["ports"][0], "192.0.2.10:8443:8443")
+            self.assertEqual(services["caddy"]["ports"], [
+                "192.0.2.10:9443:9443", "192.0.2.10:9444:9444", "192.0.2.10:9445:9445"])
             for service in ("postgres", "redis", "gateway", "livekit"):
                 self.assertNotIn("ports", services[service])
             self.assertEqual((state / "secrets.json").stat().st_mode & 0o077, 0)
