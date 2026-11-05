@@ -11,7 +11,7 @@ This guide covers organization bootstrap, administrator login, personnel invitat
 | Casdoor login | <https://10.0.39.103:9444> |
 | Captured invitation mailbox | <https://10.0.39.103:9445> |
 | Server | `whl@10.0.39.103` |
-| Server source | `/home/whl/01code/remote-infra-account-authentication` |
+| Server source | `/home/whl/01code/remote-infra` |
 | Compose project | `account-authentication-remote` |
 | Protected server state | `/home/whl/01code/account-authentication-state` |
 | Vehicle SSH | `zj@10.0.39.120` |
@@ -48,6 +48,19 @@ Verify its SHA-256 certificate fingerprint before importing it:
 
 On macOS, import the certificate into the testing user's Keychain and trust it for SSL. On Windows, use the testing user's Trusted Root Certification Authorities store. On Linux/Firefox, configure the trust store actually used by that browser. Restart the browser, then open the application, authentication and mailbox URLs. None should show a certificate error. Trust is needed on each client computer; it has already been configured inside the vehicle container.
 
+For an Ubuntu client or the Ubuntu deployment host, use the repository script so the certificate is installed with the correct owner and permissions, the CA bundle is rebuilt, and HTTPS is checked immediately:
+
+```bash
+cd /home/whl/01code/remote-infra
+sudo -v
+bash infra/scripts/trust-authentication-ca.sh \
+  --ca /home/whl/01code/account-authentication-state/root.crt \
+  --fingerprint 6C:23:3A:C6:66:26:96:B7:B8:E6:FE:3E:74:F0:8F:A7:3D:7A:5D:C0:EC:C1:C9:FF:E7:EB:F9:40:8D:96:24:FD \
+  --url https://10.0.39.103:9443/readyz
+```
+
+The script intentionally supports Ubuntu only and requires an interactive sudo-capable account. It installs `/usr/local/share/ca-certificates/account-authentication-remote.crt`; it does not copy private keys or modify the other remote deployment on ports 8443–8445.
+
 The public certificate is also available at `/test-root-ca.crt`; verify it against the operator's copy, not solely against the download site. Do not copy Caddy's private CA keys or the whole state directory to clients.
 
 ### Credentials
@@ -62,7 +75,7 @@ Connect to the deployment server and run these commands:
 
 ```bash
 ssh whl@10.0.39.103
-cd /home/whl/01code/remote-infra-account-authentication
+cd /home/whl/01code/remote-infra
 export AUTH_STATE=/home/whl/01code/account-authentication-state
 
 authctl() {
@@ -84,7 +97,23 @@ curl --fail --cacert "$AUTH_STATE/root.crt" https://10.0.39.103:9443/readyz
 
 Expected: all eight services run, PostgreSQL is healthy, both endpoints return 200, and `verify` reports successful TLS/discovery/S256 PKCE/platform-admin context. Redis, PostgreSQL and LiveKit signaling have no direct published port; `/rtc` goes through the Gateway.
 
-To rebuild/redeploy this same environment, run `authctl all`. Reuse the same state directory, project, CA, encryption key and database volumes. `prepare`/`all` preserve the stored maintenance setting; `verify` does not regenerate configuration. Do not run `docker compose down -v` unless deliberately discarding the entire test environment.
+The deployment source is the Git clone on branch `feature/account-authentication`. Build and deployment commands run inside tmux session `account-authentication-deploy`. Attach from your client:
+
+```bash
+ssh -t whl@10.0.39.103 'tmux attach-session -t account-authentication-deploy'
+```
+
+Detach with **Ctrl-b**, then **d**. Docker runs the services in the background with `unless-stopped` restart policies; tmux preserves the deployment shell and output across SSH disconnects. Build output is saved to `$AUTH_STATE/deploy-tmux.log`, and `$AUTH_STATE/deploy-tmux.exit` records the last deployment exit code (`0` means success).
+
+To rebuild/redeploy this same environment, attach to tmux, run the setup commands above (starting at `cd`, without opening another SSH session), and run:
+
+```bash
+set -o pipefail
+authctl all 2>&1 | tee "$AUTH_STATE/deploy-tmux.log"
+printf '%s\n' "${PIPESTATUS[0]}" > "$AUTH_STATE/deploy-tmux.exit"
+```
+
+Check the exit code and run `authctl verify` before considering deployment complete. If the tmux session is absent, create it with `tmux new-session -s account-authentication-deploy -c /home/whl/01code/remote-infra` first. The old directory `/home/whl/01code/remote-infra-account-authentication` is retained but no longer used for builds. Reuse the same state directory, project, CA, encryption key and database volumes. `prepare`/`all` preserve the stored maintenance setting; `verify` does not regenerate configuration. Do not run `docker compose down -v` unless deliberately discarding the entire test environment.
 
 ## 3. Create an organization and establish its administrator
 
