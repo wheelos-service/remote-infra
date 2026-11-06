@@ -20,9 +20,8 @@ Vehicle edge agent
 The client and vehicle do not need to run in the cloud. Media sessions use
 short-lived LiveKit tokens and a room named `teleop-<vehicle_id>`. Independent
 fleet telemetry does not join that room. The new native vehicle entry point and
-its currently supported capabilities are documented in
-[`apps/vehicle-edge-cpp/README.md`](../apps/vehicle-edge-cpp/README.md); the Python
-command below is the separate legacy entry point, not the C++ media service.
+its currently supported capabilities are maintained in `apollo-base`; see
+[vehicle deployment](deployment.md#vehicle-deployment).
 
 ## Secret Classification
 
@@ -186,29 +185,16 @@ in [deployment.md](deployment.md).
 
 ## Vehicle Startup
 
-The current C++ simulator setup is documented in
-[`apps/vehicle-edge-cpp/README.md`](../apps/vehicle-edge-cpp/README.md).
+Build and start the vehicle runtime from `apollo-base` using its deployment
+instructions and a per-device, root-owned mode-0600 configuration. See
+[vehicle deployment](deployment.md#vehicle-deployment) for repository ownership
+and the authentication checker. The enrollment helper remains in this repository.
+
 The home route is the unified authenticated operations platform; monitor and
 drive workbenches connect to RTC. Mock requires explicit development preview.
 Simulation control must be explicitly enabled and does not actuate a real vehicle.
-Run `vehicle_auth_check /etc/teleop/device.json` to validate the vehicle's
-protected config, Gateway authentication, device mapping, and token issuance
-without joining a LiveKit room.
-
-### Legacy Python v1 reference
-
-The following commands are not the current React/C++ v2 workflow.
-The vehicle needs a unique ID, independent device credentials, API and RTC addresses, and camera/controller configuration. It requires outbound access only and must not receive the LiveKit API secret.
-
-```bash
-PYTHONPATH=apps/vehicle-edge/src python -m vehicle_edge.vehicle_node \
-  --gateway https://api.example.com \
-  --vehicle-id car-001 \
-  --livekit-url wss://rtc.example.com \
-  --device-config /etc/teleop/device.yaml
-```
-
-The device configuration must be root-owned with mode `0600`.
+Vehicle services require outbound API/RTC access and must never receive the
+LiveKit API secret.
 
 ## Production Boundaries
 

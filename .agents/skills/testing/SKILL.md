@@ -13,7 +13,7 @@ Read this file when writing, fixing, or extending tests, or when validating a be
 
 - Read the relevant implementation and neighboring tests first; prioritize boundaries with the highest regression risk.
 - Run Gateway tests with `go test ./...` from `apps/teleop-gateway/`.
-- Run vehicle tests with `pytest apps/vehicle-edge/tests`; install dependencies according to the project documentation when necessary.
+- Vehicle source and tests now live in `apollo-base`; follow `docs/deployment.md#vehicle-deployment` and that checkout's instructions. Do not run the removed Python/C++ vehicle suites from this repository.
 - For cross-component changes, run the applicable integration or E2E scripts under `tests/` and record service prerequisites.
 - When a test fails, determine whether it is a code regression, an environment prerequisite, or a pre-existing failure before changing code.
 
@@ -26,6 +26,6 @@ Read this file when writing, fixing, or extending tests, or when validating a be
 ## Sources (SSOT)
 
 - Gateway tests: `apps/teleop-gateway/internal/gateway/*_test.go`
-- Vehicle tests: `apps/vehicle-edge/tests/`
+- Vehicle tests: `apollo-base/data/sdk-kit` and `apollo-base/modules/teleop` (external repository)
 - Integration test instructions: `docs/remote-validation.md`
-- Test dependency configuration: `apps/vehicle-edge/pyproject.toml`
+- Local contract test dependencies: `tests/platform-contract-requirements.txt`

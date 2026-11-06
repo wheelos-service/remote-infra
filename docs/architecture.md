@@ -3,16 +3,18 @@
 ## Current platform and SDK boundary
 
 `frontend/` (React/TypeScript), `apps/teleop-gateway/` (Go), and
-`apps/vehicle-edge-cpp/` (C++17 Auth/Teleop/optional Data SDKs) are the current
-platform implementation. Operations telemetry/Monitor/events/tasks use
+the external `apollo-base/data/sdk-kit` and `apollo-base/modules/teleop`
+vehicle runtime form the current platform implementation.
+Operations telemetry/Monitor/events/tasks use
 authenticated HTTPS and durable stores independently of driving DataChannel.
 Viewing leases drive media demand; separate multi-vehicle observer Rooms never
 grant control authority. One operator controls at most one vehicle, and HTTP
 release is `202 PENDING` until authoritative device handover is confirmed.
 
-The Python agent and `apps/operator-console/` remain legacy v1 references,
-not replacements for the modular C++ SDK. Their shared input and camera-view
-state machines now live only in `packages/teleop-shared/`; both clients import
+`apps/operator-console/` remains a legacy v1 reference. The Python vehicle
+agent was removed from this repository during the move to `apollo-base`.
+Shared browser input and camera-view state machines live only in
+`packages/teleop-shared/`; both clients import
 that transport-free library. The React build does not bundle the v1 sender,
 Python actuator adapter or legacy session lifecycle. Input conversion targets the signed v2
 integer command contract; only allowlisted simulation is enabled. Gear/mode
@@ -27,6 +29,42 @@ preview; the default entry is the authenticated organization operations platform
 Neither video readiness nor a signed request is an actuator acknowledgement.
 Device publication remains governed by media demand in the C++ SDK.
 
+## Hosting and deployment boundaries
+
+Frontend hosting and browser execution are different boundaries. `frontend/`
+builds static assets; the authenticated application runs in the operator's
+browser, whether those assets come from the Compose Nginx service, a separate
+static server, or Cloudflare Pages. No per-operator frontend installation is
+required. Keep the monorepo and release the web assets and backend independently
+with compatible API/protocol versions; a directory rename or repository split
+is not required.
+
+For an initial pilot, the recommended topology is Cloudflare Pages for public
+web assets plus one Linux server running one Gateway, LiveKit, Redis, the
+configured identity service/databases and HTTPS ingress. The existing all-in-one
+Compose deployment remains supported. External static hosting requires ingress
+and release configuration changes described in
+[deployment.md](deployment.md#cloudflare-pages-and-a-single-backend-host);
+there is no dedicated backend-only Compose configuration in this repository.
+
+The browser obtains authorized sessions from the Gateway and connects to
+LiveKit. WSS carries RTC signaling; video and RTC DataChannel traffic use the
+negotiated WebRTC transport to the SFU, or an explicitly configured TURN relay.
+The static host/CDN and the Gateway's business HTTP endpoints are not video
+relays. In managed mode, the Gateway signaling gate remains mandatory even
+when media connects directly to the SFU.
+
+Cloudflare's ordinary HTTP proxy does not relay arbitrary UDP media or ICE TCP.
+DNS-only RTC ingress is the simple initial option; TURN and specialized
+transport proxies are separate deployment work, not provided by Pages.
+Static hosting does not protect uploaded maps through the application's OIDC
+login, nor does it remove the need for vehicle ACLs and short-lived RTC tokens.
+
+A single backend host is a pilot tradeoff, not high availability or a capacity
+guarantee. Scale media infrastructure based on measured bandwidth and latency;
+multiple Gateway instances require resolving SQLite operations storage,
+authorization freshness and lease/handover consistency first.
+
 ## Repository ownership
 
 ```text
@@ -35,7 +73,6 @@ frontend/src/pages/        Routed workbenches and page-level composition
 frontend/src/lib/          Domain models and strict protocol adapters
 packages/teleop-shared/    Single input/gamepad/view implementation
 apps/teleop-gateway/       Gateway API, authority and storage
-apps/vehicle-edge-cpp/     Auth/Data/Teleop SDKs, workers and native adapters
 api/schemas/              Versioned cross-language payload contracts
 infra/                    Build, static hosting and Compose/Kubernetes assets
 tests/                    Cross-component acceptance; unit tests stay with owners
@@ -43,10 +80,11 @@ docs/                     Current contracts, architecture and operations
 ```
 
 [compatibility.md](compatibility.md) identifies primary and retained APIs.
-`agents/` contains historical design proposals; `.agents/` contains contributor
-skills, knowledge indexes and implementation notes that point here, not parallel
-architecture specifications. CMake owns portable C++ SDK packaging; Bazel owns
-native Cyber builds. They use the same source implementations.
+`.agents/design/` contains historical design proposals; `.agents/knowledge/`,
+`.agents/skills/` and the implementation plans contain contributor guidance that
+points here, not parallel architecture specifications. Vehicle SDKs, native
+Cyber builds and deployment belong to `apollo-base`; see
+[vehicle deployment](deployment.md#vehicle-deployment).
 
 ## Identity and authorization architecture
 
@@ -84,6 +122,10 @@ are not implied. The current phased plan and evolution triggers are
 in [`.agents/auth-management-plan.md`](../.agents/auth-management-plan.md).
 
 ## Legacy v1 integration reference
+
+The remainder of this section records the former Python vehicle architecture.
+Its `apps/vehicle-edge` paths and vehicle test runners are historical and no
+longer exist in this checkout; current vehicle ownership is in `apollo-base`.
 
 This project is a LiveKit remote vehicle monitoring and teleoperation prototype with a browser client, cloud services, and a vehicle-side agent.
 

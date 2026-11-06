@@ -1,6 +1,6 @@
 # Account lifecycle and installation packages
 
-This increment extends the managed authorization pilot on the `frontend` platform. The primary management page is `/#/admin`, and installed device configuration targets `apps/vehicle-edge-cpp`. Static authorization is unchanged. Managed authorization still requires one Gateway, PostgreSQL, OIDC, pinned LiveKit v1.13.11, exclusively gated `/rtc`, and the existing maintenance/drain boundary.
+This increment extends the managed authorization pilot on the `frontend` platform. The primary management page is `/#/admin`, and installed device configuration is consumed by the vehicle runtime in `apollo-base` (see [vehicle deployment](deployment.md#vehicle-deployment)). Static authorization is unchanged. Managed authorization still requires one Gateway, PostgreSQL, OIDC, pinned LiveKit v1.13.11, exclusively gated `/rtc`, and the existing maintenance/drain boundary.
 
 ## Authority and state
 

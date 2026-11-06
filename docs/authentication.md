@@ -257,8 +257,8 @@ certificate validation enabled.
 Build and run the device-side check on the vehicle host:
 
 ```bash
-bazel build //:vehicle_auth_check
-bazel-bin/vehicle_auth_check /etc/teleop/device.json
+cd /apollo  # apollo-base checkout inside its development environment
+bazel run --lockfile_mode=off @sdk_kit//auth:vehicle_auth_check -- /etc/teleop/device.json
 ```
 
 It checks protected configuration, OAuth/Gateway authentication, exact

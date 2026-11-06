@@ -28,4 +28,5 @@ Read this file when performing code review, refactoring, or assessing cross-comp
 - Security requirements: `docs/spec.md` and `docs/operations.md`
 - Architecture boundaries: `docs/architecture.md`
 - Deployment configuration: `docker-compose.yml`, `docker-compose.no-domain.yml`, `infra/local-dev/Caddyfile`
-- Existing tests: `apps/teleop-gateway/internal/gateway/*_test.go`, `apps/vehicle-edge/tests/`
+- Existing local tests: `apps/teleop-gateway/internal/gateway/*_test.go`, `frontend/scripts/test.mjs`, `tests/`
+- External vehicle tests and deployment ownership: `docs/deployment.md#vehicle-deployment` (`apollo-base`)

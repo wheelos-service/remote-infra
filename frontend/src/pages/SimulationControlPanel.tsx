@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { DataPacket_Kind, Room, RoomEvent } from 'livekit-client'
 import { teleopConfig } from '../lib/teleop-config'
-import { SimulationController } from '../lib/simulation-controller'
+import { ControlSessionClient } from '../lib/control-session-client'
 import type { ControlCommand } from '../lib/control-protocol'
 import {
   ControlInput, GamepadInput, bindGamepadInput, bindKeyboardInput,
-  simulationCommand, simulationGamepadMapping, type GamepadView, type GamepadMapping,
-} from '../lib/simulation-input'
+  toV2ControlCommand, v2GamepadMapping, type GamepadView, type GamepadMapping,
+} from '../lib/control-input-adapter'
 
 export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyChange, onIntent }: {
   vehicleId: string
@@ -15,7 +15,7 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
   onBusyChange: (busy: boolean) => void
   onIntent: (vehicleId: string, command?: ControlCommand) => void
 }) {
-  const controller = useRef<SimulationController | undefined>(undefined)
+  const controller = useRef<ControlSessionClient | undefined>(undefined)
   const input = useRef<ControlInput | undefined>(undefined)
   const gamepad = useRef<GamepadInput | undefined>(undefined)
   const mounted = useRef(false)
@@ -25,7 +25,7 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
   const [message, setMessage] = useState('')
   const [inputState, setInputState] = useState({ keyboardEnabled: false, gamepadEnabled: false, message: '输入未启用' })
   const [pad, setPad] = useState<GamepadView>()
-  const [mapping, setMapping] = useState<GamepadMapping>({ ...simulationGamepadMapping })
+  const [mapping, setMapping] = useState<GamepadMapping>({ ...v2GamepadMapping })
   const changed = useCallback(() => {
     if (!mounted.current) return
     const state = controller.current?.state
@@ -43,7 +43,7 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
       send: async (intent) => {
         const active = controller.current
         if (active?.state !== 'ready' || !mediaReady.current) throw new Error('模拟控制或三路画面尚未就绪')
-        const command = simulationCommand(intent)
+        const command = toV2ControlCommand(intent)
         active.setCommand(command)
         onIntent(vehicleId, command)
         await active.tick()
@@ -54,8 +54,8 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
       },
     })
     const monitor = new GamepadInput(controls, (value) => { if (mounted.current) setPad(value) })
-    monitor.setMapping(simulationGamepadMapping)
-    setMapping({ ...simulationGamepadMapping })
+    monitor.setMapping(v2GamepadMapping)
+    setMapping({ ...v2GamepadMapping })
     input.current = controls
     gamepad.current = monitor
     const unbindKeyboard = bindKeyboardInput(controls, window, document)
@@ -97,7 +97,7 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
     }
     setMessage('')
     const room = new Room({ adaptiveStream: false, dynacast: false })
-    const next = new SimulationController(vehicleId, teleopConfig.gatewayUrl, bearer, {
+    const next = new ControlSessionClient(vehicleId, teleopConfig.gatewayUrl, bearer, {
       connect: async (token) => { await room.connect(teleopConfig.livekitUrl, token, { autoSubscribe: false }) },
       publish: async (body) => {
         await room.localParticipant.publishData(new Uint8Array(body), { reliable: true, topic: 'vehicle.control.v2',

@@ -13,6 +13,14 @@ Monitor 健康状态和告警均读取同一份合成快照。视频仍为示例
 Mock 与真实账号隔离；统一平台 `/#/?page=drive` 接入授权车辆、
 C++ 三路视频与 v2 模拟控制。Mock 不会因此连接真实车辆。
 
+## 部署边界
+
+前端可由当前 Compose Nginx、独立静态服务器或 Cloudflare Pages 托管，
+不要求在每台操作员电脑安装；网页下载后在浏览器中运行，分别连接 Gateway 和 LiveKit。
+静态站点不转发视频，也不管理控制权限。Cloudflare Pages 的发布目录、公开运行时配置、
+缓存、地图发布权限、跨域登录和后端入口调整统一见
+[独立静态托管方案](../docs/deployment.md#cloudflare-pages-and-a-single-backend-host)。
+
 ## 导航与优化计划
 
 当前版本基线提交为 `56cf3d7`，后续优先级及服务端前置条件见 [优化计划](OPTIMIZATION-PLAN.md)。
@@ -40,7 +48,8 @@ C++ 三路视频与 v2 模拟控制。Mock 不会因此连接真实车辆。
 | 远程占用 | 独立展示无会话/本人/其他终端/未知 | Gateway 的控制租约与交接栅栏，非 Chassis，也不代表执行器动作 |
 
 遥测样本新鲜度上限为 5 秒；Monitor 面板为 3 秒且不能截断，和在线 10 秒是独立门槛。
-各主题可配置，以上通常名称仅来自当前示例配置。当前页面仍是 Mock，不是已连接真实 Cyber。
+各主题可配置，以上通常名称仅来自当前示例配置。Mock 页面不连接真实 Cyber；
+默认统一平台的数据可信度取决于获授权的设备上报，不能仅凭页面显示认定实车接入成功。
 
 “位置展示”以小字显示地图名称，采用无地理投影的 +Y 向上/+X 向右、等比例坐标与米制比例尺。
 车体箭头描述车身航向，不把倒挡解释为车头翻转。车辆坐标锚点不为避让而偏移；
@@ -149,6 +158,9 @@ C++ 三路视频与 v2 模拟控制。Mock 不会因此连接真实车辆。
 
 ## 远程驾驶：先选车再进入工作台
 
+本节 Mock 行为仅适用于 `?preview=1`；默认统一平台使用授权车辆与实时视频，
+参见下方“当前路由与数据边界”，不再提供单独的 `/teleop` 路由。
+
 侧栏“远程驾驶”始终先进入独立车辆列表，支持车辆编号/名称搜索和离线筛选。
 列表显示连接、驾驶模式、远程会话及视频状态，点击整行直接进入该车工作台，无需额外操作按钮；
 车辆编号按钮同时支持键盘进入。使用与总览/监控一致的 `overviewVehicle` 读模型。
@@ -169,7 +181,7 @@ C++ 三路视频与 v2 模拟控制。Mock 不会因此连接真实车辆。
 运行跨页面流程验收前，先启动上述 Mock 前端并准备地图，安装环境需提供 Google Chrome 和 Node：
 
 ```bash
-FRONTEND_URL=http://localhost:8000/ node scripts/test-operations-ui.mjs
+FRONTEND_URL=http://localhost:8000/?preview=1 node scripts/test-operations-ui.mjs
 ```
 
 可通过 `CHROME_BIN` 指定 Chrome 可执行文件。该脚本检查告警唯一工作区、处置上下文返回、
@@ -185,10 +197,10 @@ npm run prepare:maps -- --source /mnt/synology/map \
 npm run dev
 ```
 
-访问 `http://localhost:8000/`，默认选择目录中的第一张地图。
-需要更换地图时使用 `?map=ruantong_hry_origin`（必须在本地地图目录中）。
+访问 `http://localhost:8000/?preview=1`，默认选择目录中的第一张地图。
+需要更换地图时追加 `&map=ruantong_hry_origin`（必须在本地地图目录中）。
 局域网启动：`HOST=10.0.39.103 PORT=8000 npm run dev`，
-然后访问 `http://10.0.39.103:8000/`。服务仅绑定此地址，不主动改变系统防火墙。
+然后访问 `http://10.0.39.103:8000/?preview=1`。服务仅绑定此地址，不主动改变系统防火墙。
 保留原有视觉风格，不新增 Mock 调试工具栏；监控与远程驾驶分别提供明确的选车入口。
 Mock 每 500 ms 通过现有 Zod 契约生成八车遥测及 Monitor/事件/任务读模型：
 
@@ -211,7 +223,7 @@ Mock 每 500 ms 通过现有 Zod 契约生成八车遥测及 Monitor/事件/任�
 
 此模式无需账号/设备凭据，只请求同源 `maps/*.json`，不调用 Gateway/OAuth/LiveKit，
 不申请观看或控制租约；即使同时指定控制开关也不能发令。视频仍为原版外部示例图片，
-不模拟解码视频或证明三端链路。`preview`/`scenario` 参数不再切换当前首页数据源。
+不模拟解码视频或证明三端链路。`preview=1` 显式选择 Mock；`scenario` 不切换首页数据源。
 动态八车页不混入兼容 `/operations` 的固定历史样例，不提供真实回放。
 事件确认和任务创建全部禁用，不能将 Mock 的健康/恢复视为真实车辆结论。
 
@@ -222,14 +234,14 @@ Mock 每 500 ms 通过现有 Zod 契约生成八车遥测及 Monitor/事件/任�
 
 ## C++ 实时三相机模拟
 
-从统一平台 `/#/?page=drive` 完成授权登录、选车并显式开始监看。实时工作台仅使用
+从统一平台 `/#/?page=drive` 完成授权登录并选车，进入工作台自动申请观看。实时工作台仅使用
 前左、前中、前右三路视频和 v2 模拟控制，不提供后视覆盖或实车执行器接入；视频未就绪、失焦、
 断线、停更或反馈异常时会锁定控制输入。运行时配置、C++ 示例配置与生产部署细节见
-[部署文档](../docs/deployment.md) 和 [C++ SDK 指南](../apps/vehicle-edge-cpp/README.md)。
+[部署文档](../docs/deployment.md#vehicle-deployment) 和 `apollo-base` 中的车端指南。
 
-跨端模拟控制验收：`python3 tests/control-chain.py`。实际浏览器三路解码、键盘/模拟手柄、
-视频停更锁定及交接验收：`python3 tests/driving-ui.py`。测试只使用隔离的 localhost 服务和
-C++ 测试宿主，不放宽生产配置权限。
+原 `control-chain.py` / `driving-ui.py` 已随车端迁移从本仓库移除。跨端模拟控制、
+实际浏览器三路解码、键盘/模拟手柄、视频停更锁定及交接验收应在匹配的
+`apollo-base` 环境执行；本仓库可运行的检查见 [测试指南](../tests/README.md)。
 
 ## 构建
 
@@ -252,34 +264,40 @@ secret、设备凭据或访问令牌。Access token 只保存在当前页面内�
 
 ## 当前路由与数据边界
 
-`App.tsx` 只注册 Mock 运维首页 `/` 和独立实时入口 `/teleop`。首页及其总览、监控、告警、
-任务页面使用本地 Mock；不挂载登录、授权车辆目录或实时控制能力。任务管理仅展示只读 Mock
-查询记录，演示表单的保存与下发保持禁用。
+`App.tsx` 只注册统一运营平台 `/` 和组织管理 `/admin`。
+默认首页登录后获取组织上下文及授权车辆；没有数据时不回退 Mock。
+只有 hash 外 `?preview=1` 使用本地八车 Mock，任务演示表单的保存与下发保持禁用。
 
-`/teleop` 使用 Gateway 授权车辆目录，操作者必须显式选择车辆并开始监看。工作台只订阅
+`/#/?page=drive` 使用 Gateway 授权车辆目录，操作者显式选车后工作台申请观看。工作台只订阅
 `camera-left`、`camera-center`、`camera-right` 三路前视视频；未开放后视相机或旧的多车监看页面。
 每一路都必须持续产生解码帧才视为视频就绪。v2 控制默认关闭；仅在部署显式启用
 `simulationControl` 时提供模拟输入，不能连接实车执行器。身份、签名、反馈、超时和交接门槛
 仍按既有协议执行。
 
-旧的授权车队/监控页面及 `/data`、`/operations` 业务面板未由 `App.tsx` 路由，不再作为可用 UI
-描述。相关纯数据契约继续由单元测试覆盖；`VehicleDataPanel` 只由测试中的固定预览用例挂载。
+统一平台使用 hash 查询参数切换总览、监控、驾驶、告警和任务；没有独立
+`/teleop`、`/data`、`/operations` 兼容入口。`VehicleDataPanel` 只由固定预览测试挂载。
 部署配置、容器挂载与运行时配置以 [部署文档](../docs/deployment.md) 为准；本 README 不复制多车、
 多相机或已移除页面的旧运行说明。
 
 ## 本地开发与验证
 
-纯 Mock 首页可直接通过 `npm run dev` 预览；首页不会调用 Gateway 或 LiveKit。实时入口仅在本地
-开发环境显式指定配置时使用：
+启动 `npm run dev` 后，纯 Mock 使用 `/?preview=1`，不会调用 Gateway 或 LiveKit。
+本地真实服务与模拟控制使用：
 
 ```text
-http://localhost:8000/?dev=1&backend=http://localhost:8080&livekit=ws://localhost:7880
+http://localhost:8000/?dev=1&control=simulation&backend=http://localhost:8080&livekit=ws://localhost:7880#/?page=drive
 ```
 
 本机开发令牌登录只在 `localhost`、`127.0.0.1` 或 `::1` 且带 `dev=1` 时提供；令牌仅保存在
 当前页面内存。摄像头就绪前控制输入保持锁定，失焦、断线、视频停更或控制反馈异常都会停止
 并锁定输入，不能仅凭再次出帧自动恢复。控制验收只使用 C++ 模拟车辆，不连接实车执行器。
 
+进入工作台不申请控制权；点击“申请模拟控制权”、等待 READY、显式启用输入后才发令。
+`control-session-client.ts` 负责申请/续租/签名/停发/释放与交接，
+`control-input-adapter.ts` 只把共享输入意图转换为 v2 命令，不处理认证或执行。
+这两个模块不再保留旧 `simulation-*` 文件或导出别名；模拟语义保留在 UI 和车端执行配置。
+各独立开关及推荐调试组合以 [远程联调指南](../docs/remote-validation.md#独立开关与职责) 为准。
+
 键盘及标准手柄输入状态机由 `packages/teleop-shared` 共享。跨端模拟控制和真实浏览器三路解码
-验收脚本分别见 `python3 tests/control-chain.py` 与 `python3 tests/driving-ui.py`；
+验收由 `apollo-base` 车端环境负责；
 部署配置、运行时注入及生产 Compose 流程见 [部署文档](../docs/deployment.md)。

@@ -66,9 +66,9 @@ physical-control sessions. This separate simulated ACK never enables
 `CONTROL_HANDOVER_ACK_ENABLED`, which remains false by default.
 The existing per-vehicle/per-tenant-operator singleton fences still apply.
 
-See [`tests/control-chain.py`](../../tests/control-chain.py) for the disposable
-cross-end acceptance runner and the
-[SDK protocol/testing guide](../vehicle-edge-cpp/README.md#testable-v2-control-loop).
+See the [test guide](../../tests/README.md) for local Gateway checks and the
+external acceptance fixture. Vehicle SDK and control-chain acceptance now belong
+to `apollo-base`; see [vehicle deployment](../../docs/deployment.md#vehicle-deployment).
 
 ## Registered vehicle snapshots
 

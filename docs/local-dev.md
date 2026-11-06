@@ -21,7 +21,6 @@ flow and must not be used in production.
 In a second terminal:
 
 ```bash
-cd frontend
 cd packages/teleop-shared
 npm ci
 cd ../../frontend
@@ -43,9 +42,9 @@ only, never client secrets or access tokens.
 
 ## 3. Current vehicle SDK
 
-The primary vehicle runtime is the C++ SDK in `apps/vehicle-edge-cpp/`;
-`apps/vehicle-edge/` is the legacy Python v1 reference. Follow the C++ README
-for supported simulator/native build setup. The vehicle requires a real
+The vehicle runtime and SDK now live in `apollo-base/modules/teleop` and
+`apollo-base/data/sdk-kit`. Follow the [vehicle deployment boundary](deployment.md#vehicle-deployment)
+and the matching Apollo checkout for simulator/native build setup. The vehicle requires a real
 client-credentials issuer and per-device credentials; `AUTH_MODE=dev` is not a
 vehicle credential provider.
 
@@ -60,8 +59,8 @@ To validate a provisioned vehicle's authentication without starting Cyber or
 joining LiveKit:
 
 ```bash
-bazel build //:vehicle_auth_check
-bazel-bin/vehicle_auth_check /etc/teleop/device.json
+cd /apollo  # apollo-base checkout inside its development environment
+bazel run --lockfile_mode=off @sdk_kit//auth:vehicle_auth_check -- /etc/teleop/device.json
 ```
 
 See [authentication.md](authentication.md) for the operator/device flows,

@@ -35,14 +35,17 @@ The vehicle watchdog monitors the time since the last valid control message. Whe
 
 ## End-to-End Tests
 
-The security test suite covers forged signatures, replayed sequences, and command timeout behavior. Run the applicable tests from the repository root:
+Gateway and browser protocol tests run in this repository:
 
 ```bash
-pytest apps/vehicle-edge/tests
-python tests/e2e_secure_receiver.py
+(cd apps/teleop-gateway && go test ./...)
+npm --prefix frontend test
 ```
 
-Use test credentials and local endpoints only.
+Vehicle signature, replay and watchdog tests now belong to `apollo-base`.
+The former Python vehicle/security runners were removed; see
+[vehicle deployment](deployment.md#vehicle-deployment) for the external test
+boundary. Local tests do not qualify physical actuation.
 
 ## Production Requirements
 
@@ -56,5 +59,5 @@ Use test credentials and local endpoints only.
 
 - Control schema: `api/schemas/datachannel-control.schema.json`
 - Gateway implementation: `apps/teleop-gateway/`
-- Vehicle receiver: `apps/vehicle-edge/src/vehicle_edge/`
-- Security tests: `tests/e2e_secure_receiver.py`
+- Vehicle receiver and safety tests: `apollo-base/modules/teleop`
+- Local test guide: `tests/README.md`

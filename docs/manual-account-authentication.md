@@ -279,6 +279,10 @@ If no configuration was saved and the ticket was consumed, issue a fresh package
 
 ## 6. Verify the device and distinguish installation from online status
 
+Vehicle builds now belong to `apollo-base`; see [vehicle deployment](deployment.md#vehicle-deployment).
+The staged paths below and sections 12–13 record existing pre-migration installations.
+They must not be used to build a vehicle from a fresh `remote-infra` checkout.
+
 For the smoke-test vehicle already installed by this deployment:
 
 ```bash
@@ -288,15 +292,15 @@ docker exec apollo_dev_zj env -u LD_LIBRARY_PATH \
   --json /apollo/.account-authentication/config/device.json
 ```
 
-For a new vehicle, the direct installer already checks OAuth, Gateway identity, vehicle mapping and installation completion. To report online, run the native read-only telemetry executable with that vehicle's `device.json`. From inside the Apollo container, after building the native target as described in the C++ README:
+For a new vehicle, the direct installer already checks OAuth, Gateway identity,
+vehicle mapping and installation completion. Build and start the telemetry
+runtime from the matching `apollo-base` checkout with that vehicle's protected
+`device.json`; follow its runtime configuration instructions. Installing
+credentials alone does not report the vehicle online.
 
-```bash
-cd /path/to/remote-infra/apps/vehicle-edge-cpp
-env -u LD_LIBRARY_PATH ./bazel-bin/vehicle_auth_check --json "$DEVICE_DIR/device.json"
-env -u LD_LIBRARY_PATH ./bazel-bin/vehicle_telemetry "$DEVICE_DIR/device.json"
-```
-
-Use only one runtime per credential. The second command runs in the foreground; use the vehicle's service manager or a dedicated tmux session to keep it running. The deployment-specific build and detached-runtime example in section 12 applies to the existing test car; adjust config/PID/log paths for a new car.
+Use only one runtime per credential and the vehicle's service manager or a
+dedicated tmux session. The deployment-specific commands in sections 12–13
+apply only to their existing staged binaries, not newly migrated source.
 
 The native client explicitly requests `teleop:vehicle`. The checker does not join a room or verify a camera, Cyber discovery or driving. It issues a short-lived RTC token, so it can extend the next maintenance/drain waiting period.
 

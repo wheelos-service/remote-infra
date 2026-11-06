@@ -2,13 +2,11 @@
 
 ## Commands
 - Gateway tests: `cd apps/teleop-gateway && go test ./...`
-- Vehicle tests: `pytest apps/vehicle-edge/tests`
-- Native vehicle Cyber integration: `cd apps/vehicle-edge && bazel test //:cyber_integration_test --test_output=errors`
-- Native vehicle build: `cd apps/vehicle-edge && bazel build //:vehicle_node`
+- Apollo Teleop/Guardian/Canbus & SDK-Kit Bazel tests: `docker exec -u wfh -w /apollo apollo_dev_wfh_29599a1b bazel test --lockfile_mode=off @sdk_kit//tests/... //modules/teleop/... //modules/guardian/... //modules/canbus:canbus_test --test_output=errors`
+- Apollo LiveKit media worker smoke check: `docker exec -u wfh -w /apollo apollo_dev_wfh_29599a1b bazel run --lockfile_mode=off //modules/teleop:vehicle_media_worker -- --sdk-smoke`
 - Frontend build: `cd frontend && npm run build`
 - Frontend tests: `cd frontend && npm test`
 - Shared state-machine tests: `npm --prefix packages/teleop-shared test`
-- Legacy console tests: `cd apps/operator-console && npm test`
 - Backend build: `infra/scripts/build-backend.sh`
 - Frontend static build: `infra/scripts/build-frontend.sh`
 - Integration services: `docker compose up -d --build`

@@ -274,7 +274,7 @@ def main():
                     "-count=1", "-v", "-timeout=180s"]
             command = test
             if not shutil.which("go"):
-                cache = ROOT / "apps/vehicle-edge-cpp/build/managed-auth-go-cache"
+                cache = ROOT / ".cache/managed-auth-go-cache"
                 cache.mkdir(parents=True, exist_ok=True)
                 command = [
                     "docker", "run", "--rm", "--name", runner, "--network", "host",

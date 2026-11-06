@@ -25,8 +25,8 @@ const { outputFiles } = await esbuild.build({
     { in: 'src/lib/vehicle-data-api.ts', out: 'vehicle-data-api' },
     { in: 'src/lib/preview-vehicles.ts', out: 'preview-vehicles' },
     { in: 'src/lib/control-protocol.ts', out: 'control-protocol' },
-    { in: 'src/lib/simulation-controller.ts', out: 'simulation-controller' },
-    { in: 'src/lib/simulation-input.ts', out: 'simulation-input' },
+    { in: 'src/lib/control-session-client.ts', out: 'control-session-client' },
+    { in: 'src/lib/control-input-adapter.ts', out: 'control-input-adapter' },
     { in: 'src/lib/camera-view.ts', out: 'camera-view' },
     { in: 'src/lib/camera-feed.ts', out: 'camera-feed' },
     { in: 'src/lib/fleet-map.ts', out: 'fleet-map' },
@@ -59,8 +59,8 @@ const operations = await loadBundle('vehicle-operations-api')
 const dataAPI = await loadBundle('vehicle-data-api')
 const preview = await loadBundle('preview-vehicles')
 const controlProtocol = await loadBundle('control-protocol')
-const { SimulationController } = await loadBundle('simulation-controller')
-const simulationInput = await loadBundle('simulation-input')
+const { ControlSessionClient } = await loadBundle('control-session-client')
+const controlInput = await loadBundle('control-input-adapter')
 const cameraView = await loadBundle('camera-view')
 const cameraFeed = await loadBundle('camera-feed')
 const fleetMap = await loadBundle('fleet-map')
@@ -488,7 +488,7 @@ test('passive vehicle diagnosis prioritizes faults and treats missing, stale and
 })
 
 test('shared input converts normalized intent to v2 integers without enabling legacy actions', () => {
-  const convert = simulationInput.simulationCommand
+  const convert = controlInput.toV2ControlCommand
   assert.deepEqual(convert({ mode: 'low_level', steering: -0.5, throttle: 0.125, brake: 0, direction: -1 }),
     { steering: -500, throttle: 125, brake: 0, direction: -1 })
   for (const action of ['stop', 'emergency_stop']) assert.deepEqual(convert({ mode: 'high_level', action }),
@@ -503,14 +503,14 @@ test('shared input converts normalized intent to v2 integers without enabling le
   }
   assert.throws(() => convert({ mode: 'low_level', steering: 0, throttle: 0.5, brake: 0.5, direction: 1 }))
   assert.throws(() => convert({ mode: 'low_level', steering: 0, throttle: 0.0001, brake: 0.0001, direction: 1 }))
-  assert.equal(simulationInput.simulationGamepadMapping.autoEnterButton, -1)
-  assert.equal(simulationInput.simulationGamepadMapping.reverseButton, -1)
+  assert.equal(controlInput.v2GamepadMapping.autoEnterButton, -1)
+  assert.equal(controlInput.v2GamepadMapping.reverseButton, -1)
 })
 
 test('v2 input capability gate stops held movement instead of passing gear or mode through', async () => {
   const sent = [], states = []
-  const input = new simulationInput.ControlInput({
-    allowVehicleActions: false, send: async (intent) => { sent.push(simulationInput.simulationCommand(intent)) },
+  const input = new controlInput.ControlInput({
+    allowVehicleActions: false, send: async (intent) => { sent.push(controlInput.toV2ControlCommand(intent)) },
     onChange: (value) => states.push(value), onError: (error) => { throw error },
   })
   try {
@@ -532,18 +532,18 @@ test('v2 input capability gate stops held movement instead of passing gear or mo
 
 test('shared gamepad uses the v2 adapter and release replaces propulsion with braking', async () => {
   const sent = []
-  const input = new simulationInput.ControlInput({
-    allowVehicleActions: false, send: async (value) => { sent.push(simulationInput.simulationCommand(value)) },
+  const input = new controlInput.ControlInput({
+    allowVehicleActions: false, send: async (value) => { sent.push(controlInput.toV2ControlCommand(value)) },
     onChange: () => {}, onError: (error) => { throw error },
   })
-  const monitor = new simulationInput.GamepadInput(input, () => {})
+  const monitor = new controlInput.GamepadInput(input, () => {})
   const pad = {
     index: 0, id: 'standard-test-pad', mapping: 'standard', connected: true,
     axes: [0, 0, 0, 0], buttons: Array.from({ length: 16 }, () => ({ pressed: false, value: 0 })),
   }
   try {
     input.setAvailable(true)
-    monitor.setMapping(simulationInput.simulationGamepadMapping)
+    monitor.setMapping(controlInput.v2GamepadMapping)
     monitor.poll([pad], true)
     monitor.confirmMapping(true)
     monitor.setEnabled(true)
@@ -796,7 +796,7 @@ function controllerFixture() {
     }
     throw new Error('Unexpected request')
   }
-  const controller = new SimulationController('car-test', 'http://localhost', 'test-bearer', connection, () => {}, request)
+  const controller = new ControlSessionClient('car-test', 'http://localhost', 'test-bearer', connection, () => {}, request)
   const feedback = () => ({
     version: 2, type: 'control.feedback', vehicle_id: 'car-test', session_id: session.session_id,
     receiver_instance_id: 'a'.repeat(32), revision: 1, accepted_sequence: sequence,
@@ -814,7 +814,7 @@ test('default control HTTP transport does not bind browser fetch to the controll
     assert.notEqual(this, controller, 'native browser fetch rejects a controller receiver')
     return f.request(...args)
   })
-  controller = new SimulationController('car-test', 'http://localhost', 'test', f.connection, () => {})
+  controller = new ControlSessionClient('car-test', 'http://localhost', 'test', f.connection, () => {})
   try {
     await controller.acquire()
     assert.equal(controller.state, 'connecting')
@@ -971,7 +971,7 @@ test('stale feedback and stalled publication latch control off without queuing c
 test('control acquire timeout covers stalled response bodies', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] })
   let requested = false
-  const controller = new SimulationController('car-test', 'http://localhost', 'test', {
+  const controller = new ControlSessionClient('car-test', 'http://localhost', 'test', {
     connect: async () => {}, publish: async () => {}, disconnect: async () => {},
   }, () => {}, async () => {
     requested = true
