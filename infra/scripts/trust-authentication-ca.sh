@@ -72,7 +72,7 @@ if [[ -n "$expected_fingerprint" && "$fingerprint" != "$expected_fingerprint" ]]
   exit 1
 fi
 
-destination=/usr/local/share/ca-certificates/account-authentication-remote.crt
+destination="/usr/local/share/ca-certificates/teleop-${fingerprint//:/}.crt"
 elevate=()
 if ((EUID != 0)); then
   if ! sudo -v; then

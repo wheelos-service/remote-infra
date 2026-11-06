@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Launch an isolated, simulation-only LAN authentication acceptance deployment.
+"""Deploy and verify a managed single-server environment.
 
-Run with --state pointing to an existing owner-only directory outside Git.
-The directory holds generated Compose configuration, secrets and the local CA.
-Trust root.crt on the testing workstation before using the three HTTPS URLs.
-Existing projects, ports 443/8000, real vehicles and external SMTP are untouched.
+Settings are stored outside Git. Use up for initial deployment, update to rebuild
+and restart application services, and verify to check TLS and administrator login.
 """
 
 import argparse
 import base64
 import hashlib
+import fcntl
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
@@ -26,7 +26,9 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT = "authentication-test"
-IP = "10.0.39.103"
+IP = "127.0.0.1"
+BIND_ADDRESS = None
+MEDIA_IP = None
 APP = f"https://{IP}:8443"
 AUTH = f"https://{IP}:8444"
 MAIL = f"https://{IP}:8445"
@@ -50,7 +52,7 @@ def compose(state, *args, **kwargs):
                 *args], **kwargs)
 
 
-def prepare(state):
+def prepare(state, media_port=0):
     maintenance = "false"
     if (state / "compose.json").exists():
         previous = json.loads((state / "compose.json").read_text())
@@ -105,9 +107,11 @@ def prepare(state):
         "clientId": values["management_id"], "clientSecret": values["management_secret"],
         "grantTypes": ["client_credentials"], "tokenFormat": "JWT", "expireInHours": 0.1,
     }]})
+    rtc = (f"  tcp_port: {media_port}\n  udp_port: {media_port}\n  node_ip: {MEDIA_IP or IP}\n"
+           if media_port else
+           "  tcp_port: 7881\n  port_range_start: 51000\n  port_range_end: 51010\n")
     write(state / "livekit.yaml",
-          "port: 7880\nrtc:\n  tcp_port: 7881\n  port_range_start: 51000\n"
-          "  port_range_end: 51010\n  use_external_ip: false\n"
+          "port: 7880\nrtc:\n" + rtc + "  use_external_ip: false\n"
           "redis:\n  address: redis:6379\nkeys:\n"
           f"  authentication_test: {values['livekit']}\n")
     write(state / "runtime-config.js", "window.__LIVEKIT_INFRA_CONFIG__ = " + json.dumps({
@@ -214,12 +218,17 @@ def prepare(state):
             "image": "caddy:2-alpine",
             "user": f"{os.getuid()}:{os.getgid()}",
             "environment": {"XDG_CONFIG_HOME": "/data/config"},
-            "ports": [f"{IP}:{urllib.parse.urlsplit(origin).port}:{urllib.parse.urlsplit(origin).port}"
+            "ports": [f"{BIND_ADDRESS or IP}:{urllib.parse.urlsplit(origin).port}:{urllib.parse.urlsplit(origin).port}"
                       for origin in (APP, AUTH, MAIL)],
             "volumes": [volume("Caddyfile", "/etc/caddy/Caddyfile"),
                         f"{state / 'caddy-data'}:/data", "caddy-config:/config"],
         },
     }
+    if media_port:
+        services["livekit"]["ports"] = [
+            f"{BIND_ADDRESS or IP}:{media_port}:{media_port}/tcp",
+            f"{BIND_ADDRESS or IP}:{media_port}:{media_port}/udp",
+        ]
     for service in services.values():
         service["restart"] = "unless-stopped"
     write(state / "compose.json", {
@@ -240,7 +249,7 @@ def build(state):
     run([str(ROOT / "infra/scripts/build-frontend.sh")], cwd=ROOT)
     run(["docker", "run", "--rm", "-v", f"{ROOT / 'apps/teleop-gateway'}:/app",
          "-v", f"{state}:/output", "-w", "/app",
-         "-e", "GOPROXY=https://goproxy.cn,direct", "golang:1.24",
+         "-e", "GOPROXY=" + os.environ.get("GOPROXY", "https://proxy.golang.org,direct"), "golang:1.24",
          "go", "build", "-mod=readonly", "-o", "/output/auth-admin", "./cmd/auth-admin"])
     write(state / "Gateway.Dockerfile",
           "FROM golang:1.24\nCOPY apps/teleop-gateway/teleop-backend /usr/local/bin/\n"
@@ -253,10 +262,12 @@ def build(state):
     # Keep the protected bootstrap executable out of the application image.
     context = state / "frontend-image"
     context.mkdir(mode=0o700, exist_ok=True)
-    shutil.copytree(ROOT / "frontend/dist", context / "dist", dirs_exist_ok=True)
+    if (context / "dist").exists():
+        shutil.rmtree(context / "dist")
+    shutil.copytree(ROOT / "frontend/dist", context / "dist")
     write(context / "nginx.conf", (ROOT / "infra/frontend/nginx.conf").read_text())
     write(context / "Dockerfile",
-          "FROM docker.m.daocloud.io/library/nginx:stable-alpine\n"
+          "FROM nginx:stable-alpine\n"
           "COPY nginx.conf /etc/nginx/conf.d/default.conf\n"
           "COPY dist/ /usr/share/nginx/html/\n"
           "RUN chmod -R a+rX /usr/share/nginx/html\n")
@@ -299,8 +310,11 @@ def success(value, stage):
     return value.get("data")
 
 
-def start(state, values):
+def start(state, values, reload_network=False):
     compose(state, "up", "-d", "postgres", "redis", "casdoor", "mailpit", "livekit", "caddy")
+    if reload_network:
+        # Compose does not detect changes inside bind-mounted configuration files.
+        compose(state, "up", "-d", "--no-deps", "--force-recreate", "livekit", "caddy")
     root = state / "caddy-data/caddy/pki/authorities/local/root.crt"
     for _ in range(120):
         if root.exists():
@@ -375,16 +389,32 @@ def configure(state, values):
     }), "administrator identity creation")
 
 
+def verify_frontend(state):
+    context = ssl.create_default_context(cafile=str(state / "root.crt"))
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
+    assets = {"/": state / "frontend-image/dist/index.html",
+              "/main.js": state / "frontend-image/dist/main.js",
+              "/main.css": state / "frontend-image/dist/main.css",
+              "/runtime-config.js": state / "runtime-config.js"}
+    for path, source in assets.items():
+        expected = source.read_bytes()
+        with opener.open(APP + path, timeout=30) as response:
+            if response.status != 200 or response.read(len(expected) + 1) != expected:
+                raise RuntimeError("served frontend does not match the built artifact: " + path)
+
+
 def verify(state, values):
     for _ in range(120):
         try:
             for path in ("/healthz", "/readyz"):
                 request(state, path, admin=False, origin=APP)
+            verify_frontend(state)
             break
         except (OSError, RuntimeError):
             time.sleep(0.5)
     else:
-        raise RuntimeError("Gateway health/readiness failed")
+        raise RuntimeError("Gateway readiness or served frontend verification failed")
     discovery = request(state, "/.well-known/openid-configuration", admin=False)
     if discovery["issuer"] != AUTH or discovery["jwks_uri"] != AUTH + "/.well-known/jwks":
         raise RuntimeError("public discovery issuer/JWKS mismatch")
@@ -414,66 +444,140 @@ def verify(state, values):
                       bearer=token["access_token"])
     if not context.get("platform_admin"):
         raise RuntimeError("real administrator does not have platform administration")
-    print("PASS: verified TLS, discovery, health/readiness, real S256 PKCE/admin context.")
+    print("PASS: verified TLS, frontend assets, discovery, health/readiness, real S256 PKCE/admin context.")
     print(f"Admin: {APP}/#/admin\nCasdoor: {AUTH}\nProtected mailbox: {MAIL}")
     print(f"Credentials: {state / 'administrator.txt'} and {state / 'mail-credentials.txt'}")
     print(f"Trust CA: {state / 'root.crt'}")
-    print("No vehicle/media ports published; simulation control disabled.")
+    ports = json.loads((state / "compose.json").read_text())["services"]["livekit"].get("ports", [])
+    print("LiveKit media ports: " + (", ".join(ports) if ports else "disabled"))
+    print("Simulation control disabled. Camera publishing requires separate verification.")
 
 
-def main():
-    global IP, APP, AUTH, MAIL, PROJECT
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state", required=True, type=Path)
-    parser.add_argument("--host", default=IP, help="this server's stable LAN IPv4 address")
-    parser.add_argument("--project", default=PROJECT, help="isolated Docker Compose project name")
-    parser.add_argument("--base-port", type=int, default=8443, help="first of three consecutive HTTPS ports")
-    parser.add_argument("action", choices=("prepare", "build", "start", "verify", "all", "maintenance-on", "maintenance-off"))
-    args = parser.parse_args()
+def deployment_settings(parser, args, saved):
+    """Resolve saved options before any file or service changes."""
+    if not saved and args.host is None:
+        parser.error("--host is required for a new environment")
+    settings = dict(saved)
+    defaults = {"project": "teleop", "base_port": 8443, "media_port": 0}
+    for name in ("host", "project", "base_port", "media_port", "bind_address", "media_ip"):
+        supplied = getattr(args, name)
+        settings[name] = supplied if supplied is not None else saved.get(name, defaults.get(name))
+    host = settings["host"]
     try:
-        IP = str(ipaddress.IPv4Address(args.host))
+        host_ip = str(ipaddress.IPv4Address(host))
     except ipaddress.AddressValueError:
-        parser.error("--host must be a LAN IPv4 address")
-    if not args.project or not args.project[0].isalnum() or any(
-            char not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for char in args.project):
+        host_ip = None
+        if (len(host) > 253 or not all(re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
+                                      for label in host.split("."))):
+            parser.error("--host must be an IPv4 address or DNS hostname, without a URL or port")
+    project = settings["project"]
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project):
         parser.error("--project must use lowercase letters, digits, hyphens or underscores")
-    PROJECT = args.project
-    if not 1024 <= args.base_port <= 65533:
+    base_port, media_port = settings["base_port"], settings["media_port"]
+    if not 1024 <= base_port <= 65533:
         parser.error("--base-port must be between 1024 and 65533")
-    APP, AUTH, MAIL = (f"https://{IP}:{args.base_port + offset}" for offset in range(3))
-    state = args.state.resolve(strict=True)
-    if ROOT == state or ROOT in state.parents:
-        parser.error("--state must be outside the repository")
-    info = state.stat()
-    if not state.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        parser.error("--state must be owned by the current user with mode 0700")
-    os.umask(0o077)
-    if (state / "compose.json").exists():
-        previous = json.loads((state / "compose.json").read_text())
-        if previous["services"]["gateway"]["environment"]["OIDC_ISSUER"] != AUTH:
-            parser.error("existing identities use another issuer; use their original --host or a new state directory")
-    if (state / "deployment.json").exists():
-        previous = json.loads((state / "deployment.json").read_text())
-        if (previous.get("host") != IP or previous.get("project") != PROJECT or
-                previous.get("base_port", 8443) != args.base_port):
-            parser.error("state belongs to another host/project; do not reuse its identities or keys")
-    write(state / "deployment.json", {"host": IP, "project": PROJECT, "base_port": args.base_port})
-    if args.action in ("verify", "maintenance-on", "maintenance-off"):
-        values = json.loads((state / "secrets.json").read_text())
+    if media_port != 0 and not 1024 <= media_port <= 65535:
+        parser.error("--media-port must be 0 or between 1024 and 65535")
+    if media_port in range(base_port, base_port + 3):
+        parser.error("--media-port must not overlap the HTTPS ports")
+    settings["bind_address"] = settings["bind_address"] or host_ip or "0.0.0.0"
+    settings["media_ip"] = settings["media_ip"] or host_ip
+    for name in ("bind_address", "media_ip"):
+        if settings[name] is not None:
+            try:
+                settings[name] = str(ipaddress.IPv4Address(settings[name]))
+            except ipaddress.AddressValueError:
+                parser.error("--" + name.replace("_", "-") + " must be an IPv4 address")
+    if media_port and not settings["media_ip"]:
+        parser.error("a DNS host with media enabled requires --media-ip (the reachable server IPv4 address)")
+    if saved:
+        for name in ("host", "project", "base_port"):
+            if settings[name] != saved.get(name, defaults.get(name)):
+                parser.error("state belongs to another host/project/HTTPS port; use its original settings or a new state directory")
+        for name in ("media_port", "bind_address", "media_ip"):
+            previous = saved.get(name, {"media_port": 0, "bind_address": host_ip or "0.0.0.0", "media_ip": host_ip}[name])
+            if settings[name] != previous and args.action != "prepare":
+                parser.error("network changes require explicit prepare, then start; update preserves saved configuration")
+    return settings
+
+
+def execute(state, settings, action):
+    """Keep routine builds/updates separate from configuration generation."""
+    if action in ("status", "logs", "stop"):
+        commands = {"status": ("ps",), "logs": ("logs", "--tail=100", "gateway", "frontend"), "stop": ("stop",)}
+        compose(state, *commands[action])
+        return
+    if action == "prepare" or not (state / "compose.json").exists():
+        write(state / "deployment.json", settings)
+        values = prepare(state, settings["media_port"])
     else:
-        values = prepare(state)
-    if args.action in ("maintenance-on", "maintenance-off"):
+        values = json.loads((state / "secrets.json").read_text())
+    if action in ("maintenance-on", "maintenance-off"):
         config = json.loads((state / "compose.json").read_text())
         config["services"]["gateway"]["environment"]["AUTHORIZATION_MANAGED_MAINTENANCE"] = (
-            "true" if args.action == "maintenance-on" else "false")
+            "true" if action == "maintenance-on" else "false")
         write(state / "compose.json", config)
         compose(state, "up", "-d", "--no-deps", "--force-recreate", "gateway")
-    if args.action in ("build", "all"):
+        return
+    if action in ("build", "all", "up", "update"):
+        compose(state, "config", "--quiet")
         build(state)
-    if args.action in ("start", "all"):
-        start(state, values)
-    if args.action in ("verify", "all"):
+    if action == "update":
+        compose(state, "up", "-d", "--no-deps", "--force-recreate", "gateway", "frontend")
+    elif action in ("start", "all", "up"):
+        start(state, values, reload_network=action == "start")
+    if action in ("verify", "all", "up", "update"):
         verify(state, values)
+
+
+def main(argv=None):
+    global IP, APP, AUTH, MAIL, PROJECT, BIND_ADDRESS, MEDIA_IP
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--state", required=True, type=Path, help="private state directory outside the checkout; created on first deployment")
+    parser.add_argument("--host", help="server IPv4 address or DNS name; required only on first deployment")
+    parser.add_argument("--project", help="unique Compose project name (default: teleop)")
+    parser.add_argument("--base-port", type=int, help="first of three HTTPS ports (default: 8443)")
+    parser.add_argument("--media-port", type=int, help="LAN TCP/UDP media port; 0 disables it (default)")
+    parser.add_argument("--bind-address", help="local IPv4 to bind (default: host IP, or 0.0.0.0 for DNS)")
+    parser.add_argument("--media-ip", help="reachable server IPv4 advertised to media clients (default: host IP)")
+    parser.add_argument("action", choices=("up", "update", "verify", "status", "logs", "stop", "prepare", "build", "start", "all", "maintenance-on", "maintenance-off"))
+    args = parser.parse_args(argv)
+    state = args.state.resolve()
+    if ROOT == state or ROOT in state.parents:
+        parser.error("--state must be outside the repository")
+    if state.exists():
+        info = state.stat()
+        if not state.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            parser.error("--state must be owned by the current user with mode 0700")
+    saved_path = state / "deployment.json"
+    saved = json.loads(saved_path.read_text()) if saved_path.exists() else {}
+    settings = deployment_settings(parser, args, saved)
+    IP, PROJECT = settings["host"], settings["project"]
+    BIND_ADDRESS, MEDIA_IP = settings["bind_address"], settings["media_ip"]
+    APP, AUTH, MAIL = (f"https://{IP}:{settings['base_port'] + offset}" for offset in range(3))
+    config_path = state / "compose.json"
+    if config_path.exists():
+        previous = json.loads(config_path.read_text())
+        if previous["services"]["gateway"]["environment"]["OIDC_ISSUER"] != AUTH:
+            parser.error("existing identities use another issuer; use their original host/port or a new state directory")
+        if not saved:
+            parser.error("existing Compose state is missing deployment.json; restore its saved identity before continuing")
+        if not (state / "secrets.json").is_file():
+            parser.error("existing environment is missing secrets.json; restore its protected state instead of generating new identities")
+    elif args.action in ("update", "verify", "status", "logs", "stop", "maintenance-on", "maintenance-off"):
+        parser.error("environment is not initialized; run up first")
+    os.umask(0o077)
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Prevent two deployment commands from writing shared state/recreating services.
+    fd = os.open(state / ".deploy.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            parser.error("another deployment command is running for this state directory")
+        if (json.loads(saved_path.read_text()) if saved_path.exists() else {}) != saved:
+            parser.error("deployment settings changed; retry the command")
+        execute(state, settings, args.action)
 
 
 if __name__ == "__main__":

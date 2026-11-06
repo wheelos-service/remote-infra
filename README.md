@@ -16,6 +16,10 @@ and [compatibility boundaries](docs/compatibility.md).
 
 ## Quick Start
 
+For managed accounts, vehicle enrollment and repeatable server updates, use the
+[deployment script and guide](docs/deployment.md). Host settings are supplied once
+and saved in a private state directory outside the checkout.
+
 ```bash
 cp .env.example .env
 docker compose config

@@ -13,7 +13,8 @@ Read this file when preparing a release, building images, deploying Docker Compo
 
 - Before release, confirm that tests, example configuration, deployment documentation, and image builds match the change.
 - Use `infra/scripts/build-backend.sh` and `infra/scripts/build-frontend.sh` for the repository's defined builds.
-- Deploy to the cloud with `docker compose --profile cloud up -d --build`, then verify `/healthz`, `/readyz`, logs, and key domains.
+- For a managed single-server environment, use `infra/scripts/deploy.py` with its saved `--state` directory: `up` for initialization/start and `update` for rebuild/restart/verification without regenerating configuration. Follow `docs/deployment.md`.
+- For the public-domain Compose topology, follow `docs/deployment-cloud.md` and use `docker compose --profile cloud up -d --build` with the existing overlays. Verify `/healthz`, `/readyz`, logs, and key domains.
 - Use HTTPS/WSS in production; open the required LiveKit media ports and never expose Redis publicly.
 - Inject secrets through the server environment or a Secret Manager; do not commit `.env` files or real credentials.
 

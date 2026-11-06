@@ -107,21 +107,17 @@ form inputs. Casdoor still owns passwords, login and account recovery.
 
 ### One-time operator setup
 
-For the isolated LAN acceptance environment on `10.0.39.103`, use
-`https://10.0.39.103:9443/#/admin` and click **管理员登录**. The account in
-`administrator.txt` belongs to the test organization, not Casdoor's built-in
-system console. Trust the generated `root.crt` on the testing workstation first.
-The public certificate is also served at `/test-root-ca.crt`; verify it against
-the server copy before trusting it. `https://10.0.39.103:9445` is an authenticated
-test mailbox: messages are captured locally, not delivered to real email accounts.
+Use the [deployment script](deployment.md) to create a managed environment and
+verify it. Open the resulting application URL at `/#/admin` and click
+**管理员登录**. Credentials are in the state's protected `administrator.txt`;
+the account belongs to the bootstrapped organization, not Casdoor's system console.
+Trust the public `root.crt` first. Invitations are captured in the authenticated
+test mailbox described by `mail-credentials.txt`.
 
-`python3 infra/scripts/authentication-test.py --state /home/whl/01code/account-authentication-state --host 10.0.39.103 --project account-authentication-remote --base-port 9443 all` prepares,
-builds, starts and verifies this simulation-only stack. The existing state directory
-must be outside Git, owned by the operator and mode `0700`. It holds the generated
-Compose configuration, CA and protected `administrator.txt` and
-`mail-credentials.txt` files. Reuse that directory to preserve the test identities;
-do not publish its contents. This environment does not expose real vehicle
-actuation or LiveKit media ports.
+Reuse the same state directory for updates. The script preserves identities,
+keys and saved network settings; media ports are optional and driving remains
+disabled. The [user and vehicle onboarding guide](onboarding.md)
+covers invitation, enrollment and permission verification.
 
 Use the supported Casdoor `4.25.0` contract and the existing public browser
 application. Configure its native Email provider for the `forget` rule, password
@@ -481,4 +477,5 @@ Existing manual/additive provisioning boundaries and maintenance drain still app
 
 The implementation and disposable acceptance evidence dated 2026-11-05 are recorded in [plan.md](../plan.md#implementation-evidence), including replacement rotation, platform-only transfer, authenticated observation, and the real RTC drain interval. Earlier planning/validation caveats in this document are historical; production rollout still requires the documented maintenance and pilot procedure.
 
-For the deployed account-authentication environment on `whl@10.0.39.103`, using HTTPS ports `9443–9445` and the Apollo container at `zj@10.0.39.120`, follow [Manual account-authentication verification](manual-account-authentication.md). Source is under `/home/whl/01code/remote-infra`; protected state is alongside it in `account-authentication-state`. The earlier Mac deployment is stopped. Other remote projects, including the stack on `8443–8445`, are unchanged.
+For a managed environment on any server, use [Deployment](deployment.md), then
+follow the [user and vehicle onboarding guide](onboarding.md).

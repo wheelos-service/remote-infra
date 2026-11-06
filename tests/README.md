@@ -40,6 +40,16 @@ Installer rejection and filesystem checks can also run without services:
 python3 -m unittest discover -s tests -p test_vehicle_auth_installer.py
 ```
 
+Deployment configuration, saved-setting preservation, failure ordering and command
+locking also run without services:
+
+```bash
+python3 -m unittest discover -s tests -p test_authentication_deployment.py
+```
+
+CI additionally generates a disposable DNS/media deployment with `deploy.py prepare`
+and validates it with Docker Compose, without starting services.
+
 The RTC runner pins `livekit/livekit-server:v1.13.11`. It verifies a real
 WebSocket upgrade/join, server-issued reconnect-token signature/expiry,
 maintenance rejection for old and refreshed tokens, actual RoomService drain,
