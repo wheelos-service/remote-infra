@@ -192,7 +192,9 @@ Do not try to reinstall that completed operation. Use a new registration for a f
 
 Use the existing `infra/scripts/install-vehicle-auth.py`. It needs Python 3.8 or newer, the downloaded JSON package, and HTTPS trust for the Gateway and identity provider. The vehicle's IP address is not an installation parameter. Run the installation on the vehicle, not on the Mac or deployment server, so the permanent credential is created on the correct machine.
 
-**Prepare files and CA trust before downloading a fresh ticket.** Obtain the installer from this repository and the public `root.crt` from the server operator (section 1). Place them in the Apollo container using its mounted filesystem or `docker cp`. Do not copy the server's state directory or private keys. The examples below run **as root inside the Ubuntu Apollo container**, from the repository directory containing `infra/scripts/install-vehicle-auth.py`. Adjust the two input paths to where you placed the files.
+**Prepare files and CA trust before downloading a fresh ticket.** Obtain the public `root.crt` from the server operator (section 1) and place it in the Apollo container using its mounted filesystem or `docker cp`. Use the current server CA, not the old Mac CA in `/Users/jie/.local/state/remote-infra/account-authentication`. Do not copy the server's state directory or private keys. CA setup below runs **as root inside the Ubuntu Apollo container**; enter it from the vehicle host with `docker exec -it -u 0 <container-name> bash`. Use absolute system utility paths because Apollo may provide a different command named `install`.
+
+The installer itself is one standalone Python file with no third-party Python dependencies. You may copy that file into the container, use a mounted repository, or stream it from a Git checkout on the vehicle host as shown below. A repository clone inside Apollo is not required.
 
 First verify and install the public CA; this is needed once per container:
 
@@ -204,14 +206,14 @@ openssl x509 -in "$CA" -noout -fingerprint -sha256
 The fingerprint must match `6C:23:3A:C6:66:26:96:B7:B8:E6:FE:3E:74:F0:8F:A7:3D:7A:5D:C0:EC:C1:C9:FF:E7:EB:F9:40:8D:96:24:FD` for the current deployment. Only after checking it, run:
 
 ```bash
-install -m 0644 "$CA" /usr/local/share/ca-certificates/account-authentication-remote.crt
-update-ca-certificates
+/usr/bin/install -m 0644 "$CA" /usr/local/share/ca-certificates/account-authentication-remote.crt
+/usr/sbin/update-ca-certificates
 curl --fail https://10.0.39.103:9443/readyz
 ```
 
 Now issue/download a fresh installation package for the same vehicle row and transfer it to this container within five minutes. The file downloaded earlier for `car-001` has expired; do not edit its expiry or create another vehicle to work around this. Preserve owner-only permissions during transfer. If using `docker cp`, run `chmod 600` on the package on the vehicle host first, then copy it into the container as root.
 
-For your `car-001`, run these commands inside the container:
+Choose one of the following installation methods. For `car-001`, if the repository is already mounted inside the container, run these commands there from its root directory:
 
 ```bash
 PACKAGE=/path/inside/container/v-d41a620e-car-001-171a5f3f662e4b19-enrollment.json
@@ -220,8 +222,8 @@ GATEWAY=https://10.0.39.103:9443
 DEVICE_DIR="/apollo/.account-authentication/vehicles/$VEHICLE_ID"
 
 umask 077
-install -d -m 700 "$DEVICE_DIR"
-install -m 600 "$PACKAGE" "$DEVICE_DIR/enrollment.json"
+/usr/bin/install -d -m 700 "$DEVICE_DIR"
+/usr/bin/install -m 600 "$PACKAGE" "$DEVICE_DIR/enrollment.json"
 
 python3 infra/scripts/install-vehicle-auth.py \
   --gateway "$GATEWAY" \
@@ -232,9 +234,31 @@ python3 infra/scripts/install-vehicle-auth.py \
 
 For another car, change `PACKAGE` and `VEHICLE_ID` to that car's package and full ID. Keep `GATEWAY` set to the operator's trusted deployment origin. The installer checks that both values match the package before redeeming it. `--package` accepts the downloaded JSON; `--ticket-file` is for a raw ticket and must not be used for this JSON file. If you copied just the standalone installer instead of the repository, use its actual path after `python3`; it has no third-party Python dependencies.
 
+**Recommended when the repository is on the vehicle host: stream the installer into Docker.** After completing the CA setup above, exit the container shell. Run the following on the **vehicle host**, from the Git checkout containing the installer. `PACKAGE` is a host path; `DEVICE_DIR` is a container path on its persistent `/apollo` mount:
+
+```bash
+CONTAINER=your_apollo_container_name
+PACKAGE=/path/on/vehicle-host/v-d41a620e-car-001-171a5f3f662e4b19-enrollment.json
+VEHICLE_ID=v-d41a620e-car-001-171a5f3f662e4b19
+GATEWAY=https://10.0.39.103:9443
+DEVICE_DIR="/apollo/.account-authentication/vehicles/$VEHICLE_ID"
+
+chmod 600 "$PACKAGE"
+docker exec -u 0 "$CONTAINER" /usr/bin/install -d -m 700 "$DEVICE_DIR"
+docker cp "$PACKAGE" "$CONTAINER:$DEVICE_DIR/enrollment.json"
+docker exec -i -u 0 "$CONTAINER" python3 - \
+  --gateway "$GATEWAY" \
+  --vehicle-id "$VEHICLE_ID" \
+  --package "$DEVICE_DIR/enrollment.json" \
+  --output "$DEVICE_DIR/device.json" \
+  < infra/scripts/install-vehicle-auth.py
+```
+
+Here `python3 -` reads the script from stdin and executes it inside Apollo. Docker sends the script to the container without saving a copy or requiring Git inside it. Use `-i` without `-t`. The package and generated credential remain inside the container. After success, remove the consumed package with `docker exec -u 0 "$CONTAINER" rm -- "$DEVICE_DIR/enrollment.json"` and remove the original host package. If verification was interrupted after saving the credential, repeat the streamed command with `--verify-existing` in place of `--package "$DEVICE_DIR/enrollment.json"`.
+
 Expected: `Vehicle authentication installed and verified`. The installer writes a root-owned 0600 `device.json` and verifies OAuth, `/api/auth/me`, vehicle mapping and installation completion. It refuses expired/reused tickets, unsafe package permissions, mismatched vehicle/Gateway values and existing output paths. Control, tasks and media are disabled in the generated configuration. Keep this directory outside Git or covered by an ignore-all `.gitignore`, and use a persistent Apollo mount so container recreation does not lose the credential.
 
-After success, remove the consumed package copies, retaining the credential:
+For the in-container method, after success remove the consumed package copies there, retaining the credential:
 
 ```bash
 rm -- "$DEVICE_DIR/enrollment.json"
