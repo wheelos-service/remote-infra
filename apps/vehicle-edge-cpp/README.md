@@ -902,6 +902,25 @@ env -u LD_LIBRARY_PATH bazelisk test --test_env=LD_LIBRARY_PATH= //:telemetry_te
 env -u LD_LIBRARY_PATH bazelisk build //:vehicle_telemetry
 ```
 
+On Ubuntu ARM64, the pinned `rules_foreign_cc` 0.10.1 Ninja download toolchain
+only matches x86_64. If analysis reports `No matching toolchains` for
+`ninja_toolchain`, select its pinned source-built Ninja and the container's
+installed CMake:
+
+```bash
+env -u LD_LIBRARY_PATH bazelisk build --jobs=4 \
+  --extra_toolchains=@@rules_foreign_cc+//toolchains:built_ninja_toolchain \
+  --extra_toolchains=@@rules_foreign_cc+//toolchains:preinstalled_cmake_toolchain \
+  //:vehicle_auth_check //:vehicle_telemetry
+```
+
+Use the same toolchain flags for native tests. If the container's default Bazel
+output directory is not writable, select a separate directory owned by the
+build user with `bazelisk --output_user_root=/tmp/vehicle-edge-bazel build ...`.
+The first build compiles Cyber, protobuf and DDS dependencies; subsequent builds
+reuse that cache. These options do not install a compiler or change the Apollo
+checkout.
+
 The `.bazelversion` matches the inspected Apollo toolchain. Bzlmod pins WheelOS
 core/messages; libcurl comes from the managed system. Reuse the configured
 repository and disk caches. Do not build native Apollo targets on the host,

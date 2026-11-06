@@ -454,3 +454,66 @@ docker exec -d apollo_dev_zj sh -c '
 ```
 
 Before restarting after a container recreation, verify that no live process already uses this credential; remove a stale PID file only after that check. For a separate manual vehicle, use its own config/PID/log paths and only one process per credential. Do not edit or launch the existing Apollo vehicle-control services as part of this authentication test.
+
+## 13. Car-001 ARM64 telemetry runtime — 2026-11-06
+
+Car-001 registration was complete, but no native uploader was running. Starting Dreamview, simcontrol, planning or routing alone does not send authenticated telemetry to this Gateway. After building and starting `vehicle_telemetry`, the Gateway reported car-001 online; both vehicles were then visible online in the monitor platform.
+
+| Item | Location |
+| --- | --- |
+| Vehicle host | `nvidia@10.0.39.101` |
+| Git checkout | `/home/nvidia/01projects/remote-infra` |
+| Apollo container | `36f32a01349b` (`apollo_dev_nvidia_a81bc173`) |
+| Persistent mount | `/home/nvidia/01projects/apollo-base` → `/apollo` |
+| Native build directory inside Apollo | `/apollo/.account-authentication/source/apps/vehicle-edge-cpp` |
+| Credential, PID and log directory | `/apollo/.account-authentication/vehicles/v-d41a620e-car-001-171a5f3f662e4b19` |
+| Host tmux session | `car-001-telemetry` (`runtime` and `logs` windows) |
+
+The native source was staged from the host Git checkout into the persistent Apollo mount. The source and its Bazel outputs are needed by the running executable; retain them. The isolated directory has an ignore-all `.gitignore` to exclude credentials and build artifacts from Apollo Git commits. Refresh the staged source deliberately before building a newer revision.
+
+The container uses Ubuntu 22.04, GCC 11 and ARM64. The pinned Ninja download toolchain has no ARM64 match; selecting its source-built fallback and the installed CMake resolved the build. From the vehicle host, the successful build command is:
+
+```bash
+docker exec -u nvidia \
+  -w /apollo/.account-authentication/source/apps/vehicle-edge-cpp \
+  36f32a01349b env -u LD_LIBRARY_PATH \
+  /opt/apollo/sysroot/bin/bazelisk --output_user_root=/tmp/apollo-bazel-nvidia \
+  build --jobs=4 --repository_cache=/home/nvidia/.cache/bazel/dev/repo_cache \
+  --extra_toolchains=@@rules_foreign_cc+//toolchains:built_ninja_toolchain \
+  --extra_toolchains=@@rules_foreign_cc+//toolchains:preinstalled_cmake_toolchain \
+  //:vehicle_auth_check //:vehicle_telemetry
+```
+
+The first build took about 18 minutes. `telemetry_test`, `auth_diagnostics_test` and `cyber_adapter_test` passed with the same toolchain flags. The native authentication checker passed all five stages against the enrolled credential. The runtime uses Cyber domain `80`, IP `127.0.0.1` and `CYBER_PATH=/apollo/cyber`, matching Dreamview. Control, tasks and media remain disabled.
+
+Attach to the running session:
+
+```bash
+ssh -t nvidia@10.0.39.101 'tmux attach-session -t car-001-telemetry'
+```
+
+Use **Ctrl-b**, then **n** to change windows; **Ctrl-b**, then **d** detaches without stopping telemetry. To inspect logs without attaching, run on the vehicle host:
+
+```bash
+docker exec -u 0 36f32a01349b tail -n 50 \
+  /apollo/.account-authentication/vehicles/v-d41a620e-car-001-171a5f3f662e4b19/telemetry.log
+```
+
+To stop only this uploader, validate its recorded PID before signaling it:
+
+```bash
+docker exec -i -u 0 36f32a01349b python3 - <<'PY_STOP'
+from pathlib import Path
+import os, signal
+directory = Path('/apollo/.account-authentication/vehicles/v-d41a620e-car-001-171a5f3f662e4b19')
+record = directory / 'telemetry.pid'
+pid = int(record.read_text())
+args = Path('/proc/' + str(pid) + '/cmdline').read_bytes().split(b'\0')
+if not args or b'vehicle_telemetry' not in args[0] or os.fsencode(directory / 'device.json') not in args:
+    raise SystemExit('PID does not identify the car-001 uploader')
+os.kill(pid, signal.SIGTERM)
+record.unlink()
+PY_STOP
+```
+
+After it exits, rerun the previous launch command in the tmux `runtime` window. The launch holds `telemetry.lock` to prevent duplicate launches through that command. This is a tmux-managed test runtime, not an automatic boot service. Container recreation also removes the `/tmp` Bazel output cache, so rebuild the native targets before restarting in a new container. Online status confirms recent Gateway receipt; individual Cyber samples can still be absent or stale and must be assessed separately.
