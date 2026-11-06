@@ -48,87 +48,14 @@ and PostgreSQL quiet state across runtime reconstruction. It waits the actual
 plus cold dependency downloads. It verifies signaling/authorization, not
 camera media, physical control, or an external production proxy topology.
 
-## C++ Data SDK chain
+## Component unit tests
 
-```bash
-bash tests/data-chain.sh
-```
-
-Requires CMake/C++17, SQLite3/JsonCpp/libcurl development dependencies and Go 1.24
-or Docker (`golang:1.24`), Node and installed `frontend` dependencies.
-`DATA_CHAIN_GO_CACHE` selects an existing writable Go
-cache; `DATA_SDK_BUILD_DIR` selects the C++ build directory. This uses actual C++
-DataService/OAuth/HTTP and Gateway authentication, ACL, validators and SQLite,
-not mock HTTP responses: device profile/telemetry, Monitor health and durable
-raise/recovery events, lost ACK after server commit, staged task reports and
-process restart deduplication. Actual C++ diagnostics and actual Gateway HTTP
-responses/export pages also pass through the frontend strict parsers.
-Only vehicle observations, credentials and the
-wait-only executor are synthetic. Owned test files and servers are cleaned.
-
-`ctest --test-dir apps/vehicle-edge-cpp/build --output-on-failure` also verifies
-SQLite restart/capacity/conflicts/unknown reconciliation, and actual Auth + Data
-archive extraction/linking without Teleop/LiveKit. Native
-`//:cyber_adapter_test` verifies typed queries against generated WheelOS protos;
-`//:vehicle_data` is the Data-only Cyber entry point. This does not qualify real
-motion, map readiness, physical handover or hardware.
-
-## C++ SDK and controller simulation chain
-
-```bash
-cmake -S apps/vehicle-edge-cpp -B apps/vehicle-edge-cpp/build -DEDGE_ENABLE_LIVEKIT=ON
-cmake --build apps/vehicle-edge-cpp/build -j 2
-ctest --test-dir apps/vehicle-edge-cpp/build --output-on-failure
-python3 tests/control-chain.py
-```
-
-Requires Docker, frontend npm dependencies, and Go or `golang:1.24`.
-`CONTROL_CHAIN_GO_CACHE` selects an existing writable Go cache for Docker;
-otherwise it uses the ignored C++ build directory. This is a **simulator-only**
-acceptance test, not a physical vehicle test.
-
-The chain uses real Gateway HTTP handlers and Redis Lua semantics (miniredis),
-actual shared input conversion and frontend WebCrypto signing, real loopback LiveKit, production C++
-supervision/IPC/verifier and a simulated execution endpoint. It covers session
-identity, normalized forward/turn/reverse/stop conversion, cross-language signature validation, tamper/replay rejection,
-watchdog/no automatic rearm, operator singleton, simulated handover and switching.
-Only fixture identities and execution are synthetic. Test-only worker config
-loading is not shipped. All owned temporary services/files are cleaned on exit.
-
-`cd frontend && npm test` additionally covers controller cancellation, stalled
-requests/publication, receiver changes and feedback expiry, input capability
-gates, gamepad-to-v2 conversion and camera group/pending-intent semantics. Manual browser
-steps and the v2 signature contract are in
-[`apps/vehicle-edge-cpp/README.md`](../apps/vehicle-edge-cpp/README.md#testable-v2-control-loop).
-
-The tests are grouped by scope:
-
-- `e2e_control_session_receiver.py` and `e2e_secure_receiver.py` are focused
-  security and control-session checks.
-- `e2e_qos_test.py` exercises LiveKit command delivery under simulated network
-  loss and delay.
-- `chaos_network.sh` is an optional manual network-chaos experiment; it is not
-  required for the normal Demo startup.
-
-The component unit tests remain next to their implementations under
-`apps/teleop-gateway/internal/gateway/` and `apps/vehicle-edge/tests/`.
-
-The shared input/view modules and their listener cleanup are tested in their
-own package:
-`npm ci --prefix packages/teleop-shared && npm --prefix packages/teleop-shared test`.
-Install it before the frontend or legacy console. Legacy UI/protocol integration
-tests remain under `apps/operator-console` (`npm test`); they are not a second
-copy of the shared state-machine tests. For Python
-reference tests use an environment with `apps/vehicle-edge/docker/requirements.txt`
-and pytest installed, then run from repository root:
-
-```bash
-PYTHONPATH=apps/vehicle-edge/src python3 -m pytest -q apps/vehicle-edge/tests
-```
-
-The native Cyber test is opt-in and skipped without its runtime. Camera tests
-use synthetic OpenCV images, not physical camera hardware. No production service,
-vehicle endpoint or actuator is used by these automated merge regressions.
+- Gateway unit tests: `cd apps/teleop-gateway && go test ./...`
+- Shared state-machine tests: `npm --prefix packages/teleop-shared test`
+- Frontend unit tests: `cd frontend && npm test`
+- Vehicle C++ SDK & Apollo Teleop tests live in `apollo-base`:
+  - `cd /apollo/data/sdk-kit && bazel test //...`
+  - `cd /apollo && bazel test //modules/teleop/... //modules/guardian/... //modules/canbus:canbus_test`
 
 ## Platform mock contracts
 

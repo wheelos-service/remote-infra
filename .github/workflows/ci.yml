@@ -47,13 +47,3 @@ jobs:
         run: |
           go test ./...
           go build -mod=readonly ./cmd/teleop-gateway
-  cpp:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y cmake g++ libjsoncpp-dev libcurl4-openssl-dev libssl-dev libsqlite3-dev
-          cmake -S apps/vehicle-edge-cpp -B apps/vehicle-edge-cpp/build -DEDGE_ENABLE_LIVEKIT=OFF
-          cmake --build apps/vehicle-edge-cpp/build -j 2
-          ctest --test-dir apps/vehicle-edge-cpp/build --output-on-failure

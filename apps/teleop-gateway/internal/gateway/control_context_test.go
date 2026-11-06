@@ -97,14 +97,45 @@ func TestDeviceControlContextAndSimulationFence(t *testing.T) {
 	}
 }
 
-// The acceptance runner starts real HTTP handlers and Redis Lua semantics in
-// an isolated process; only OAuth identities are disposable test fixtures.
-func TestControlChainServer(t *testing.T) {
-	output := os.Getenv("CONTROL_CHAIN_FIXTURE")
-	if output == "" {
-		t.Skip("run tests/control-chain.py")
+func TestSimulationRenewalAndPendingHandover(t *testing.T) {
+	f := newControlChainFixture(t)
+	body := `{"protocol_version":2,"client_instance_id":"browser-test","public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`
+	for _, expire := range []bool{false, true} {
+		response := f.request(t, "POST", "/api/vehicles/car-2/control/acquire", "controller", body, 200)
+		var acquired controlSessionResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &acquired); err != nil {
+			t.Fatal(err)
+		}
+		f.redis.FastForward(4 * time.Second)
+		f.request(t, "POST", "/api/control/"+acquired.Session.SessionID+"/renew", "controller", "{}", 200)
+		f.redis.FastForward(2 * time.Second)
+		active := f.request(t, "GET", "/api/vehicles/car-2/control/context", "device2", "", 200)
+		var state DeviceControlContext
+		if err := json.Unmarshal(active.Body.Bytes(), &state); err != nil || state.State != "ACTIVE" {
+			t.Fatalf("renewal did not preserve authority: %s (%v)", active.Body.String(), err)
+		}
+		if expire {
+			f.redis.FastForward(4 * time.Second)
+			f.request(t, "POST", "/api/control/"+acquired.Session.SessionID+"/renew", "controller", "{}", 404)
+		} else {
+			f.request(t, "POST", "/api/control/"+acquired.Session.SessionID+"/release", "controller", "{}", 202)
+		}
+		f.request(t, "POST", "/api/vehicles/car-1/control/acquire", "controller", body, 409)
+		f.request(t, "POST", "/api/vehicles/car-2/control/acquire", "controller", body, 409)
+		pending := f.request(t, "GET", "/api/vehicles/car-2/control/context", "device2", "", 200)
+		if err := json.Unmarshal(pending.Body.Bytes(), &state); err != nil || state.State != "PENDING" {
+			t.Fatalf("missing pending handover: %s (%v)", pending.Body.String(), err)
+		}
+		ack := fmt.Sprintf(`{"session_id":%q,"revision":%d}`, acquired.Session.SessionID, state.Revision)
+		f.request(t, "POST", "/api/vehicles/car-2/control/simulation-ack", "device2", ack, 204)
 	}
+	f.request(t, "POST", "/api/vehicles/car-1/control/acquire", "controller", body, 200)
+}
+
+func newControlChainFixture(t *testing.T) *telemetryFixture {
+	t.Helper()
 	f := newControlContextFixture(t)
+	f.api.leases.ttl = 5 * time.Second
 	t.Setenv("SIMULATED_CONTROL_VEHICLES_JSON", `["car-1","car-2"]`)
 	var err error
 	vehicleAuthorizer, err = NewVehicleAuthorizer([]VehicleACL{
@@ -117,6 +148,7 @@ func TestControlChainServer(t *testing.T) {
 	api := &ViewingLeaseAPI{store: &ViewingLeaseStore{client: f.client}, registry: f.api.registry,
 		authorizer: vehicleAuthorizer, identities: f.api.identities}
 	api.register(f.mux)
+	registerStaticOrganizationContext(f.mux, f.api.registry, vehicleAuthorizer)
 	f.mux.Handle("GET /api/auth/me", AuthenticationMiddleware(http.HandlerFunc(handleAuthMe)))
 	f.mux.Handle("GET /api/token/vehicle", AuthenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims := r.Context().Value("user").(*UserClaims)
@@ -135,6 +167,17 @@ func TestControlChainServer(t *testing.T) {
 	f.mux.HandleFunc("POST /oauth/token", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"access_token": "device2", "expires_in": 60})
 	})
+	return f
+}
+
+// The acceptance runner starts real HTTP handlers and Redis Lua semantics in
+// an isolated process; only OAuth identities are disposable test fixtures.
+func TestControlChainServer(t *testing.T) {
+	output := os.Getenv("CONTROL_CHAIN_FIXTURE")
+	if output == "" {
+		t.Skip("run tests/control-chain.py")
+	}
+	f := newControlChainFixture(t)
 	server := httptest.NewServer(f.mux)
 	defer server.Close()
 	data, _ := json.Marshal(map[string]string{"gateway_url": server.URL})
@@ -142,11 +185,15 @@ func TestControlChainServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	until := time.Now().Add(90 * time.Second)
+	lastTick := time.Now()
 	for time.Now().Before(until) {
 		if _, err := os.Stat(output + ".stop"); err == nil {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
+		now := time.Now()
+		f.redis.FastForward(now.Sub(lastTick))
+		lastTick = now
 	}
 	t.Fatal("control chain runner did not stop fixture")
 }

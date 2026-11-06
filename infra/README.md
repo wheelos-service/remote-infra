@@ -19,3 +19,10 @@ Only `frontend/public/runtime-config.js` (or an explicit public-only override)
 is mounted as browser configuration. It must contain no credentials.
 Primary commands and endpoint setup live in
 [`docs/deployment.md`](../docs/deployment.md), not historical design proposals.
+
+The frontend may instead be published to Cloudflare Pages, with one backend
+host for the pilot. This is an external-hosting recommendation, not a supplied
+backend-only Compose profile: the current Caddy service still depends on
+`frontend` and proxies its domain. Required ingress changes, public runtime
+configuration, cache rules and independent RTC media connectivity are documented
+in [the static-hosting deployment guide](../docs/deployment.md#cloudflare-pages-and-a-single-backend-host).

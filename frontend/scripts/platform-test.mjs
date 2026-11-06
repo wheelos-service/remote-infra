@@ -14,7 +14,7 @@ const bundle = await esbuild.build({
       export * from './src/lib/organization-context';
       export {fetchVehicles} from './src/lib/vehicles-api';
       export {ViewingLifecycle} from './src/lib/viewing-lifecycle';
-      export {SimulationController} from './src/lib/simulation-controller';
+      export {ControlSessionClient} from './src/lib/control-session-client';
       export function render(auth, location, vehicles = [], tab = 'realtime', data) {
         globalThis.__PLATFORM_AUTH__ = auth.authorizationContext || !auth.organizationId ? auth : {
           ...auth, authorizationContext: {mode: 'managed', organizations: auth.organizations}
@@ -281,7 +281,7 @@ test('cancelled viewing acquisition releases in its original organization after 
 test('simulation controller retains its original organization throughout its session', async () => {
   const requests = []
   api.setRequestOrganization(orgA)
-  const controller = new api.SimulationController('car-one', 'https://gateway.test.invalid', 'test-only',
+  const controller = new api.ControlSessionClient('car-one', 'https://gateway.test.invalid', 'test-only',
     { async connect() {}, async publish() {}, async disconnect() {} }, () => {},
     async (url, init) => {
       requests.push({ url: String(url), init })

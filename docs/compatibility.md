@@ -4,8 +4,8 @@ This document records the maintained interface boundaries. Current architecture
 is in [architecture.md](architecture.md); requirements are in
 [spec.md](spec.md), payload contracts in `api/schemas/`, and operational setup in
 [operations.md](operations.md) and [deployment.md](deployment.md).
-Design proposals under `agents/` and progress notes under `.agents/` are not
-alternative runtime specifications.
+Design proposals under `.agents/design/` and contributor notes under `.agents/`
+are not alternative runtime specifications.
 
 ## Runtimes
 

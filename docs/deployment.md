@@ -1,4 +1,4 @@
-# Docker Compose Deployment
+# Deployment: Docker Compose and Static Frontend Hosting
 
 ## Architecture
 
@@ -7,7 +7,8 @@ Browser
   | HTTPS/WSS
   +-- client.example.com   -> Caddy -> frontend Nginx
   +-- api.example.com      -> Caddy -> Teleop Gateway
-  +-- rtc.example.com      -> Caddy -> LiveKit
+  +-- rtc.example.com      -> Caddy -> LiveKit (WSS signaling)
+  +-- WebRTC media/data    -> LiveKit (negotiated UDP or ICE TCP)
 
 Vehicle edge agent
   | outbound HTTPS/WSS
@@ -16,6 +17,11 @@ Vehicle edge agent
 
 The browser and vehicle run outside the server containers. Docker Compose runs
 the primary frontend Nginx, Gateway, LiveKit, Redis and optionally Caddy.
+This is the current all-in-one topology. The
+[external static hosting recommendation](#cloudflare-pages-and-a-single-backend-host)
+keeps the same API and RTC boundaries but serves the frontend from Cloudflare
+Pages instead of the frontend container. Hosting changes do not grant control
+authority or qualify physical vehicle operation.
 
 ## Server Preparation
 
@@ -33,6 +39,15 @@ Allow the following firewall traffic:
 - TCP 80/443 for Caddy HTTP/HTTPS and WebSocket traffic.
 - TCP 7881 for LiveKit TCP fallback.
 - UDP 50000-50100 for LiveKit media.
+
+These media ports are from `infra/local-dev/livekit.template.yaml`, not a
+universal LiveKit default or a guaranteed concurrency limit. `7881` is ICE TCP,
+not HTTPS or TURN/TLS. Verify the SFU advertises a reachable public IP
+(`rtc.use_external_ip` is enabled), including cloud security groups and NAT
+mapping. Opening HTTPS alone does not make media reachable. The current template
+does not configure TURN; restrictive customer networks may require a separately
+configured and tested TURN relay. TURN/TLS on 443 requires a compatible Layer-4
+ingress or separate IP/host so it does not conflict with Caddy's HTTPS listener.
 
 ## Production Deployment
 
@@ -187,6 +202,147 @@ development preview. Configure the public runtime settings
 as described in [`frontend/README.md`](../frontend/README.md); enable simulation
 control explicitly and only for allowlisted simulated vehicles.
 
+## Cloudflare Pages and a single backend host
+
+### Recommended scope and DNS
+
+This is a reasonable initial pilot topology, not an already provisioned Pages
+deployment or a high-availability design:
+
+```text
+Browser --HTTPS--> client.example.com (Cloudflare Pages: web assets)
+Browser --HTTPS--> api.example.com --> Caddy --> Gateway
+Browser --WSS----> rtc.example.com --> Caddy --> LiveKit signaling
+Vehicle --------> api.example.com and rtc.example.com
+Browser/Vehicle --WebRTC media/data--> LiveKit public IP
+                                      (or a configured TURN relay)
+```
+
+In managed authorization mode, the WSS path is instead
+`Caddy -> Gateway signaling gate -> LiveKit`. Direct media connectivity does
+not permit bypassing that gate. Keep `docker-compose.authorization.yml` and its
+RTC upstream/version assertions consistent with the deployed topology.
+
+| Endpoint | Hosting/proxy recommendation | Responsibility |
+| --- | --- | --- |
+| `client.example.com` | Cloudflare Pages custom domain | Public HTML/JS/CSS and approved static assets |
+| `api.example.com` | Backend host; optional Cloudflare HTTPS proxy | Authenticated Gateway API, never cached at the edge |
+| `rtc.example.com` | Backend host, initially Cloudflare DNS only | HTTPS/WSS ingress; separate reachable SFU media ports |
+| `casdoor.example.com` | Configured identity host or backend host | OIDC login and token endpoints |
+
+Attach the client domain through Pages' custom-domain setup, not just a DNS
+record pointing to a backend IP. The backend host runs one Gateway plus
+LiveKit, Redis, the identity service/databases required by the chosen mode,
+and Caddy or an equivalent ingress. Private databases and LiveKit's internal
+`7880` listener must not acquire public host ports.
+
+Cloudflare's ordinary orange-cloud HTTP proxy can proxy supported HTTPS/WSS
+traffic, but not arbitrary UDP or `7881` ICE TCP. DNS-only RTC ingress is the
+simplest baseline; it does not hide the SFU public IP or provide Cloudflare
+proxy protection for media. Spectrum or TURN services are separate products
+and integration decisions; generic transport support is not proof of LiveKit
+compatibility. Select a server region close to vehicles/operators and measure
+actual customer-network latency, packet loss and reachability. Faster webpage
+delivery through Pages does not reduce the vehicle-to-SFU media path latency.
+
+### Frontend publication
+
+Build from the repository root, including the shared package:
+
+```bash
+infra/scripts/build-frontend.sh
+```
+
+Publish the resulting `frontend/dist/` through Pages Direct Upload or a
+controlled CI pipeline. For Git-integrated builds, use repository-root build
+context, the command above and output directory `frontend/dist`; pin a supported
+Node version and install dependencies as documented in `AGENTS.md`.
+The frontend is a static site, not a Gateway running in Pages Functions.
+
+Before upload, replace the generated `frontend/dist/runtime-config.js` with
+the **public-only** configuration shown under [Client Deployment](#client-deployment).
+The build copies `public/runtime-config.js`, whose repository default is empty.
+Cloudflare does not apply `FRONTEND_CONFIG_PATH` mounts or automatically turn
+environment variables into browser configuration. Republish configuration
+changes together with a compatible frontend release; keep source and deployment
+credentials outside the static artifact.
+
+Nginx headers also do not carry over to Pages. Add a `_headers` file directly
+to the final upload directory, after the build, for example:
+
+```text
+/
+  Cache-Control: no-store
+/index.html
+  Cache-Control: no-store
+/runtime-config.js
+  Cache-Control: no-store
+/main.js
+  Cache-Control: no-cache
+/main.css
+  Cache-Control: no-cache
+```
+
+The current build uses fixed `main.js`/`main.css` filenames: do not give them
+long-lived immutable caching. Verify the actual response headers after
+publication and prevent custom Cloudflare cache rules from overriding them.
+Hash routes such as `/#/?page=drive` do not require a catch-all API proxy.
+OIDC callbacks must serve the root page and preserve their query parameters.
+
+Generated maps may already be copied into `dist/maps/` by the build. Inspect
+the complete artifact before upload: application login does **not** restrict
+direct access to Pages static files. Publish only explicitly approved maps;
+confidential maps require an access-controlled delivery design, not merely
+hiding the map link in the UI. Check current Pages asset size/count limits,
+data-location requirements and customer access to Cloudflare before selection.
+
+### Backend ingress and cross-origin configuration
+
+The root Compose file still defines `frontend`, and its cloud Caddy service
+depends on that container. `infra/local-dev/Caddyfile` also serves
+`CLIENT_DOMAIN` from `frontend:80`. An unchanged
+`docker compose --profile cloud up -d --build` therefore is **not** a
+backend-only deployment.
+
+To retire the frontend container, first prepare and validate a deployment-specific
+Compose configuration and Caddy configuration that omit the frontend service,
+its Caddy dependency and the client-domain site block. Preserve the API, RTC
+and identity routes, persistent volumes and managed signaling gate. This guide
+does not add such an override or change the current default deployment. Retaining
+the unused loopback frontend container temporarily is possible, but the server
+must not serve or request certificates for the Pages-owned client domain.
+
+Set `CLIENT_ORIGIN=https://client.example.com` so Compose supplies the exact
+frontend origin to Gateway `ALLOWED_ORIGINS`. Register the application's actual
+OIDC redirect/logout URLs for that domain, and allow browser token exchange
+from it as required by the identity provider. Use HTTPS/WSS throughout, OIDC
+in production, and the existing public client/PKCE flow; do not introduce
+browser client secrets. Production authorization should not broadly allow
+arbitrary Pages preview origins.
+
+If the API or identity endpoints use Cloudflare's HTTP proxy, bypass caching
+for authenticated/dynamic endpoints and validate that WAF, challenge, rate-limit
+and timeout settings do not break device requests, browser token exchange,
+streams or WebSocket signaling. Do not make a browser challenge a prerequisite
+for vehicle authentication.
+
+### Acceptance and evolution
+
+Before choosing this topology for customer use, verify login/callbacks, API
+preflights, observer permissions, three-camera decoded video, session release
+and reconnect from actual operator and vehicle networks. A loaded webpage,
+`healthz`, or successful WSS handshake alone is not media acceptance. Test the
+configured fallback path where UDP is blocked; do not assume TURN is present.
+
+Retain independent frontend/backend release versions and rollback artifacts.
+One backend host is a single point of failure. Size SFU egress from subscribed
+camera bitrates and viewer counts, then measure CPU, bandwidth and end-to-end
+latency; Pages does not carry those media bytes. Separate the media host when
+measured contention or availability requirements warrant it, with explicit
+private service connectivity and ingress configuration. Do not start multiple
+Gateways until SQLite operations storage and authorization/lease/handover
+consistency have an approved multi-instance design.
+
 ## CI scope
 
 `.github/workflows/ci.yml` runs shared state-machine, React, legacy integration,
@@ -228,3 +384,6 @@ The current implementation supports Compose-based integration testing and demos.
 - Operations and secrets: `docs/operations.md`
 - Compose configuration: `docker-compose.yml`
 - Caddy configuration: `infra/local-dev/Caddyfile`
+- Cloudflare Pages: [Direct Upload](https://developers.cloudflare.com/pages/get-started/direct-upload/), [custom domains](https://developers.cloudflare.com/pages/configuration/custom-domains/), [headers](https://developers.cloudflare.com/pages/configuration/headers/)
+- Cloudflare proxy [network ports](https://developers.cloudflare.com/fundamentals/reference/network-ports/)
+- LiveKit [ports and firewall](https://docs.livekit.io/transport/self-hosting/ports-firewall/)

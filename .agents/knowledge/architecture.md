@@ -8,8 +8,8 @@ Read this file when you need to understand component boundaries, request paths, 
 - Pure input/gamepad/camera state machines are owned only by `packages/teleop-shared/`; neither browser imports the other application's source.
 - The Gateway owns identity validation, Vehicle ACLs, short-lived LiveKit tokens, control leases, and auditing.
 - The browser holds only short-lived tokens and the operator private key in page memory; the LiveKit API secret, Redis password, and device credentials must never reach the browser.
-- A Controller operates a vehicle through a Control Session and signed DataPackets; an Observer can only watch.
-- Vehicle Cyber monitoring and teleoperation stay in the existing single vehicle process and single LiveKit connection; see `vehicle-cyber.md` for module ownership, topics, and safety invariants.
+- A Controller operates a vehicle through a pre-authorized Standby Lease (`Control Session`) and signed DataPackets; an Observer can only watch.
+- Vehicle Cyber monitoring and teleoperation stay in the existing single vehicle process and single LiveKit connection; `vehicle-edge-cpp` acts as the network/cryptographic edge (`control_mode = disabled | simulation | cyber`), while Apollo `Guardian` is the single vehicle-side command arbiter (`MANUAL / AUTO / REMOTE` + orthogonal `SafetyOverride`) and `Canbus` is the hardware drive-by-wire executor (`COMPLETE_MANUAL / COMPLETE_AUTO_DRIVE / COMPLETE_REMOTE_DRIVE`). See `vehicle-cyber.md` for module ownership, topics, state machine, and safety invariants.
 - Docker Compose is the current deployment path; the Kubernetes manifests are deferred deployment assets.
 
 ## Do NOTs

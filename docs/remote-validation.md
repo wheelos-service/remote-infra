@@ -1,9 +1,8 @@
 # Remote Three-Process Validation
 
-> 当前 `frontend/` 是唯一平台源码目录，原版布局内已绑定动态八车 Mock、
-> 本地地图、告警/任务与 HUD 数据。默认访问 `/`，用 `?map=目录名` 选择已转换地图，
-> 详见 `frontend/README.md`。不新增工具栏，不连接真实 Gateway/LiveKit，不开放运动任务。
-> 下文实时接口与模拟控制仍为保留模块参考；第一层旧预览工具栏步骤不再适用于当前入口。
+> 当前 `frontend/` 是唯一平台源码目录。默认 `/` 是需登录的统一运营平台，
+> `/#/?page=drive` 是远程驾驶列表；只有显式 `?preview=1` 才使用无网络八车 Mock。
+> 当前 v2 控制只支持模拟 setpoint，不开放实车驾驶或运动任务派发。
 
 ## Current React + Go + C++ workflow
 
@@ -11,6 +10,58 @@
 下方原 Python/standalone console 步骤仅为 legacy v1 参考，不可与当前 v2
 控制/交接流程混用。系统按“多车监控、按需视频、单车独占控制”分层：
 当前支持多车只读监控和显式模拟控制，**不开放实车驾驶或运动任务派发**。
+
+### 独立开关与职责
+
+这些开关不是同一个“模拟模式”，不能相互代替，也不增加兼容别名：
+
+| 层级 | 配置 / 入口 | 唯一职责 |
+| --- | --- | --- |
+| 页面 Mock | `?preview=1` | 本地合成八车读模型；不登录、不请求 Gateway/LiveKit、不申请控制权 |
+| 浏览器模拟控制 | 公开配置 `simulationControl: true`；localhost 可用 `?dev=1&control=simulation` | 显示模拟控制入口；仍需登录、ACL、三路新鲜视频和显式申请 |
+| 人员/设备身份 | Gateway `AUTH_MODE`、OIDC/设备 OAuth、授权策略 | 决定谁可访问；不是控制执行模式，浏览器 `dev=1` 不绕过服务端认证 |
+| 测试身份夹具 | `tests/control-chain.py` / `tests/driving-ui.py` | 隔离进程中将测试 bearer 映射为预置身份，跳过 Casdoor/注册；保留真实 HTTP、ACL、Redis Lua 和 RTC 链 |
+| 视频源 | C++ `camera_source=simulation` 或 `h264_annexb` | 合成画面或接收编码帧；不授予控制权。`camera_layout=three` 当前仅支持合成画面 |
+| 车端控制 | C++ `control_mode=disabled`（默认）或 `simulation` | 禁用控制或仅保存已验证的内存 setpoint；不创建 Cyber 控制 writer |
+| 技术任务 | C++ `task_mode=disabled/simulation/mission_query` | 禁用、模拟等待任务或只读 Mission 查询；不发送驾驶控制指令 |
+
+`AUTH_MODE`、模拟车辆白名单和 `control_mode` 分别控制身份、准入、执行。
+`camera_source=simulation` 与 `control_mode=simulation` 相互独立；
+只调视频时保持控制 `disabled`。不要增加统一 `simulation=true` 将它们捆绑。
+文件解析和程序嵌入的媒体配置统一经过 `ValidateMediaConfig`，无效组合立即报错。
+
+推荐只保留以下调试路径，按需要逐层接入：
+
+| 目标 | 入口 | 证明什么 / 不证明什么 |
+| --- | --- | --- |
+| 页面/地图 | `/?preview=1` | 只验 UI；不验注册、网络或驾驶 |
+| 跳过注册验控制链 | `python3 tests/control-chain.py` | 真实控制协议和会话生命周期；不验 Casdoor、安装登记或物理执行 |
+| 跳过注册验浏览器 | `python3 tests/driving-ui.py` | 同一 Gateway 夹具、三路 C++ 视频、键盘/手柄与模拟交接；不验实车 |
+| 验真实身份接入 | 隔离部署 + 正常登记 + `/#/?page=drive` | 使用真实 OAuth/ACL，车辆仍须独立启用合成视频和模拟控制 |
+
+### 模拟远程驾驶如何触发
+
+```text
+登录 -> 授权车辆目录 -> 进入目标工作台（仅申请观看，不申请控制）
+ -> 三路视频持续出帧 -> 点击“申请模拟控制权”
+ -> 浏览器生成 Ed25519 密钥 -> Gateway acquire：ACL/白名单/Redis 单车会话
+ -> 短期控制 token -> 独立 controller Room -> READY
+ -> 显式启用键盘/手柄 -> 签名 v2 包经 LiveKit 发车端
+ -> worker 仅转发 IPC -> ControlReceiver 验证身份/会话/签名/时序/revision
+ -> ControlService 投影模拟 setpoint 与 APPLIED -> LiveKit 反馈
+ -> 续租；失联/Lease 过期/300ms 无有效命令则清空并锁定，不自动恢复
+ -> 释放时先停发 -> Gateway release -> 车端撤销并模拟确认交接 -> 才允许切车
+```
+
+Gateway 不中转每条控制包；它维护授权上下文与交接栅栏。
+协议层 `ACCEPTED` 只表示校验通过；模拟服务返回的 `APPLIED` 也不证明执行器动作。
+自然 Lease 过期与命令 watchdog 是独立测试；媒体关闭可能阻止最终 RTC 反馈，
+因此自动验收还检查车端本地锁定和 Gateway 确认状态。
+
+**Cyber 边界：**当前没有可启用的 `control_mode=cyber`，配置该值会报错。
+Data 的 Cyber 遥测/Mission 查询 writer 不能复用于驾驶。
+实车接入仍需明确车辆专用的 protobuf/通道、单位/转向/挡位语义、仲裁与安全停车、
+独立底盘超时及物理交接回执；本次整理没有猜测这些契约或开放实体控制。
 
 ### 前端功能与验收矩阵
 
@@ -36,7 +87,7 @@ npm run prepare:maps -- --source /mnt/synology/map \
 npm run dev
 ```
 
-访问 `http://localhost:8000/`，用 `?map=ruantong_hry_origin` 更换本地地图。
+访问 `http://localhost:8000/?preview=1`，追加 `&map=ruantong_hry_origin` 更换本地地图。
 局域网使用 `HOST=10.0.39.103 PORT=8000 npm run dev`。详细八车场景见
 [`frontend/README.md`](../frontend/README.md#实际地图与动态八车监控-mock)。
 先验收原版五个主导航、地图 URL 切换、选车联动、故障/离线状态、
@@ -87,14 +138,15 @@ Redis 不暴露公网，SQLite 单 Gateway 持久存储，不能删库/清 Redis
    profile/Monitor/events/diagnostics 通过 `/data/...` 独立上传。停掉 A 后 B 继续更新。
 2. 前端启动 `cd frontend && npm run dev`，访问
    `http://localhost:8000/?dev=1&backend=http://localhost:8080&livekit=ws://localhost:7880`。
-   本地 dev 认证时在“只读监看”页使用“本地开发登录”，再返回总览检查 `/api/vehicles` 与 `/data`。
+   本地 dev 认证时使用“本机开发令牌登录”，再在统一平台检查 `/api/vehicles` 与 `/data`。
    OIDC 环境使用正式登录和精确的 redirect URI/CORS；凭据不进入 URL 或日志。
 3. 再接视频：在 C++ 安装的 Teleop 示例显式启用 `media_enabled=true`、
    `camera_source=simulation`，设置匹配的 worker/LiveKit 端点。逐车添加四个面板，
    验证观看租约、media-demand、worker、轨道、解码帧；移除面板/退出后回收。
 4. 最后接模拟控制：仅将废弃模拟 ID 加入 `SIMULATED_CONTROL_VEHICLES_JSON`，
    保持 `CONTROL_HANDOVER_ACK_ENABLED=false`；设备设 `control_mode=simulation`，
-   本机前端加 `&control=simulation`。等待 READY 后测试输入，释放并等待模拟交接后再切车。
+   本机前端加 `&control=simulation#/?page=drive`。选车进入工作台自动申请观看，
+   三路视频就绪后点击“申请模拟控制权”；等待 READY 后启用输入，释放并等待模拟交接后再切车。
    实际构建/受保护配置和运行命令见
    [`C++ SDK 模拟器`](../apps/vehicle-edge-cpp/README.md#manual-browser-simulator)。
 
@@ -111,6 +163,7 @@ npm --prefix frontend run build
 bash tests/platform-contract.sh
 bash tests/data-chain.sh
 python3 tests/control-chain.py
+python3 tests/driving-ui.py
 # Gateway 单测从 apps/teleop-gateway 执行 go test ./...
 ```
 
