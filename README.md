@@ -5,15 +5,20 @@ LiveKit remote vehicle supervision prototype with three runtime boundaries:
 ```text
 frontend/               Unified authenticated React operations platform
 apps/teleop-gateway/    Go Gateway
-apps/vehicle-edge-cpp/  C++ vehicle SDKs (simulation control only)
 infra/                  Compose, Kubernetes, and LiveKit configuration
 ```
 
 `packages/teleop-shared/` owns the pure input/gamepad/camera state machines.
-`apps/operator-console/` and `apps/vehicle-edge/` remain legacy v1 references,
-not dependencies of the primary frontend. See [compatibility boundaries](docs/compatibility.md).
+`apps/operator-console/` remains a legacy v1 reference, independent of the primary
+frontend. Vehicle SDKs and deployment now live in `apollo-base/data/sdk-kit` and
+`apollo-base/modules/teleop`. See [vehicle deployment](docs/deployment.md#vehicle-deployment)
+and [compatibility boundaries](docs/compatibility.md).
 
 ## Quick Start
+
+For managed accounts, vehicle enrollment and repeatable server updates, use the
+[deployment script and guide](docs/deployment.md). Host settings are supplied once
+and saved in a private state directory outside the checkout.
 
 ```bash
 cp .env.example .env

@@ -132,7 +132,7 @@ LiveKit transport, the vehicle's Gateway token permissions, or Apollo
   - `/apollo/mission/runtime_status` (`apollo.mission.MissionRuntimeStatus`)
 
 ## Safety and Lifecycle Invariants
-- `control_mode` in `apps/vehicle-edge-cpp` is `disabled | simulation | cyber`
+- `control_mode` in `apollo-base/modules/teleop` is `disabled | simulation | cyber`
   (default `disabled`). `simulation` never writes to Cyber; `cyber` publishes
   verified commands to `/apollo/teleop/control`.
 - Missing active remote commands for `> 300 ms`, session expiry/revocation, or

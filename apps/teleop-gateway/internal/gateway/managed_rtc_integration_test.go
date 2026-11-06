@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"github.com/daohu527/livekit-infra/backend/internal/authorization"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -180,5 +182,23 @@ func TestManagedRealLiveKitSignalingAndDrain(t *testing.T) {
 		t.Fatal("fully drained real server did not permit mutation after actual quiet interval")
 	}
 	release()
+	originalRotation, rotation := pendingReplacementFixture(t, f.store, authorization.BootstrapInput{UserID: f.adminID, OrganizationID: f.orgID, Issuer: managedTestIssuer})
+	hash := sha256.Sum256([]byte("rtc-replacement-fixture"))
+	if err := f.store.CreateRotationTicket(ctx, f.adminID, f.orgID, rotation.Operation.ID, hash, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.ConsumeInstallationTicket(ctx, hash); err != nil {
+		t.Fatal(err)
+	}
+	replacementService := &OnboardingService{store: f.store, issuer: managedTestIssuer, acquireMutation: restarted.BeforeMutation}
+	replacementClaims := &UserClaims{Organization: f.orgID, managed: &managedRequestClaims{deviceID: originalRotation.VehicleID, installationOnly: true, installationSubject: "admin/" + rotation.Operation.ProviderName, installationClient: rotation.Operation.ClientID}}
+	recorder := httptest.NewRecorder()
+	replacementService.completeRotation(recorder, httptest.NewRequest("POST", "/", nil), replacementClaims)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("real drained replacement activation: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := f.store.ResolveVehicle(ctx, managedTestIssuer, "admin/"+rotation.Operation.ProviderName); err != nil {
+		t.Fatal("real drained activation did not enable replacement")
+	}
 	t.Log("actual 11-minute interval survived runtime reconstruction and permitted drained mutation")
 }

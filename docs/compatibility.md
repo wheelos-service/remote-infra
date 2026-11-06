@@ -14,13 +14,14 @@ are not alternative runtime specifications.
 | `frontend/` | Primary browser | Unified authenticated `/#/?page=…` operations; three-front-camera drive workbench with explicit v2 simulation; explicit development Mock preview only |
 | `packages/teleop-shared/` | Shared library | Input/gamepad/view state machines only; no protocol or authorization |
 | `apps/teleop-gateway/` | Primary server | Identity/ACL, Redis leases and handover fences, HTTPS data and SQLite persistence |
-| `apps/vehicle-edge-cpp/` | Primary vehicle SDK | Separate Auth/Data/Teleop, native adapters and isolated RTC worker |
+| `apollo-base/data/sdk-kit` and `apollo-base/modules/teleop` | External vehicle runtime | Auth/media SDKs, native adapters and Teleop; built and deployed from `apollo-base` |
 | `apps/operator-console/` | Legacy v1 reference | Compatibility sender and standalone UI; re-exports shared state machines |
-| `apps/vehicle-edge/` | Legacy v1 reference | Python/Cyber sessions, media and control; never started by the C++ SDK |
 
-Legacy runtimes are not built or launched by the primary frontend/Compose path.
-Do not remove them while explicit legacy tests/deployment consumers remain.
-The shared library no longer depends on either legacy runtime.
+The legacy console is not built or launched by the primary frontend/Compose path.
+The Python vehicle runtime and in-repository C++ SDK were removed when vehicle
+ownership moved to `apollo-base`. Vehicle tests and deployments run there; see
+[deployment.md](deployment.md#vehicle-deployment). The shared library depends on
+neither legacy runtime.
 
 The opt-in [managed authorization pilot](auth-management.md) is a new,
 single-Gateway deployment mode, not a transparent import of legacy JWT roles

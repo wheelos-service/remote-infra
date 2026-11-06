@@ -26,3 +26,7 @@ backend-only Compose profile: the current Caddy service still depends on
 `frontend` and proxies its domain. Required ingress changes, public runtime
 configuration, cache rules and independent RTC media connectivity are documented
 in [the static-hosting deployment guide](../docs/deployment.md#cloudflare-pages-and-a-single-backend-host).
+
+For a managed environment, `python3 infra/scripts/deploy.py --help` provides
+initial deployment, update, verification and service commands. Follow the
+[deployment guide](../docs/deployment.md); keep state outside the checkout.

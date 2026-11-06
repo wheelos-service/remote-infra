@@ -186,7 +186,7 @@ func (s *Store) CreateOnboarding(ctx context.Context, actor, org string, request
 }
 
 const onboardingSelect = `SELECT operation_id,org_id,actor_user_id,kind,name,email,vehicle_id,planned_identity_id,provider_name,client_id,
-	credential_ciphertext,status,stage,error_code,COALESCE(user_id::text,''),created_at,request,attempts FROM authz_onboarding_operations`
+	credential_ciphertext,CASE WHEN cancelled_at IS NOT NULL THEN 'cancelled' ELSE status END,stage,error_code,COALESCE(user_id::text,''),created_at,request,attempts FROM authz_onboarding_operations`
 
 func scanOnboarding(row interface{ Scan(...any) error }) (OnboardingOperation, error) {
 	var op OnboardingOperation
@@ -239,7 +239,7 @@ func (s *Store) ListOnboarding(ctx context.Context, actor, org string) ([]Onboar
 }
 
 func (s *Store) NextOnboarding(ctx context.Context) (OnboardingOperation, error) {
-	return scanOnboarding(s.db.QueryRowContext(ctx, onboardingSelect+` WHERE (status='pending' AND attempts<3 OR status='running') AND next_attempt_at<=now() ORDER BY created_at LIMIT 1`))
+	return scanOnboarding(s.db.QueryRowContext(ctx, onboardingSelect+` WHERE cancelled_at IS NULL AND (status='pending' AND attempts<3 OR status='running') AND next_attempt_at<=now() ORDER BY created_at LIMIT 1`))
 }
 
 // StartOnboarding persists the unknown-result recovery stage before calling
@@ -259,7 +259,7 @@ func (s *Store) StartOnboarding(ctx context.Context, id string) error {
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE authz_onboarding_operations SET status='running',attempts=attempts+1,
 		stage=CASE WHEN stage='planned' THEN 'provider' ELSE stage END,error_code='',updated_at=now(),
-		next_attempt_at=now()+interval '10 seconds' WHERE operation_id=$1 AND status IN ('pending','running') AND attempts<3`, id)
+		next_attempt_at=now()+interval '10 seconds' WHERE operation_id=$1 AND status IN ('pending','running') AND attempts<3 AND cancelled_at IS NULL`, id)
 	if err != nil {
 		return err
 	}
@@ -328,7 +328,11 @@ func (s *Store) RetryOnboarding(ctx context.Context, actor, org, id string) (Onb
 		return op, ErrConflict
 	}
 	// Do not transfer a stale plan to a different administrator.
-	if op.ActorUserID != actor || op.Status != "failed" {
+	var cancelled bool
+	if err := tx.QueryRowContext(ctx, `SELECT cancelled_at IS NOT NULL FROM authz_onboarding_operations WHERE operation_id=$1`, id).Scan(&cancelled); err != nil {
+		return op, err
+	}
+	if cancelled || op.ActorUserID != actor || op.Status != "failed" {
 		return op, ErrConflict
 	}
 	if err := onboardingRoleAllowed(ctx, tx, actor, op.Request); err != nil {
@@ -362,7 +366,11 @@ func (s *Store) BindOnboarding(ctx context.Context, op OnboardingOperation, issu
 	if err != nil {
 		return err
 	}
-	if current.Stage != "provider" || current.Status != "running" || current.PlannedIdentityID != op.PlannedIdentityID || !validText(issuer, 2048) {
+	var cancelled bool
+	if err := tx.QueryRowContext(ctx, `SELECT cancelled_at IS NOT NULL FROM authz_onboarding_operations WHERE operation_id=$1`, op.ID).Scan(&cancelled); err != nil {
+		return err
+	}
+	if cancelled || current.Stage != "provider" || current.Status != "running" || current.PlannedIdentityID != op.PlannedIdentityID || !validText(issuer, 2048) {
 		return ErrConflict
 	}
 	op = current
@@ -429,7 +437,7 @@ func (s *Store) CompleteInvitation(ctx context.Context, op OnboardingOperation) 
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE authz_onboarding_operations SET status='completed',stage='completed',error_code='',updated_at=now()
-		WHERE operation_id=$1 AND kind='person' AND stage='invitation' AND status='running'`, op.ID)
+		WHERE operation_id=$1 AND kind='person' AND stage='invitation' AND status='running' AND cancelled_at IS NULL`, op.ID)
 	if err != nil {
 		return err
 	}
@@ -448,7 +456,10 @@ func (s *Store) MachineAudienceAllowed(ctx context.Context, issuer, subject stri
 	}
 	v, err := s.ResolveVehicle(ctx, issuer, subject)
 	if errors.Is(err, ErrUnknownIdentity) {
-		return false, nil
+		v, err = s.ResolveInstallingVehicle(ctx, issuer, subject)
+		if errors.Is(err, ErrUnknownIdentity) {
+			return false, nil
+		}
 	}
 	if err != nil {
 		return false, err
@@ -475,7 +486,7 @@ func (s *Store) PrepareInstallationRotation(ctx context.Context, actor, org, id 
 		return OnboardingOperation{}, err
 	}
 	defer tx.Rollback()
-	op, err := scanOnboarding(tx.QueryRowContext(ctx, onboardingSelect+` WHERE operation_id=$1 AND org_id=$2 FOR UPDATE`, id, org))
+	op, err := scanOnboarding(tx.QueryRowContext(ctx, onboardingSelect+` WHERE operation_id=$1 AND org_id=$2 AND cancelled_at IS NULL FOR UPDATE`, id, org))
 	if err != nil || op.Kind != "vehicle" || op.Status != "awaiting_install" {
 		return op, ErrConflict
 	}
@@ -502,7 +513,7 @@ func (s *Store) CreateInstallationTicket(ctx context.Context, actor, org, id str
 	}
 	defer tx.Rollback()
 	var awaiting bool
-	if err := tx.QueryRowContext(ctx, `SELECT kind='vehicle' AND status='awaiting_install' FROM authz_onboarding_operations WHERE org_id=$1 AND operation_id=$2 FOR UPDATE`, org, id).Scan(&awaiting); err != nil || !awaiting {
+	if err := tx.QueryRowContext(ctx, `SELECT kind='vehicle' AND status='awaiting_install' AND cancelled_at IS NULL FROM authz_onboarding_operations WHERE org_id=$1 AND operation_id=$2 FOR UPDATE`, org, id).Scan(&awaiting); err != nil || !awaiting {
 		return ErrConflict
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO authz_installation_tickets(token_hash,operation_id,expires_at) VALUES($1,$2,$3)`, tokenHash[:], id, expires); err != nil {
@@ -541,7 +552,7 @@ func (s *Store) InstallationTicketOrganization(ctx context.Context, hash [sha256
 	err := s.db.QueryRowContext(ctx, `SELECT o.org_id FROM authz_installation_tickets t JOIN authz_onboarding_operations o USING(operation_id)
 		WHERE t.token_hash=$1 AND t.consumed_at IS NULL AND t.revoked_at IS NULL AND t.expires_at>now()`, hash[:]).Scan(&org)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrInstallationTicket
+		return s.RotationTicketOrganization(ctx, hash)
 	}
 	return org, err
 }
@@ -556,12 +567,13 @@ func (s *Store) ConsumeInstallationTicket(ctx context.Context, hash [sha256.Size
 	err = tx.QueryRowContext(ctx, `UPDATE authz_installation_tickets t SET consumed_at=now()
 		FROM authz_onboarding_operations op,authz_organizations org,authz_vehicles v,authz_vehicle_identities i
 		WHERE t.token_hash=$1 AND t.consumed_at IS NULL AND t.revoked_at IS NULL AND t.expires_at>now()
-		AND op.operation_id=t.operation_id AND op.status='awaiting_install' AND op.kind='vehicle'
+		AND op.operation_id=t.operation_id AND op.status='awaiting_install' AND op.kind='vehicle' AND op.cancelled_at IS NULL
 		AND org.org_id=op.org_id AND org.status='active' AND v.vehicle_id=op.vehicle_id AND v.org_id=op.org_id AND v.status='active'
 		AND i.vehicle_id=v.vehicle_id AND i.status='active' AND i.client_id=op.client_id
 		RETURNING t.operation_id`, hash[:]).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return OnboardingOperation{}, ErrInstallationTicket
+		tx.Rollback()
+		return s.ConsumeRotationTicket(ctx, hash)
 	}
 	if err != nil {
 		return OnboardingOperation{}, err
@@ -585,7 +597,7 @@ func (s *Store) CompleteInstallation(ctx context.Context, issuer, vehicleID stri
 	var id string
 	err = tx.QueryRowContext(ctx, `UPDATE authz_onboarding_operations op SET status='completed',stage='completed',error_code='',credential_ciphertext=NULL,updated_at=now()
 		FROM authz_vehicle_identities i,authz_vehicles v,authz_organizations o
-		WHERE op.vehicle_id=$1 AND op.kind='vehicle' AND op.status IN ('awaiting_install','completed')
+		WHERE op.vehicle_id=$1 AND op.kind='vehicle' AND op.status IN ('awaiting_install','completed') AND op.cancelled_at IS NULL
 		AND i.vehicle_id=op.vehicle_id AND i.issuer=$2 AND i.client_id=op.client_id AND i.status='active'
 		AND v.vehicle_id=i.vehicle_id AND v.status='active' AND o.org_id=v.org_id AND o.status='active'
 		AND EXISTS(SELECT 1 FROM authz_installation_tickets t WHERE t.operation_id=op.operation_id AND t.consumed_at IS NOT NULL AND t.revoked_at IS NULL)

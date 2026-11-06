@@ -3,16 +3,18 @@
 ## Current platform and SDK boundary
 
 `frontend/` (React/TypeScript), `apps/teleop-gateway/` (Go), and
-`apps/vehicle-edge-cpp/` (C++17 Auth/Teleop/optional Data SDKs) are the current
-platform implementation. Operations telemetry/Monitor/events/tasks use
+the external `apollo-base/data/sdk-kit` and `apollo-base/modules/teleop`
+vehicle runtime form the current platform implementation.
+Operations telemetry/Monitor/events/tasks use
 authenticated HTTPS and durable stores independently of driving DataChannel.
 Viewing leases drive media demand; separate multi-vehicle observer Rooms never
 grant control authority. One operator controls at most one vehicle, and HTTP
 release is `202 PENDING` until authoritative device handover is confirmed.
 
-The Python agent and `apps/operator-console/` remain legacy v1 references,
-not replacements for the modular C++ SDK. Their shared input and camera-view
-state machines now live only in `packages/teleop-shared/`; both clients import
+`apps/operator-console/` remains a legacy v1 reference. The Python vehicle
+agent was removed from this repository during the move to `apollo-base`.
+Shared browser input and camera-view state machines live only in
+`packages/teleop-shared/`; both clients import
 that transport-free library. The React build does not bundle the v1 sender,
 Python actuator adapter or legacy session lifecycle. Input conversion targets the signed v2
 integer command contract; only allowlisted simulation is enabled. Gear/mode
@@ -71,7 +73,6 @@ frontend/src/pages/        Routed workbenches and page-level composition
 frontend/src/lib/          Domain models and strict protocol adapters
 packages/teleop-shared/    Single input/gamepad/view implementation
 apps/teleop-gateway/       Gateway API, authority and storage
-apps/vehicle-edge-cpp/     Auth/Data/Teleop SDKs, workers and native adapters
 api/schemas/              Versioned cross-language payload contracts
 infra/                    Build, static hosting and Compose/Kubernetes assets
 tests/                    Cross-component acceptance; unit tests stay with owners
@@ -81,8 +82,9 @@ docs/                     Current contracts, architecture and operations
 [compatibility.md](compatibility.md) identifies primary and retained APIs.
 `.agents/design/` contains historical design proposals; `.agents/knowledge/`,
 `.agents/skills/` and the implementation plans contain contributor guidance that
-points here, not parallel architecture specifications. CMake owns portable C++ SDK packaging; Bazel owns
-native Cyber builds. They use the same source implementations.
+points here, not parallel architecture specifications. Vehicle SDKs, native
+Cyber builds and deployment belong to `apollo-base`; see
+[vehicle deployment](deployment.md#vehicle-deployment).
 
 ## Identity and authorization architecture
 
@@ -120,6 +122,10 @@ are not implied. The current phased plan and evolution triggers are
 in [`.agents/auth-management-plan.md`](../.agents/auth-management-plan.md).
 
 ## Legacy v1 integration reference
+
+The remainder of this section records the former Python vehicle architecture.
+Its `apps/vehicle-edge` paths and vehicle test runners are historical and no
+longer exist in this checkout; current vehicle ownership is in `apollo-base`.
 
 This project is a LiveKit remote vehicle monitoring and teleoperation prototype with a browser client, cloud services, and a vehicle-side agent.
 

@@ -147,9 +147,10 @@ func TestAutomatedOnboardingActualFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("configure isolated onboarding: %v", err)
 	}
+	service.acquireMutation = f.runtime.BeforeMutation
 	service.Register(mux, AuthenticationMiddleware)
 	(&ManagedAdminAPI{Store: f.store, TrustedIssuer: issuer, BeforeMutation: f.runtime.BeforeMutation,
-		OnboardingEnabled: true}).Register(mux, AuthenticationMiddleware)
+		OnboardingEnabled: true, Onboarding: service}).Register(mux, AuthenticationMiddleware)
 	mux.Handle("GET /api/auth/me", AuthenticationMiddleware(http.HandlerFunc(handleAuthMe)))
 	registerDeviceAuthCheck(mux)
 	(&VehicleTelemetryAPI{registry: vehicleRegistry, identities: vehicleIdentities,
@@ -263,12 +264,23 @@ func TestAutomatedOnboardingActualFlow(t *testing.T) {
 		t.Fatal("previously delivered secret obtained a new grant after explicit recovery")
 	}
 	ticketPath, devicePath := filepath.Join(directory, "ticket"), filepath.Join(directory, "device.json")
-	if err := os.WriteFile(ticketPath, []byte(token), 0600); err != nil {
+	packageBytes, err := json.Marshal(struct {
+		SchemaVersion int       `json:"schema_version"`
+		GatewayURL    string    `json:"gateway_url"`
+		VehicleID     string    `json:"vehicle_id"`
+		OperationID   string    `json:"operation_id"`
+		ExpiresAt     time.Time `json:"expires_at"`
+		Ticket        string    `json:"installation_ticket"`
+	}{1, server.URL, vehicleID, id, time.Now().Add(5 * time.Minute), token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ticketPath, packageBytes, 0600); err != nil {
 		t.Fatal(err)
 	}
 	installer := filepath.Join("..", "..", "..", "..", "infra", "scripts", "install-vehicle-auth.py")
 	command := exec.CommandContext(ctx, "python3", installer, "--gateway", server.URL,
-		"--vehicle-id", vehicleID, "--ticket-file", ticketPath, "--output", devicePath, "--allow-insecure-localhost")
+		"--vehicle-id", vehicleID, "--package", ticketPath, "--output", devicePath, "--allow-insecure-localhost")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("actual installer failed: %v; %s", err, output)
 	}
@@ -453,6 +465,137 @@ func TestAutomatedOnboardingActualFlow(t *testing.T) {
 		t.Fatal("subsequent explicit assignment failed")
 	}
 	call("GET", "/api/vehicles/"+vehicleID+"/state", personnelAccess, nil, 200)
+	version, err := f.store.Version(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.workMu.Lock()
+	replacementSecret, err := onboardingRandom()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementCiphertext, err := service.encryptCredential(replacementSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := f.store.Lifecycle(ctx, f.adminID, f.orgID, vehicleID, "credential_rotate", authorization.LifecycleRequest{IdempotencyKey: uuid.NewString(), ExpectedVersion: version, Reason: "Actual provider revocation acceptance"}, true, replacementCiphertext)
+	service.workMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		state, err := f.store.GetLifecycle(ctx, f.adminID, f.orgID, revoked.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.ProviderStatus == "confirmed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("actual provider revocation did not confirm")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	registered, err := f.store.GetOnboarding(ctx, f.adminID, f.orgID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.ResolveVehicle(ctx, issuer, "admin/"+registered.ProviderName); err == nil {
+		t.Fatal("revoked device still resolves")
+	}
+	installedBytes, err := os.ReadFile(devicePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldDevice struct {
+		TokenURL     string `json:"token_url"`
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+	}
+	if json.Unmarshal(installedBytes, &oldDevice) != nil {
+		t.Fatal("invalid installed config")
+	}
+	rejected, err := http.PostForm(oldDevice.TokenURL, url.Values{"grant_type": {"client_credentials"}, "client_id": {oldDevice.ClientID}, "client_secret": {oldDevice.ClientSecret}, "scope": {"teleop:vehicle"}})
+	if err != nil {
+		t.Fatal("provider revocation probe failed")
+	}
+	var rejectedGrant struct {
+		AccessToken string `json:"access_token"`
+	}
+	err = json.NewDecoder(io.LimitReader(rejected.Body, 65536)).Decode(&rejectedGrant)
+	rejected.Body.Close()
+	if err != nil || rejectedGrant.AccessToken != "" {
+		t.Fatal("revoked installed credential still obtains grants")
+	}
+	deadline = time.Now().Add(30 * time.Second)
+	var replacement authorization.DeviceRotation
+	for {
+		replacement, err = f.store.Rotation(ctx, f.adminID, f.orgID, revoked.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replacement.Status == "awaiting_install" {
+			break
+		}
+		if time.Now().After(deadline) {
+			state, stateErr := f.store.GetLifecycle(ctx, f.adminID, f.orgID, revoked.ID)
+			t.Fatalf("replacement provider reconciliation did not complete: status=%s attempts=%d code=%s read=%v", replacement.Status, replacement.Attempts, state.ErrorCode, stateErr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	replacementTicket := call("POST", "/api/admin/organizations/"+f.orgID+"/lifecycle-operations/"+revoked.ID+"/installation-ticket", adminToken, struct{}{}, 200)
+	replacementToken, ok := replacementTicket["token"].(string)
+	if !ok {
+		t.Fatal("missing replacement ticket")
+	}
+	replacementPackage, err := json.Marshal(struct {
+		SchemaVersion int       `json:"schema_version"`
+		GatewayURL    string    `json:"gateway_url"`
+		VehicleID     string    `json:"vehicle_id"`
+		OperationID   string    `json:"operation_id"`
+		ExpiresAt     time.Time `json:"expires_at"`
+		Ticket        string    `json:"installation_ticket"`
+	}{1, server.URL, vehicleID, revoked.ID, time.Now().Add(5 * time.Minute), replacementToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ticketPath, replacementPackage, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(devicePath, devicePath+".protected-backup"); err != nil {
+		t.Fatal(err)
+	}
+	blockedInstall := exec.CommandContext(ctx, "python3", installer, "--gateway", server.URL, "--vehicle-id", vehicleID, "--package", ticketPath, "--output", devicePath, "--allow-insecure-localhost")
+	if _, err := blockedInstall.CombinedOutput(); err == nil {
+		t.Fatal("replacement activated without maintenance")
+	}
+	if _, err := os.Stat(devicePath); err != nil {
+		t.Fatal("replacement did not reach protected configuration write")
+	}
+	if _, err := f.store.ResolveVehicle(ctx, issuer, "admin/"+replacement.Operation.ProviderName); err == nil {
+		t.Fatal("blocked activation granted ordinary access")
+	}
+	service.workMu.Lock()
+	release, err := f.runtime.BeforeAdditive(ctx, f.orgID)
+	if err != nil {
+		service.workMu.Unlock()
+		t.Fatal(err)
+	}
+	err = f.store.CompleteRotation(ctx, issuer, vehicleID, "admin/"+replacement.Operation.ProviderName, replacement.Operation.ClientID)
+	release()
+	service.workMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := exec.CommandContext(ctx, "python3", installer, "--gateway", server.URL, "--vehicle-id", vehicleID, "--verify-existing", "--output", devicePath, "--allow-insecure-localhost")
+	if output, err := resume.CombinedOutput(); err != nil {
+		t.Fatalf("replacement completion retry failed: %v %s", err, output)
+	}
+	replacement, err = f.store.Rotation(ctx, f.adminID, f.orgID, revoked.ID)
+	if err != nil || replacement.Status != "completed" || len(replacement.Operation.CredentialCiphertext) != 0 {
+		t.Fatal("replacement finalization retained pending secret")
+	}
 	t.Log("Actual native invitation link/reset/PKCE, default organization read with no execution, preserved explicit assignment, generated vehicle ID and protected installation passed")
 }
 

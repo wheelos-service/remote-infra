@@ -6,9 +6,11 @@
 
 ## Current React + Go + C++ workflow
 
-当前入口是 `frontend/`、`apps/teleop-gateway/`、`apps/vehicle-edge-cpp/`。
-下方原 Python/standalone console 步骤仅为 legacy v1 参考，不可与当前 v2
-控制/交接流程混用。系统按“多车监控、按需视频、单车独占控制”分层：
+当前入口是 `frontend/`、`apps/teleop-gateway/`，车端源码与部署位于
+`apollo-base/data/sdk-kit` 和 `apollo-base/modules/teleop`。本仓库已移除旧车端
+目录及依赖它们的验收脚本，见 [车端部署边界](deployment.md#vehicle-deployment)。
+下方 Python/standalone console 步骤仅为历史记录，不能在当前 checkout 中执行。
+系统按“多车监控、按需视频、单车独占控制”分层：
 当前支持多车只读监控和显式模拟控制，**不开放实车驾驶或运动任务派发**。
 
 ### 独立开关与职责
@@ -20,7 +22,7 @@
 | 页面 Mock | `?preview=1` | 本地合成八车读模型；不登录、不请求 Gateway/LiveKit、不申请控制权 |
 | 浏览器模拟控制 | 公开配置 `simulationControl: true`；localhost 可用 `?dev=1&control=simulation` | 显示模拟控制入口；仍需登录、ACL、三路新鲜视频和显式申请 |
 | 人员/设备身份 | Gateway `AUTH_MODE`、OIDC/设备 OAuth、授权策略 | 决定谁可访问；不是控制执行模式，浏览器 `dev=1` 不绕过服务端认证 |
-| 测试身份夹具 | `tests/control-chain.py` / `tests/driving-ui.py` | 隔离进程中将测试 bearer 映射为预置身份，跳过 Casdoor/注册；保留真实 HTTP、ACL、Redis Lua 和 RTC 链 |
+| Gateway 测试夹具 | `TestControlChainServer`，见 [测试指南](../tests/README.md) | 隔离 HTTP/ACL/Redis 会话测试服务；完整 RTC/浏览器验收由外部车端环境负责 |
 | 视频源 | C++ `camera_source=simulation` 或 `h264_annexb` | 合成画面或接收编码帧；不授予控制权。`camera_layout=three` 当前仅支持合成画面 |
 | 车端控制 | C++ `control_mode=disabled`（默认）或 `simulation` | 禁用控制或仅保存已验证的内存 setpoint；不创建 Cyber 控制 writer |
 | 技术任务 | C++ `task_mode=disabled/simulation/mission_query` | 禁用、模拟等待任务或只读 Mission 查询；不发送驾驶控制指令 |
@@ -35,8 +37,8 @@
 | 目标 | 入口 | 证明什么 / 不证明什么 |
 | --- | --- | --- |
 | 页面/地图 | `/?preview=1` | 只验 UI；不验注册、网络或驾驶 |
-| 跳过注册验控制链 | `python3 tests/control-chain.py` | 真实控制协议和会话生命周期；不验 Casdoor、安装登记或物理执行 |
-| 跳过注册验浏览器 | `python3 tests/driving-ui.py` | 同一 Gateway 夹具、三路 C++ 视频、键盘/手柄与模拟交接；不验实车 |
+| 本地契约检查 | `bash tests/platform-contract.sh` | Gateway HTTP/数据与前端解析契约；不验 RTC、浏览器视频或物理执行 |
+| 车端控制/浏览器联调 | 匹配的 `apollo-base` 车端环境 | 三路视频、签名控制与交接需独立验收；本仓库单测不替代该环节 |
 | 验真实身份接入 | 隔离部署 + 正常登记 + `/#/?page=drive` | 使用真实 OAuth/ACL，车辆仍须独立启用合成视频和模拟控制 |
 
 ### 模拟远程驾驶如何触发
@@ -58,10 +60,9 @@ Gateway 不中转每条控制包；它维护授权上下文与交接栅栏。
 自然 Lease 过期与命令 watchdog 是独立测试；媒体关闭可能阻止最终 RTC 反馈，
 因此自动验收还检查车端本地锁定和 Gateway 确认状态。
 
-**Cyber 边界：**当前没有可启用的 `control_mode=cyber`，配置该值会报错。
-Data 的 Cyber 遥测/Mission 查询 writer 不能复用于驾驶。
-实车接入仍需明确车辆专用的 protobuf/通道、单位/转向/挡位语义、仲裁与安全停车、
-独立底盘超时及物理交接回执；本次整理没有猜测这些契约或开放实体控制。
+**Cyber 边界：**车端 Cyber/Guardian/Canbus 能力由 `apollo-base` 定义。
+本仓库的 React v2 入口仍仅开放白名单模拟控制；车端支持 Cyber 不代表
+该入口自动获得实车权限。Data 遥测/Mission 查询不能复用于驾驶。
 
 ### 前端功能与验收矩阵
 
@@ -129,7 +130,7 @@ docker compose --env-file /path/to/isolated-test.env -p teleop-mock \
 远程使用 HTTPS/WSS 和正确 ICE/防火墙配置，不能以生产地址替代隔离测试服务。
 Redis 不暴露公网，SQLite 单 Gateway 持久存储，不能删库/清 Redis 来解除测试栅栏。
 
-车端从 `apps/vehicle-edge-cpp/config/device.example.json` 配置独立设备身份，
+车端按 `apollo-base` 的配置指南或本仓库登记安装流程配置独立设备身份，
 使用 root-owned、0600 普通文件；生产采用设备 OAuth，不能将浏览器 dev token
 直接用于 C++ SDK。端点必须从各端实际可达；浏览器和远端设备不能使用 Compose 内部主机名。
 同机多车需独立凭据、车辆 ID、缓存/数据库及 Cyber domain/通道，不得多实例冒充同一底盘。
@@ -148,27 +149,24 @@ Redis 不暴露公网，SQLite 单 Gateway 持久存储，不能删库/清 Redis
    本机前端加 `&control=simulation#/?page=drive`。选车进入工作台自动申请观看，
    三路视频就绪后点击“申请模拟控制权”；等待 READY 后启用输入，释放并等待模拟交接后再切车。
    实际构建/受保护配置和运行命令见
-   [`C++ SDK 模拟器`](../apps/vehicle-edge-cpp/README.md#manual-browser-simulator)。
+   [车端部署边界](deployment.md#vehicle-deployment)及匹配的 `apollo-base` 指南。
 
 Teleop 独立示例只提供合成视频/控制，不上传 Data 运营数据；
 持续手工监控需要运行实际 DataService/设备接入程序，不能把第一层页面 Mock 当作设备发布器。
-现有自动数据链可在无需生产凭据的隔离环境验证实际 C++ HTTP/持久化行为。
+C++ HTTP/持久化验收在 `apollo-base` 运行；本仓库的 platform contract 检查使用合成设备数据。
 
 ### 分层自动检查
 
 ```bash
-# 以下从仓库根执行；C++/Docker/Go/Python 依赖详见 tests/README.md
+# 以下从仓库根执行；依赖详见 tests/README.md
 npm --prefix frontend test
 npm --prefix frontend run build
 bash tests/platform-contract.sh
-bash tests/data-chain.sh
-python3 tests/control-chain.py
-python3 tests/driving-ui.py
 # Gateway 单测从 apps/teleop-gateway 执行 go test ./...
 ```
 
-分别验证前端状态/地图转换、构建、跨端契约、真实 Data SDK HTTP 链和 v2
-模拟控制链；不能替代实际浏览器、相机硬件、网络负载或实车安全验收。
+分别验证前端状态/地图转换、构建和跨端数据契约。车端 SDK 与 v2 模拟链
+检查在 `apollo-base` 环境执行；不能替代实际浏览器、相机硬件、网络负载或实车安全验收。
 大车队性能另按 8/50/200 台逐级测量目录响应、渲染耗时和内存，不宣称本次八车演示已完成容量认证。
 
 ### 三端排障顺序
@@ -187,6 +185,9 @@ python3 tests/driving-ui.py
 同步时钟，禁止记录 token、client secret、签名私钥或完整控制载荷。
 
 ## Legacy v1 deployment reference
+
+> 以下为迁移前的历史部署记录。Python 车端、其构建文件和本节所列车端
+> 验收脚本已从本仓库移除；新部署使用 `apollo-base`，不要执行下列旧车端命令。
 
 The server, vehicle, and operator client can be deployed and restarted independently.
 

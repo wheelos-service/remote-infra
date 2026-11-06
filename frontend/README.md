@@ -237,11 +237,11 @@ Mock 每 500 ms 通过现有 Zod 契约生成八车遥测及 Monitor/事件/任�
 从统一平台 `/#/?page=drive` 完成授权登录并选车，进入工作台自动申请观看。实时工作台仅使用
 前左、前中、前右三路视频和 v2 模拟控制，不提供后视覆盖或实车执行器接入；视频未就绪、失焦、
 断线、停更或反馈异常时会锁定控制输入。运行时配置、C++ 示例配置与生产部署细节见
-[部署文档](../docs/deployment.md) 和 [C++ SDK 指南](../apps/vehicle-edge-cpp/README.md)。
+[部署文档](../docs/deployment.md#vehicle-deployment) 和 `apollo-base` 中的车端指南。
 
-跨端模拟控制验收：`python3 tests/control-chain.py`。实际浏览器三路解码、键盘/模拟手柄、
-视频停更锁定及交接验收：`python3 tests/driving-ui.py`。测试只使用隔离的 localhost 服务和
-C++ 测试宿主，不放宽生产配置权限。
+原 `control-chain.py` / `driving-ui.py` 已随车端迁移从本仓库移除。跨端模拟控制、
+实际浏览器三路解码、键盘/模拟手柄、视频停更锁定及交接验收应在匹配的
+`apollo-base` 环境执行；本仓库可运行的检查见 [测试指南](../tests/README.md)。
 
 ## 构建
 
@@ -299,5 +299,5 @@ http://localhost:8000/?dev=1&control=simulation&backend=http://localhost:8080&li
 各独立开关及推荐调试组合以 [远程联调指南](../docs/remote-validation.md#独立开关与职责) 为准。
 
 键盘及标准手柄输入状态机由 `packages/teleop-shared` 共享。跨端模拟控制和真实浏览器三路解码
-验收脚本分别见 `python3 tests/control-chain.py` 与 `python3 tests/driving-ui.py`；
+验收由 `apollo-base` 车端环境负责；
 部署配置、运行时注入及生产 Compose 流程见 [部署文档](../docs/deployment.md)。

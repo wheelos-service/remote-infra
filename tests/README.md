@@ -10,8 +10,8 @@ python3 tests/managed-auth-chain.py
 Requires Docker and Linux host networking, plus Go 1.24 or the `golang:1.24`
 image. Both runners create uniquely named disposable services on loopback,
 never use production credentials or modify the Compose deployment, and clean
-their containers on exit. Docker fallback caches Go dependencies under the
-ignored C++ build directory. The opt-in Go tests skip in ordinary unit runs.
+their containers on exit. Docker fallback caches Go dependencies under
+`.cache/managed-auth-go-cache`. The opt-in Go tests skip in ordinary unit runs.
 
 The Casdoor runner pins `casbin/casdoor:v4.25.0`. It verifies management
 credentials in Basic headers (not URLs), person/application creation and
@@ -40,6 +40,16 @@ Installer rejection and filesystem checks can also run without services:
 python3 -m unittest discover -s tests -p test_vehicle_auth_installer.py
 ```
 
+Deployment configuration, saved-setting preservation, failure ordering and command
+locking also run without services:
+
+```bash
+python3 -m unittest discover -s tests -p test_authentication_deployment.py
+```
+
+CI additionally generates a disposable DNS/media deployment with `deploy.py prepare`
+and validates it with Docker Compose, without starting services.
+
 The RTC runner pins `livekit/livekit-server:v1.13.11`. It verifies a real
 WebSocket upgrade/join, server-issued reconnect-token signature/expiry,
 maintenance rejection for old and refreshed tokens, actual RoomService drain,
@@ -54,8 +64,16 @@ camera media, physical control, or an external production proxy topology.
 - Shared state-machine tests: `npm --prefix packages/teleop-shared test`
 - Frontend unit tests: `cd frontend && npm test`
 - Vehicle C++ SDK & Apollo Teleop tests live in `apollo-base`:
-  - `cd /apollo/data/sdk-kit && bazel test //...`
+  - `cd /apollo && bazel test --lockfile_mode=off @sdk_kit//tests/...`
   - `cd /apollo && bazel test //modules/teleop/... //modules/guardian/... //modules/canbus:canbus_test`
+
+The former `data-chain.sh`, `control-chain.py`, `driving-ui.py`, Python vehicle
+security/QoS and chaos runners were removed with the vehicle source. Vehicle
+media/control acceptance must use the matching `apollo-base` checkout.
+`TestControlChainServer` remains a disposable Gateway fixture for external
+runners: set `CONTROL_CHAIN_FIXTURE` to an output JSON path, run that Go test,
+then create `<path>.stop` before its 90-second deadline. It is skipped in normal
+unit runs and does not itself validate a vehicle or browser.
 
 ## Platform mock contracts
 

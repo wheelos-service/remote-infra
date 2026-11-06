@@ -4,7 +4,7 @@
 Read this file when you need to understand component boundaries, request paths, authentication, or real-time media and control data flow.
 
 ## Rules
-- Current runtimes are `frontend/`, the Go Teleop Gateway, LiveKit/Redis infrastructure, and the C++ vehicle SDKs. Python vehicle edge and the standalone console remain legacy v1 references.
+- Current runtimes are `frontend/`, the Go Teleop Gateway, LiveKit/Redis infrastructure, and the external vehicle SDKs in `apollo-base`. The standalone console remains a legacy v1 reference; the Python vehicle runtime was removed from this repository.
 - Pure input/gamepad/camera state machines are owned only by `packages/teleop-shared/`; neither browser imports the other application's source.
 - The Gateway owns identity validation, Vehicle ACLs, short-lived LiveKit tokens, control leases, and auditing.
 - The browser holds only short-lived tokens and the operator private key in page memory; the LiveKit API secret, Redis password, and device credentials must never reach the browser.
@@ -22,6 +22,6 @@ Read this file when you need to understand component boundaries, request paths, 
 - Primary/legacy contracts: `docs/compatibility.md`
 - Requirements and security boundaries: `docs/spec.md`
 - Gateway routes and implementation: `apps/teleop-gateway/`
-- Current vehicle SDKs and control receiver: `apps/vehicle-edge-cpp/`
-- Legacy v1 vehicle runtime: `apps/vehicle-edge/src/vehicle_edge/`
+- Vehicle SDKs and control receiver: `apollo-base/data/sdk-kit` and `apollo-base/modules/teleop` (external repository)
+- Vehicle deployment boundary: `docs/deployment.md#vehicle-deployment`; the former C++ and Python vehicle directories were removed from this repository.
 - Cyber/LiveKit vehicle runtime invariants: `.agents/knowledge/vehicle-cyber.md`

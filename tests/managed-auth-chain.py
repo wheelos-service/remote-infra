@@ -69,10 +69,17 @@ def main():
                 time.sleep(0.1)
         else:
             raise RuntimeError("disposable LiveKit did not become ready")
+        database_host = "127.0.0.1"
+        if os.environ.get("AUTH_TEST_CONTAINER_RUNNER") == "true":
+            database_host = subprocess.check_output([
+                "docker", "inspect", "--format",
+                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", database,
+            ], text=True).strip()
+            port = "5432"
         env = {
             **os.environ,
             "AUTHZ_POSTGRES_TEST_DSN":
-                f"postgres://postgres:disposable-loopback-only@127.0.0.1:{port}/managed_test?sslmode=disable",
+                f"postgres://postgres:disposable-loopback-only@{database_host}:{port}/managed_test?sslmode=disable",
             "MANAGED_RTC_TEST_URL": url,
         }
         test = ["go", "test", "-mod=readonly", "-p", "1",

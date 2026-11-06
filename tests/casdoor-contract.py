@@ -244,6 +244,13 @@ def main():
                 time.sleep(0.1)
             else:
                 raise RuntimeError("disposable PostgreSQL did not become ready")
+            database_host = "127.0.0.1"
+            if os.environ.get("AUTH_TEST_CONTAINER_RUNNER") == "true":
+                database_host = subprocess.check_output([
+                    "docker", "inspect", "--format",
+                    "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", database,
+                ], text=True).strip()
+                db_port = "5432"
             env = {
                 **os.environ,
                 "CASDOOR_CONTRACT_ACCESS_TOKEN": rotated["access_token"],
@@ -260,7 +267,7 @@ def main():
                 "CASDOOR_CONTRACT_BROWSER_APPLICATION": browser["name"],
                 "CASDOOR_CONTRACT_ORGANIZATION": user["owner"],
                 "AUTHZ_POSTGRES_TEST_DSN":
-                    f"postgres://postgres:disposable-loopback-only@127.0.0.1:{db_port}/casdoor_test?sslmode=disable",
+                    f"postgres://postgres:disposable-loopback-only@{database_host}:{db_port}/casdoor_test?sslmode=disable",
             }
             test = ["go", "test", "-mod=readonly", "-p", "1", "./internal/gateway",
                     "-run", "^Test(CasdoorRealDeviceTokenAndBinding|AutomatedOnboardingActualFlow)$",

@@ -175,7 +175,7 @@ func newControlChainFixture(t *testing.T) *telemetryFixture {
 func TestControlChainServer(t *testing.T) {
 	output := os.Getenv("CONTROL_CHAIN_FIXTURE")
 	if output == "" {
-		t.Skip("run tests/control-chain.py")
+		t.Skip("external acceptance fixture: set CONTROL_CHAIN_FIXTURE; see tests/README.md")
 	}
 	f := newControlChainFixture(t)
 	server := httptest.NewServer(f.mux)

@@ -22,4 +22,4 @@ Read this file when adding or modifying code, configuration, tests, logs, or sec
 - Current API compatibility/ownership: `docs/compatibility.md`
 - API schema: `api/schemas/datachannel-control.schema.json`
 - Go module: `apps/teleop-gateway/go.mod`
-- Python project configuration: `apps/vehicle-edge/pyproject.toml`
+- External vehicle SDK/build ownership: `docs/deployment.md#vehicle-deployment` (`apollo-base`)
