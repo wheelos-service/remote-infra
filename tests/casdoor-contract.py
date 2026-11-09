@@ -22,6 +22,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def main():
+    bootstrap = os.environ.get("VEHICLE_BOOTSTRAP_TEST_BINARY")
+    if bootstrap:
+        bootstrap = pathlib.Path(bootstrap).resolve(strict=True)
+        if not bootstrap.is_file() or not os.access(bootstrap, os.X_OK):
+            raise RuntimeError("VEHICLE_BOOTSTRAP_TEST_BINARY must be an executable Linux binary")
+    credential_hours = 0.5 if bootstrap else 0.1
     name = "managed-casdoor-" + uuid.uuid4().hex[:12]
     database = name + "-db"
     runner = name + "-go"
@@ -114,7 +120,7 @@ def main():
                 "organization": "contract-fleet", "cert": "cert-built-in",
                 "clientId": "browser-" + uuid.uuid4().hex,
                 "grantTypes": ["authorization_code"], "tokenFormat": "JWT",
-                "expireInHours": 0.1, "enablePassword": True, "enableSignUp": False,
+                "expireInHours": credential_hours, "enablePassword": True, "enableSignUp": False,
                 "signinMethods": [{"name": "Password", "displayName": "Password", "rule": "All"}],
                 "redirectUris": ["http://127.0.0.1:8000/"],
                 "scopes": [
@@ -181,7 +187,7 @@ def main():
                 "clientSecret": secrets.token_urlsafe(32),
                 "grantTypes": ["client_credentials"], "tokenFormat": "JWT",
                 "scopes": [{"name": "teleop:vehicle", "displayName": "Vehicle API"}],
-                "expireInHours": 0.1,
+                "expireInHours": credential_hours,
             }
             success(request("/api/add-application", vehicle), "vehicle client creation")
 
@@ -264,18 +270,32 @@ def main():
             }
             test = ["go", "test", "-mod=readonly", "-p", "1", "./internal/gateway",
                     "-run", "^Test(CasdoorRealDeviceTokenAndBinding|AutomatedOnboardingActualFlow)$",
-                    "-count=1", "-v", "-timeout=180s"]
+                    "-count=1", "-v", "-timeout=960s" if bootstrap else "-timeout=180s"]
             command = test
-            if not shutil.which("go"):
+            if not shutil.which("go") or bootstrap:
                 cache = ROOT / ".cache/managed-auth-go-cache"
                 cache.mkdir(parents=True, exist_ok=True)
                 command = [
                     "docker", "run", "--rm", "--name", runner, "--network", "host",
-                    "--user", f"{os.getuid()}:{os.getgid()}",
+                    "--user", "0:0" if bootstrap else f"{os.getuid()}:{os.getgid()}",
                     "-v", f"{ROOT}:/src:ro", "-v", f"{cache}:/cache",
                     "-e", "GOCACHE=/cache/build", "-e", "GOMODCACHE=/cache/mod",
                     "-w", "/src/apps/teleop-gateway",
                 ]
+                if bootstrap:
+                    command.extend([
+                        "-v", f"{bootstrap}:/vehicle_bootstrap:ro",
+                        "-v", "/lib/x86_64-linux-gnu:/vehicle-libs:ro",
+                        "-v", "/lib64/ld-linux-x86-64.so.2:/vehicle-loader:ro",
+                    ])
+                    env.update({
+                        "VEHICLE_BOOTSTRAP_TEST_BINARY": "/vehicle_bootstrap",
+                        "VEHICLE_BOOTSTRAP_TEST_LOADER": "/vehicle-loader",
+                        "VEHICLE_BOOTSTRAP_TEST_LIBRARY_PATH": "/vehicle-libs",
+                    })
+                    for key in ("VEHICLE_BOOTSTRAP_TEST_BINARY", "VEHICLE_BOOTSTRAP_TEST_LOADER",
+                                "VEHICLE_BOOTSTRAP_TEST_LIBRARY_PATH"):
+                        command.extend(["-e", key])
                 for key in ("CASDOOR_CONTRACT_ACCESS_TOKEN", "CASDOOR_CONTRACT_ISSUER",
                             "CASDOOR_CONTRACT_JWKS_URL", "CASDOOR_CONTRACT_AUDIENCE",
                             "CASDOOR_CONTRACT_PERSON_TOKEN", "CASDOOR_CONTRACT_PERSON_AUDIENCE",
@@ -291,7 +311,7 @@ def main():
                 command.extend(["golang:1.24", *test])
                 started.append(runner)
             subprocess.run(command, cwd=ROOT / "apps/teleop-gateway", env=env,
-                           check=True, timeout=300)
+                           check=True, timeout=1080 if bootstrap else 300)
             print("PASS Casdoor v4.25.0: Basic-header management, create/reconcile person and vehicle, "
                   "actual personnel PKCE and client_credentials subject/audience/scope, "
                   "negative scope/secret, rotation; native invitation/recovery/first login, "
@@ -299,6 +319,10 @@ def main():
             print("Rotation rejects future grants with the old secret; already issued JWTs remain "
                   "subject to Gateway expiry/revocation. Mail is captured in an isolated SMTP sink; "
                   "no production delivery or physical-driving claim.")
+            if bootstrap:
+                print("PASS actual C++ vehicle bootstrap: actual Casdoor grant/JWKS, lost credential "
+                      "and acknowledgment responses, restart, invalid_client recovery, "
+                      "maintenance-gated approval and same-vehicle secret rotation.")
         finally:
             for container in reversed(started):
                 present = subprocess.check_output([

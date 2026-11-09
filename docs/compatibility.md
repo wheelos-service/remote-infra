@@ -34,6 +34,12 @@ dispatch merely because a user can request simulation control.
 
 ## Gateway surfaces
 
+Opt-in managed onboarding also exposes proof-authenticated
+`/api/v1/device-enrollments` creation/polling/redemption and OIDC-protected
+organization approval endpoints. These do not replace machine OAuth,
+vehicle-ID matching, control leases or the legacy manual installer; see
+[device-code registration](auth-management.md#vehicle-initiated-device-code-registration-no-client-certificate).
+
 | Surface | Use | Compatibility rule |
 | --- | --- | --- |
 | `/api/vehicles` and device `/state` | Primary directory and latest telemetry | Same device identity, registry and operator ACL boundaries |

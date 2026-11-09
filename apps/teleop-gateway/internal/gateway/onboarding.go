@@ -14,6 +14,7 @@ import (
 
 	"github.com/daohu527/livekit-infra/backend/internal/authorization"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 type OnboardingService struct {
@@ -22,8 +23,10 @@ type OnboardingService struct {
 	config          onboardingConfig
 	aead            cipher.AEAD
 	acquireAdditive func(context.Context, string) (func(), error)
+	acquireMutation func(context.Context, string) (func(), error)
 	providerHTTP    *http.Client
 	workMu          sync.Mutex
+	enrollmentRate  enrollmentRateLimiter
 }
 
 func NewOnboardingServiceFromEnvironment(store *authorization.Store, trustedIssuer string, acquireAdditive func(context.Context, string) (func(), error)) (*OnboardingService, error) {
@@ -44,7 +47,12 @@ func NewOnboardingServiceFromEnvironment(store *authorization.Store, trustedIssu
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
+func (s *OnboardingService) SetRateLimitRedis(client redis.UniversalClient) {
+	s.enrollmentRate.redis = client
+}
+
 func (s *OnboardingService) Register(mux *http.ServeMux, authenticate func(http.Handler) http.Handler) {
+	s.registerDeviceEnrollments(mux, authenticate)
 	for _, pattern := range []string{
 		"GET /api/admin/organizations/{org_id}/onboarding",
 		"POST /api/admin/organizations/{org_id}/onboarding",
@@ -273,6 +281,7 @@ func (s *OnboardingService) issueInstallationTicket(w http.ResponseWriter, r *ht
 			return e
 		})
 	}
+	prepared := err == nil
 	if err == nil {
 		err = s.rotateVehicle(ctx, op, secret)
 	}
@@ -280,7 +289,7 @@ func (s *OnboardingService) issueInstallationTicket(w http.ResponseWriter, r *ht
 		err = s.verifyVehicleToken(ctx, op)
 	}
 	if err != nil {
-		if op.ID != "" {
+		if prepared {
 			recovery, stop := context.WithTimeout(r.Context(), 5*time.Second)
 			_ = s.mutate(recovery, org, func() error { return s.store.FailInstallationRotation(recovery, id, onboardingSafeFailure(err)) })
 			stop()
@@ -348,6 +357,10 @@ func (s *OnboardingService) serveInstall(w http.ResponseWriter, r *http.Request)
 		writeDiagnosticError(w, r, "installation requires a new rotated ticket", "INSTALLATION_ROTATION_REQUIRED", http.StatusConflict)
 		return
 	}
+	s.writeVehicleCredentials(w, op, secret)
+}
+
+func (s *OnboardingService) writeVehicleCredentials(w http.ResponseWriter, op authorization.OnboardingOperation, secret string) {
 	writeJSON(w, http.StatusOK, struct {
 		ClientID     string `json:"client_id"`
 		ClientSecret string `json:"client_secret"`

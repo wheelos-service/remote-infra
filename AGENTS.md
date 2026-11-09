@@ -21,7 +21,7 @@
 - For vehicle Cyber/LiveKit changes, read `.agents/knowledge/vehicle-cyber.md` first; preserve its module boundaries and safety invariants.
 
 ## Knowledge (what the project is)
-- `architecture.md` — Component boundaries, data flow, and authentication boundaries
+- `architecture.md` — Module breakdown, multi-tenant entity model (`Organization`, `Person`, `Vehicle`, `Role`/`Scope`), registration & binding flows, and 4-layer runtime authentication
 - `conventions.md` — Code style, naming, and security constraints
 - Current API/runtime compatibility boundaries: `docs/compatibility.md`
 - `vehicle-cyber.md` — Cyber/LiveKit module ownership, wire contract, and control safety invariants

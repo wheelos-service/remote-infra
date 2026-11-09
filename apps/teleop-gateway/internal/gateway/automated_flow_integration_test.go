@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -74,7 +75,8 @@ func TestAutomatedOnboardingActualFlow(t *testing.T) {
 	verifier.machineAudience = f.store.MachineAudienceAllowed
 	authenticator = verifier
 	mux := http.NewServeMux()
-	server := httptest.NewServer(withRequestID(mux))
+	bootstrapLoss := &vehicleBootstrapResponseLoss{ackLost: make(chan struct{})}
+	server := httptest.NewServer(withRequestID(bootstrapLoss.wrap(mux)))
 	defer server.Close()
 	smtpAddress, mail := onboardingMailSink(t)
 	providerRequest := func(method, path string, body any) any {
@@ -147,6 +149,7 @@ func TestAutomatedOnboardingActualFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("configure isolated onboarding: %v", err)
 	}
+	service.acquireMutation = f.runtime.BeforeMutation
 	service.Register(mux, AuthenticationMiddleware)
 	(&ManagedAdminAPI{Store: f.store, TrustedIssuer: issuer, BeforeMutation: f.runtime.BeforeMutation,
 		OnboardingEnabled: true}).Register(mux, AuthenticationMiddleware)
@@ -206,6 +209,162 @@ func TestAutomatedOnboardingActualFlow(t *testing.T) {
 		}
 		t.Fatal("actual onboarding did not reach expected state")
 		return nil
+	}
+	// Exercise the public proof-authenticated registration path with actual
+	// Casdoor credentials/JWKS and the production managed HTTP middleware.
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollment := enrollmentProof{RequestID: uuid.NewString(), PublicKey: base64.RawURLEncoding.EncodeToString(publicKey),
+		Name: "Device-code vehicle", Serial: "ACTUAL-TEST-SN", Platform: "test"}
+	created := call("POST", "/api/v1/device-enrollments", "", signEnrollment(enrollment, "create", privateKey), 201)
+	enrollmentAdmin := "/api/admin/organizations/" + f.orgID + "/device-enrollments"
+	call("POST", enrollmentAdmin+"/lookup", adminToken, map[string]any{"user_code": created["user_code"]}, 200)
+	approved := call("POST", enrollmentAdmin+"/"+enrollment.RequestID+"/approve", adminToken,
+		map[string]any{"name": "Device-code vehicle", "vehicle_number": "enrolled-001"}, 202)
+	await(approved["operation_id"].(string), "awaiting_install")
+	enrollment.DeviceCode = created["device_code"].(string)
+	enrollment.Name, enrollment.Serial, enrollment.Platform = "", "", ""
+	ready := call("POST", "/api/v1/device-enrollments/token", "", signEnrollment(enrollment, "poll", privateKey), 200)
+	enrollment.Ticket = ready["ticket"].(string)
+	provisioned := call("POST", "/api/v1/device-enrollments/complete", "", signEnrollment(enrollment, "complete", privateKey), 200)
+	retried := call("POST", "/api/v1/device-enrollments/complete", "", signEnrollment(enrollment, "complete", privateKey), 200)
+	if provisioned["client_secret"] != retried["client_secret"] {
+		t.Fatal("proof-authenticated lost-response retry changed credentials")
+	}
+	deviceGrant, err := http.PostForm(provisioned["token_url"].(string), url.Values{
+		"grant_type": {"client_credentials"}, "client_id": {provisioned["client_id"].(string)},
+		"client_secret": {provisioned["client_secret"].(string)}, "scope": {"teleop:vehicle"},
+	})
+	if err != nil {
+		t.Fatal("device-code vehicle grant failed")
+	}
+	var granted struct {
+		AccessToken string `json:"access_token"`
+	}
+	err = json.NewDecoder(io.LimitReader(deviceGrant.Body, 65536)).Decode(&granted)
+	deviceGrant.Body.Close()
+	if err != nil || granted.AccessToken == "" {
+		t.Fatal("device-code vehicle grant returned no access token")
+	}
+	enrolledVehicle := provisioned["vehicle_id"].(string)
+	call("GET", "/api/vehicles/"+enrolledVehicle+"/device-auth-check", granted.AccessToken, nil, 204)
+	call("POST", "/api/vehicles/"+enrolledVehicle+"/installation-complete", granted.AccessToken, map[string]any{}, 204)
+	call("POST", "/api/v1/device-enrollments/complete", "", signEnrollment(enrollment, "complete", privateKey), 404)
+	if os.Getenv("VEHICLE_BOOTSTRAP_TEST_BINARY") != "" {
+		client := newVehicleBootstrapClient(t, server.URL, "ACTUAL-CPP-SN")
+		bootstrapLoss.complete.Store(true)
+		bootstrapLoss.ack.Store(true)
+		began := time.Now()
+		process := client.start(75 * time.Second)
+		var enrollmentID, userCode string
+		waitForBootstrap(t, 12*time.Second, "actual Casdoor device approval", func() bool {
+			return f.db.QueryRow(`SELECT enrollment_id,user_code FROM authz_device_enrollments WHERE serial='ACTUAL-CPP-SN'`).Scan(&enrollmentID, &userCode) == nil
+		})
+		call("POST", enrollmentAdmin+"/lookup", adminToken, map[string]any{"user_code": userCode}, 200)
+		approval := call("POST", enrollmentAdmin+"/"+enrollmentID+"/approve", adminToken,
+			map[string]any{"name": "Actual C++ vehicle", "vehicle_number": "cpp-actual-001"}, 202)
+		operationID := approval["operation_id"].(string)
+		await(operationID, "awaiting_install")
+		waitForBootstrap(t, 60*time.Second, "lost acknowledgment after actual installation", func() bool {
+			select {
+			case <-bootstrapLoss.ackLost:
+				return true
+			case <-process.done:
+				t.Fatalf("actual vehicle client stopped before acknowledgment: %v", process.err)
+				return false
+			default:
+				return false
+			}
+		})
+		process.stop()
+		await(operationID, "completed")
+		config := client.read("device.json")
+		state := client.read("state/enrollment.json")
+		if state["status"] != "installing" || config["vehicle_id"] != approval["vehicle_id"] ||
+			config["control_mode"] != "disabled" || bootstrapLoss.complete.Load() {
+			t.Fatal("lost responses did not preserve installed credentials and pending acknowledgment")
+		}
+		restarted := client.start(25 * time.Second)
+		if err := restarted.wait(); err != nil || client.read("state/enrollment.json")["status"] != "installed" {
+			t.Fatal("actual C++ client could not recover a lost acknowledgment after restart")
+		}
+		originalSecret := config["client_secret"].(string)
+		if strings.Contains(process.output.String(), originalSecret) || strings.Contains(restarted.output.String(), originalSecret) {
+			t.Fatal("actual vehicle output leaked its client credential")
+		}
+		t.Logf("real C++/Casdoor: lost credential response and acknowledgment recovered across restart in %s", time.Since(began).Round(time.Millisecond))
+
+		// A confirmed rejection is induced in disposable local configuration;
+		// only the normal enrollment approval is allowed to rotate Casdoor.
+		config["client_secret"] = "invalid-disposable-test-credential"
+		client.write("device.json", config)
+		recoveryProcess := client.start(30 * time.Second)
+		var recoveryID, recoveryCode string
+		waitForBootstrap(t, 18*time.Second, "actual invalid_client recovery", func() bool {
+			return f.db.QueryRow(`SELECT enrollment_id,user_code FROM authz_device_enrollments WHERE recovery AND operation_id=$1 AND status='pending'`, operationID).Scan(&recoveryID, &recoveryCode) == nil
+		})
+		recoveryProcess.stop()
+		pendingRestart := client.start(6 * time.Second)
+		pendingRestart.wait()
+		recoveryView := call("POST", enrollmentAdmin+"/lookup", adminToken, map[string]any{"user_code": recoveryCode}, 200)
+		if recoveryView["id"] != recoveryID || recoveryView["vehicle_id"] != approval["vehicle_id"] ||
+			recoveryView["operation_id"] != operationID || recoveryView["recovery"] != true {
+			t.Fatal("actual credential failure lost its original organization/vehicle binding")
+		}
+		call("POST", enrollmentAdmin+"/"+recoveryID+"/approve", adminToken, map[string]any{}, 409)
+		f.runtime.maintenance = true
+		call("POST", enrollmentAdmin+"/"+recoveryID+"/approve", adminToken, map[string]any{}, 409)
+		t.Log("real credential recovery: waiting the actual 11-minute Gateway quiet window; no test-clock advance or drain bypass")
+		waitForBootstrap(t, 12*time.Minute, "actual safe maintenance quiet window", func() bool {
+			quietUntil, err := f.store.DrainQuietUntil(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return !quietUntil.IsZero() && !time.Now().Before(quietUntil)
+		})
+		rotated := call("POST", enrollmentAdmin+"/"+recoveryID+"/approve", adminToken, map[string]any{}, 202)
+		f.runtime.maintenance = false
+		if rotated["operation_id"] != operationID {
+			t.Fatal("actual recovery created another provisioning operation")
+		}
+		if err := client.start(40 * time.Second).wait(); err != nil {
+			t.Fatal("approved actual Casdoor credential recovery did not finish")
+		}
+		renewed := client.read("device.json")
+		if renewed["vehicle_id"] != config["vehicle_id"] || renewed["client_id"] != config["client_id"] ||
+			renewed["client_secret"] == originalSecret || renewed["control_mode"] != "disabled" {
+			t.Fatal("actual recovery changed identity/control settings or failed to rotate credentials")
+		}
+		old, err := http.PostForm(config["token_url"].(string), url.Values{
+			"grant_type": {"client_credentials"}, "client_id": {config["client_id"].(string)},
+			"client_secret": {originalSecret},
+		})
+		if err != nil {
+			t.Fatal("could not verify actual old-credential rejection")
+		}
+		var oldGrant map[string]any
+		err = json.NewDecoder(io.LimitReader(old.Body, 65536)).Decode(&oldGrant)
+		old.Body.Close()
+		if err != nil || oldGrant["access_token"] != nil {
+			t.Fatal("old credential still obtained a grant after recovery approval")
+		}
+		var requests, operations int
+		if err := f.db.QueryRow(`SELECT count(*) FROM authz_device_enrollments WHERE serial='ACTUAL-CPP-SN'`).Scan(&requests); err != nil || requests != 2 {
+			t.Fatal("actual recovery or restart repeatedly refreshed the device code")
+		}
+		if err := f.db.QueryRow(`SELECT count(*) FROM authz_onboarding_operations WHERE vehicle_id=$1`, config["vehicle_id"]).Scan(&operations); err != nil || operations != 1 {
+			t.Fatal("actual recovery duplicated the vehicle")
+		}
+		for _, path := range []string{"device.json", "state/key.json", "state/enrollment.json"} {
+			info, err := os.Stat(filepath.Join(client.dir, path))
+			if err != nil || info.Mode().Perm() != 0600 {
+				t.Fatal("actual vehicle did not protect credentials or enrollment state")
+			}
+		}
+		await(operationID, "completed")
+		t.Log("real C++/Casdoor: invalid_client, pending restart, maintenance-gated approval, secret rotation and same-vehicle recovery passed")
 	}
 	vehicleInput := map[string]any{"kind": "vehicle", "name": "Actual enrolled vehicle",
 		"vehicle_number": "truck-001", "idempotency_key": uuid.NewString()}

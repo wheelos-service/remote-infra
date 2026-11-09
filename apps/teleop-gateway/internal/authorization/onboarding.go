@@ -39,6 +39,7 @@ type OnboardingOperation struct {
 	ErrorCode            string            `json:"error_code"`
 	UserID               string            `json:"user_id,omitempty"`
 	CreatedAt            time.Time         `json:"created_at"`
+	DeviceEnrollment     bool              `json:"device_enrollment"`
 	OrganizationID       string            `json:"-"`
 	ActorUserID          string            `json:"-"`
 	PlannedIdentityID    string            `json:"-"`
@@ -128,6 +129,14 @@ func (s *Store) CreateOnboarding(ctx context.Context, actor, org string, request
 	if err := onboardingRoleAllowed(ctx, tx, actor, r); err != nil {
 		return OnboardingOperation{}, err
 	}
+	op, err := createOnboardingInTx(ctx, tx, actor, org, r, ciphertext)
+	if err != nil {
+		return op, err
+	}
+	return op, mutationError(tx.Commit())
+}
+
+func createOnboardingInTx(ctx context.Context, tx *sql.Tx, actor, org string, r OnboardingRequest, ciphertext []byte) (OnboardingOperation, error) {
 	payload, _ := json.Marshal(r)
 	prior, err := scanOnboarding(tx.QueryRowContext(ctx, onboardingSelect+` WHERE org_id=$1 AND idempotency_key=$2`, org, r.IdempotencyKey))
 	if err == nil {
@@ -135,7 +144,7 @@ func (s *Store) CreateOnboarding(ctx context.Context, actor, org string, request
 		if string(previous) != string(payload) || prior.ActorUserID != actor {
 			return OnboardingOperation{}, ErrConflict
 		}
-		return prior, tx.Commit()
+		return prior, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return OnboardingOperation{}, err
@@ -182,17 +191,18 @@ func (s *Store) CreateOnboarding(ctx context.Context, actor, org string, request
 	if err != nil {
 		return op, err
 	}
-	return op, mutationError(tx.Commit())
+	return op, nil
 }
 
 const onboardingSelect = `SELECT operation_id,org_id,actor_user_id,kind,name,email,vehicle_id,planned_identity_id,provider_name,client_id,
-	credential_ciphertext,status,stage,error_code,COALESCE(user_id::text,''),created_at,request,attempts FROM authz_onboarding_operations`
+	credential_ciphertext,status,stage,error_code,COALESCE(user_id::text,''),created_at,request,attempts,
+	EXISTS(SELECT 1 FROM authz_enrolled_device_keys k WHERE k.operation_id=authz_onboarding_operations.operation_id) FROM authz_onboarding_operations`
 
 func scanOnboarding(row interface{ Scan(...any) error }) (OnboardingOperation, error) {
 	var op OnboardingOperation
 	var request []byte
 	err := row.Scan(&op.ID, &op.OrganizationID, &op.ActorUserID, &op.Kind, &op.Name, &op.Email, &op.VehicleID, &op.PlannedIdentityID,
-		&op.ProviderName, &op.ClientID, &op.CredentialCiphertext, &op.Status, &op.Stage, &op.ErrorCode, &op.UserID, &op.CreatedAt, &request, &op.Attempts)
+		&op.ProviderName, &op.ClientID, &op.CredentialCiphertext, &op.Status, &op.Stage, &op.ErrorCode, &op.UserID, &op.CreatedAt, &request, &op.Attempts, &op.DeviceEnrollment)
 	if err == nil {
 		err = json.Unmarshal(request, &op.Request)
 	}
@@ -239,7 +249,7 @@ func (s *Store) ListOnboarding(ctx context.Context, actor, org string) ([]Onboar
 }
 
 func (s *Store) NextOnboarding(ctx context.Context) (OnboardingOperation, error) {
-	return scanOnboarding(s.db.QueryRowContext(ctx, onboardingSelect+` WHERE (status='pending' AND attempts<3 OR status='running') AND next_attempt_at<=now() ORDER BY created_at LIMIT 1`))
+	return scanOnboarding(s.db.QueryRowContext(ctx, onboardingSelect+` WHERE (status='pending' AND attempts<3 OR status='running') AND next_attempt_at<=now() ORDER BY next_attempt_at,created_at LIMIT 1`))
 }
 
 // StartOnboarding persists the unknown-result recovery stage before calling
@@ -259,7 +269,7 @@ func (s *Store) StartOnboarding(ctx context.Context, id string) error {
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE authz_onboarding_operations SET status='running',attempts=attempts+1,
 		stage=CASE WHEN stage='planned' THEN 'provider' ELSE stage END,error_code='',updated_at=now(),
-		next_attempt_at=now()+interval '10 seconds' WHERE operation_id=$1 AND status IN ('pending','running') AND attempts<3`, id)
+		next_attempt_at=now()+interval '10 seconds' WHERE operation_id=$1 AND (status='pending' OR (status='running' AND next_attempt_at<=now())) AND attempts<3`, id)
 	if err != nil {
 		return err
 	}
@@ -476,7 +486,7 @@ func (s *Store) PrepareInstallationRotation(ctx context.Context, actor, org, id 
 	}
 	defer tx.Rollback()
 	op, err := scanOnboarding(tx.QueryRowContext(ctx, onboardingSelect+` WHERE operation_id=$1 AND org_id=$2 FOR UPDATE`, id, org))
-	if err != nil || op.Kind != "vehicle" || op.Status != "awaiting_install" {
+	if err != nil || op.Kind != "vehicle" || op.Status != "awaiting_install" || op.DeviceEnrollment {
 		return op, ErrConflict
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE authz_installation_tickets SET revoked_at=now() WHERE operation_id=$1 AND revoked_at IS NULL`, id); err != nil {
@@ -502,7 +512,9 @@ func (s *Store) CreateInstallationTicket(ctx context.Context, actor, org, id str
 	}
 	defer tx.Rollback()
 	var awaiting bool
-	if err := tx.QueryRowContext(ctx, `SELECT kind='vehicle' AND status='awaiting_install' FROM authz_onboarding_operations WHERE org_id=$1 AND operation_id=$2 FOR UPDATE`, org, id).Scan(&awaiting); err != nil || !awaiting {
+	if err := tx.QueryRowContext(ctx, `SELECT kind='vehicle' AND status='awaiting_install'
+		AND NOT EXISTS(SELECT 1 FROM authz_enrolled_device_keys k WHERE k.operation_id=authz_onboarding_operations.operation_id)
+		FROM authz_onboarding_operations WHERE org_id=$1 AND operation_id=$2 FOR UPDATE`, org, id).Scan(&awaiting); err != nil || !awaiting {
 		return ErrConflict
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO authz_installation_tickets(token_hash,operation_id,expires_at) VALUES($1,$2,$3)`, tokenHash[:], id, expires); err != nil {
@@ -539,7 +551,7 @@ func (s *Store) FailInstallationRotation(ctx context.Context, id, code string) e
 func (s *Store) InstallationTicketOrganization(ctx context.Context, hash [sha256.Size]byte) (string, error) {
 	var org string
 	err := s.db.QueryRowContext(ctx, `SELECT o.org_id FROM authz_installation_tickets t JOIN authz_onboarding_operations o USING(operation_id)
-		WHERE t.token_hash=$1 AND t.consumed_at IS NULL AND t.revoked_at IS NULL AND t.expires_at>now()`, hash[:]).Scan(&org)
+		WHERE t.token_hash=$1 AND t.device_enrollment_id IS NULL AND t.consumed_at IS NULL AND t.revoked_at IS NULL AND t.expires_at>now()`, hash[:]).Scan(&org)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrInstallationTicket
 	}
@@ -555,7 +567,7 @@ func (s *Store) ConsumeInstallationTicket(ctx context.Context, hash [sha256.Size
 	var id string
 	err = tx.QueryRowContext(ctx, `UPDATE authz_installation_tickets t SET consumed_at=now()
 		FROM authz_onboarding_operations op,authz_organizations org,authz_vehicles v,authz_vehicle_identities i
-		WHERE t.token_hash=$1 AND t.consumed_at IS NULL AND t.revoked_at IS NULL AND t.expires_at>now()
+		WHERE t.token_hash=$1 AND t.device_enrollment_id IS NULL AND t.consumed_at IS NULL AND t.revoked_at IS NULL AND t.expires_at>now()
 		AND op.operation_id=t.operation_id AND op.status='awaiting_install' AND op.kind='vehicle'
 		AND org.org_id=op.org_id AND org.status='active' AND v.vehicle_id=op.vehicle_id AND v.org_id=op.org_id AND v.status='active'
 		AND i.vehicle_id=v.vehicle_id AND i.status='active' AND i.client_id=op.client_id
@@ -597,6 +609,10 @@ func (s *Store) CompleteInstallation(ctx context.Context, issuer, vehicleID stri
 		return err
 	}
 	if err := onboardingEvent(ctx, tx, id, "installation_auth_verified", ""); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_device_enrollments SET status='active',ticket_ciphertext=NULL,device_code_ciphertext=''::bytea
+		WHERE operation_id=$1 AND status='approved'`, id); err != nil {
 		return err
 	}
 	return tx.Commit()

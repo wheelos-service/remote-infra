@@ -9,6 +9,8 @@ import {
   onboardingInputSchema, onboardingNeedsPolling, onboardingStatusLabel,
   type OnboardingInput, type OnboardingOperation, type InstallationTicket,
   addExistingMember,
+  lookupDeviceEnrollment, approveDeviceEnrollment, denyDeviceEnrollment, enrollmentUserCodeSchema,
+  type DeviceEnrollment,
 } from '../lib/admin-api'
 
 const fieldClass = 'w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20'
@@ -282,10 +284,11 @@ export function OnboardingOperations({ operations, busy, onRetry, onTicket }: {
       {operation.kind === 'person' && operation.status === 'completed' && <p>账号与权限已配置；请通过 Casdoor 邮件完成账号设置。此状态不代表已完成首次登录。</p>}
       {operation.kind === 'vehicle' && operation.status === 'completed' && <p>车辆认证安装已完成；不代表车辆在线、摄像头或视频已就绪，请前往授权车辆监看确认运行状态。</p>}
       {operation.status === 'failed' && <button className={buttonClass} disabled={busy} onClick={() => onRetry(operation.id)}>重试失败任务</button>}
-      {operation.kind === 'vehicle' && operation.status === 'awaiting_install' && <>
+      {operation.kind === 'vehicle' && operation.status === 'awaiting_install' && (operation.device_enrollment
+        ? <p>由车端自动领取凭据；请在车辆终端完成接入，本页面不显示安装令牌或设备密钥。</p> : <>
         <p>车辆尚未安装接入。仅在受保护的车辆终端中使用短期单次安装令牌，不提供永久客户端密钥。</p>
         <button className={buttonClass} disabled={busy} onClick={() => onTicket(operation.id)}>轮换并签发单次安装令牌</button>
-      </>}
+      </>)}
     </article>)}
   </section>
 }
@@ -305,9 +308,128 @@ export function InstallationInstructions({ ticket, vehicleId, onClear }: {
   </section>
 }
 
-export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disabled, onDirectoryChange, tab, children }: {
+export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChange, onOperationFound }: {
+  orgId: string; token: string; disabled: boolean; onDirectoryChange: () => void; onOperationFound?: (id: string) => void
+}) {
+  const [userCode, setUserCode] = useState('')
+  const [result, setResult] = useState<{ orgId: string; token: string; code: string; record: DeviceEnrollment }>()
+  const [name, setName] = useState('')
+  const [vehicleNumber, setVehicleNumber] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [, setClock] = useState(0)
+  const request = useRef<AbortController | undefined>(undefined)
+  const scope = useRef({ orgId, token, code: userCode, disabled })
+  scope.current = { orgId, token, code: userCode, disabled }
+  useEffect(() => {
+    request.current?.abort(); request.current = undefined
+    setUserCode(''); setResult(undefined); setName(''); setVehicleNumber(''); setBusy(false); setError('')
+    return () => { request.current?.abort(); request.current = undefined }
+  }, [orgId, token])
+  const record = result?.orgId === orgId && result.token === token && result.code === userCode ? result.record : undefined
+  const expiresAt = record ? Date.parse(record.expires_at) : NaN
+  const pending = record?.status === 'pending' && Number.isFinite(expiresAt) && expiresAt > Date.now()
+  useEffect(() => {
+    if (!record || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return
+    const timer = setTimeout(() => setClock(value => value + 1), Math.min(expiresAt - Date.now(), 2_147_483_647))
+    return () => clearTimeout(timer)
+  }, [record, expiresAt])
+  const run = async (code: string, operation: (signal: AbortSignal) => Promise<DeviceEnrollment>, refresh = false) => {
+    if (disabled || scope.current.disabled || request.current || scope.current.orgId !== orgId
+      || scope.current.token !== token || scope.current.code !== code) return
+    const controller = new AbortController()
+    request.current = controller
+    setBusy(true); setError('')
+    const current = () => !controller.signal.aborted && request.current === controller
+      && scope.current.orgId === orgId && scope.current.token === token && scope.current.code === code
+    try {
+      const next = await operation(controller.signal)
+      if (!current()) return
+      setResult({ orgId, token, code, record: next }); setName(next.name)
+      if (next.operation_id) onOperationFound?.(next.operation_id)
+      if (refresh) onDirectoryChange()
+    } catch (cause) {
+      if (current()) setError(adminErrorMessage(cause))
+    } finally {
+      if (current()) { request.current = undefined; setBusy(false) }
+    }
+  }
+  const status = record && ({
+    pending: pending ? '等待审批' : '已过期，不能审批', approved: '已批准，等待设备完成接入',
+    provisioning: '已批准，正在配置车辆身份', awaiting_install: '已批准，等待设备完成安装',
+    failed: '接入配置失败，请查看接入任务并手动重试',
+    denied: '已拒绝', expired: '已过期',
+  } as Record<string, string>)[record.status]
+  return <section className="space-y-3 rounded-xl border border-slate-700 bg-slate-900/60 p-5">
+    <h2 className="font-medium text-sky-200">设备码注册</h2>
+    <p className="text-sm text-slate-400">输入车辆终端显示的申请码，在当前组织核对后显式批准或拒绝。审批不授予驾驶或控制权限，也不代表车辆在线。</p>
+    <form onSubmit={event => {
+      event.preventDefault()
+      const parsed = enrollmentUserCodeSchema.safeParse(userCode)
+      if (!parsed.success) { setError(parsed.error.issues[0]?.message || '请检查申请码。'); return }
+      setResult(undefined); setVehicleNumber('')
+      void run(userCode, signal => lookupDeviceEnrollment(orgId, token, parsed.data, signal))
+    }}>
+      <fieldset disabled={disabled || busy} className="flex flex-wrap items-end gap-3">
+        <label className="max-w-xs flex-1 text-sm">8 位申请码 <input className={`${fieldClass} font-mono`} name="user_code"
+          autoComplete="off" spellCheck={false} required maxLength={9} value={userCode} placeholder="ABCD-EFGH"
+          onChange={event => {
+            request.current?.abort(); request.current = undefined
+            const code = event.target.value.trim().replace(/-/g, '').toUpperCase()
+            scope.current.code = code
+            setUserCode(code); setResult(undefined); setName(''); setVehicleNumber(''); setError(''); setBusy(false)
+          }} /></label>
+        <button type="submit" className={buttonClass}>查询申请</button>
+      </fieldset>
+    </form>
+    {busy && <p role="status" className="text-sm">正在处理，请勿重复操作…</p>}
+    {error && <AdminNotice error={error} />}
+    {record && <div className="space-y-3 text-sm">
+      <p className="text-amber-200">以下名称、序列号与平台由设备自行报告，未经核实；请通过可信渠道核对设备和公钥指纹。</p>
+      <dl className="grid gap-2 break-all sm:grid-cols-2">
+        <div><dt className="text-slate-400">设备名称（未核实）</dt><dd>{record.name || '未提供'}</dd></div>
+        <div><dt className="text-slate-400">序列号（未核实）</dt><dd>{record.serial || '未提供'}</dd></div>
+        <div><dt className="text-slate-400">平台（未核实）</dt><dd>{record.platform || '未提供'}</dd></div>
+        <div><dt className="text-slate-400">公钥 SHA256 指纹</dt><dd className="font-mono">{record.fingerprint}</dd></div>
+        <div><dt className="text-slate-400">申请时间</dt><dd>{record.created_at}</dd></div>
+        <div><dt className="text-slate-400">到期时间</dt><dd>{record.expires_at}</dd></div>
+      </dl>
+      <p role="status">{status || '未知状态，不能审批'}</p>
+      <p>{record.recovery ? '恢复申请：是；仅恢复服务端已有绑定，不能更改组织或车辆。' : '恢复申请：否；批准后创建当前组织的新车辆。'}</p>
+      {record.vehicle_id && <p>已绑定车辆 ID：<span className="break-all font-mono">{record.vehicle_id}</span></p>}
+      {record.error_code && <p>诊断代码：{record.error_code}</p>}
+      {record.operation_id && <div className="space-y-1">
+        <p className="break-all">接入任务 ID：{record.operation_id}</p>
+        <p className="text-slate-400">在下方“接入与邀请进度”中按此任务 ID 核对状态；失败时使用“重试失败任务”，无需重新批准申请。</p>
+      </div>}
+      <form onSubmit={event => {
+        event.preventDefault()
+        if (!pending || Date.parse(record.expires_at) <= Date.now()) return
+        void run(userCode, signal => approveDeviceEnrollment(orgId, token, record,
+          record.recovery ? undefined : { name, vehicle_number: vehicleNumber }, signal), true)
+      }}>
+        <fieldset disabled={disabled || busy || !pending} className="flex flex-col gap-3">
+          {!record.recovery && <div className="grid gap-3 sm:grid-cols-2">
+            <label>批准后的车辆名称 <input className={fieldClass} name="name" required maxLength={200} value={name} onChange={event => setName(event.target.value)} /></label>
+            <label>客户内部车辆编号 <input className={fieldClass} name="vehicle_number" required maxLength={24}
+              pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,23}" value={vehicleNumber} onChange={event => setVehicleNumber(event.target.value)} /></label>
+          </div>}
+          <div className="flex gap-3">
+            <button type="submit" className={primaryButtonClass}>{record.recovery ? '批准恢复已有车辆' : '批准接入新车辆'}</button>
+            <button type="button" className={buttonClass} onClick={() => {
+              if (!pending || Date.parse(record.expires_at) <= Date.now()) return
+              void run(userCode, signal => denyDeviceEnrollment(orgId, token, record.id, signal))
+            }}>拒绝申请</button>
+          </div>
+        </fieldset>
+      </form>
+    </div>}
+  </section>
+}
+
+export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disabled, onDirectoryChange, tab, children, enrollmentRevision = 0 }: {
   orgId: string; token: string; platformAdmin: boolean; vehicles: ManagedVehicle[]; disabled: boolean; onDirectoryChange: () => void
-  tab?: AdminTab; children?: React.ReactNode
+  tab?: AdminTab; children?: React.ReactNode; enrollmentRevision?: number
 }) {
   const [operations, setOperations] = useState<OnboardingOperation[]>([])
   const [busy, setBusy] = useState(false)
@@ -350,7 +472,10 @@ export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disab
     }
     void load()
     return () => { controller.abort(); if (timer) clearTimeout(timer) }
-  }, [orgId, token, revision])
+  }, [orgId, token, revision, enrollmentRevision])
+  useEffect(() => {
+    if (enrollmentRevision > 0 && progress.current) progress.current.open = true
+  }, [enrollmentRevision])
   useEffect(() => {
     if (!ticket) return
     const expiresIn = Date.parse(ticket.value.expires_at) - Date.now()
@@ -412,6 +537,7 @@ export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disab
       const operation = await retryOnboarding(orgId, token, id, signal)
       if (!signal.aborted) remember(operation)
     })} onTicket={id => void run(async signal => {
+      if (operations.find(operation => operation.id === id)?.device_enrollment) return
       setTicket(undefined)
       const value = await createInstallationTicket(orgId, token, id, signal)
       if (!signal.aborted && currentTab.current === tab) setTicket({ value, vehicleId: operations.find(item => item.id === id)?.vehicle_id ?? '', operationId: id })
@@ -436,6 +562,7 @@ export default function Admin() {
   const [notice, setNotice] = useState('')
   const [revision, setRevision] = useState(0)
   const [contextRevision, setContextRevision] = useState(0)
+  const [enrollmentRevision, setEnrollmentRevision] = useState(0)
   const [tab, setTab] = useState<AdminTab>('vehicles')
   const [query, setQuery] = useState('')
   const [editingUserId, setEditingUserId] = useState('')
@@ -546,6 +673,10 @@ export default function Admin() {
             修改已有权限前，需由运维启用管理维护模式，并排空视频/控制会话、等待已签发令牌过期。修改被拒绝后不会自动生效。{context.onboarding_enabled && '新增人员和车辆不需要中断已有会话。'}
           </div>}
           {!context.onboarding_enabled && <p className="rounded-lg border border-amber-500/30 p-4 text-sm text-amber-200">手工预配试点：请先由平台运维在 Casdoor 创建身份，并核实可信 issuer 下的 subject，再创建绑定。本界面不是邀请流程，不生成账号密码、车辆凭据或密钥。保存前需维护排空。</p>}
+          {context.onboarding_enabled && tab === 'vehicles' && <DeviceEnrollmentPanel key={orgId + ':' + token}
+            orgId={orgId} token={token} disabled={loading || saving || !ready}
+            onOperationFound={() => setEnrollmentRevision(value => value + 1)}
+            onDirectoryChange={() => setRevision(value => value + 1)} />}
           {ready && <>
           <label className="relative block max-w-sm"><Search size={16} aria-hidden="true" className="pointer-events-none absolute left-3 top-3 text-slate-500" />
             <input type="search" aria-label={tab === 'vehicles' ? '搜索车辆名称或编号' : '搜索人员名称或角色'} placeholder={tab === 'vehicles' ? '搜索车辆名称或编号…' : '搜索人员名称或角色…'} className={`${fieldClass} pl-9`} value={query} onChange={event => setQuery(event.target.value)} />
@@ -553,6 +684,7 @@ export default function Admin() {
           {!context.onboarding_enabled && tab !== 'permissions' && <AdminDirectory tab={tab} people={people} vehicles={vehicles} query={query} onEdit={userId => { setEditingUserId(userId); changeTab('permissions') }} />}
           </>}
           {context.onboarding_enabled && <OnboardingManager key={orgId} orgId={orgId} token={token} tab={tab}
+            enrollmentRevision={enrollmentRevision}
             platformAdmin={context.platform_admin} vehicles={vehicles} disabled={loading || saving || !ready}
             onDirectoryChange={() => setRevision(value => value + 1)}>
             {ready && tab !== 'permissions' && <AdminDirectory tab={tab} people={people} vehicles={vehicles} query={query} onEdit={userId => { setEditingUserId(userId); changeTab('permissions') }} />}

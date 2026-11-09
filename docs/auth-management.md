@@ -11,6 +11,117 @@ PostgreSQL database does not migrate or replace Casdoor's own storage.
 
 ## Single-entry automated onboarding
 
+### Vehicle-initiated device-code registration (no client certificate)
+
+Managed deployments with `AUTHORIZATION_ONBOARDING_CONFIG_FILE` configured also
+accept vehicle-initiated enrollment. Static/manual deployments do not expose
+these endpoints. No CA or vehicle client certificate is needed; HTTPS server
+certificate validation remains mandatory.
+
+The vehicle bootstrap generates and persistently protects an Ed25519 software
+key, submits device-reported name/serial/platform and displays an eight-character
+user code. A manager signs into `/#/admin`, selects the correct organization and
+uses **车辆管理 / 设备码注册** to look up and explicitly approve or reject it.
+The hardware metadata is unverified, not manufacturer attestation. Approval
+atomically reserves the existing Casdoor onboarding operation and binds the key;
+the background worker provisions the independent machine client as before.
+Nothing in this flow grants operator control permission.
+
+| Endpoint | Authentication / result |
+| --- | --- |
+| `POST /api/v1/device-enrollments` | Signed device request; returns secret `device_code`, display-only `user_code`, expiry and polling interval |
+| `POST /api/v1/device-enrollments/token` | Device code plus signature; pending/provisioning/failed/denied/expired/active status, or a five-minute key-bound installation ticket |
+| `POST /api/v1/device-enrollments/complete` | Code, ticket and signature; delivers only that vehicle's existing OAuth configuration |
+| `POST /api/admin/organizations/{org_id}/device-enrollments/lookup` | Bound OIDC manager and `{user_code}`; returns non-secret confirmation details |
+| `POST /api/admin/organizations/{org_id}/device-enrollments/{id}/approve` | Same management check; `{name,vehicle_number}` for a new key, `{}` for recovery |
+| `POST /api/admin/organizations/{org_id}/device-enrollments/{id}/deny` | Same management check and `{}`; rejects a pending request |
+
+Public requests contain `request_id` (canonical UUID), `public_key` (raw 32-byte
+Ed25519 base64url without padding), `name`, `serial`, `platform`, `device_code`,
+`ticket`, `timestamp` (Unix seconds), `nonce` (fresh UUID for every HTTP attempt)
+and `signature` (raw 64-byte base64url). Sign the newline-joined fields below,
+without a trailing newline:
+
+```text
+teleop-enrollment-v1
+<create|poll|complete>
+<request_id>
+<public_key>
+<name>
+<serial>
+<platform>
+<device_code>
+<ticket>
+<timestamp>
+<nonce>
+```
+
+Creation uses empty code/ticket; polling and redemption use empty
+name/serial/platform, and polling also uses an empty ticket. The server checks
+the signature and a two-minute clock window, persistently rejects reused nonces,
+limits request rates and enforces a five-second polling interval. Pending codes
+expire after fifteen minutes; approval extends installation eligibility to
+twenty-four hours. A new request UUID refreshes the device/user code while
+keeping the same persistent key and previously bound vehicle/client IDs.
+
+Unlike the legacy bearer-only installer, proof-authenticated retries can retrieve
+the same pending credential after a lost HTTP response. A fresh signature/nonce
+is required, the ticket must remain unexpired, and the legacy
+`/api/vehicle/install` endpoint refuses these key-bound tickets. The vehicle must
+atomically persist the root-owned mode-0600 configuration, verify OAuth and its
+exact Gateway vehicle binding, then call the existing authenticated
+`installation-complete` endpoint. That confirmation marks the enrollment active
+and erases pending credential/ticket ciphertext; possession of a code or ticket
+alone cannot reactivate or retrieve it.
+Both the standalone bootstrap and runtime authentication SDK explicitly request
+OAuth scope `teleop:vehicle`. A token returned by Casdoor without that scope is
+not sufficient evidence of successful Gateway authentication.
+
+| Failure | Recovery |
+| --- | --- |
+| Network/timeout/5xx | Keep the key and request ID; bounded jittered backoff, not new registrations |
+| Polling too fast/429 | Observe `Retry-After`/minimum interval |
+| Expired/unavailable code | Generate a new request ID/code, retaining the same device key |
+| Explicit denial | Stop; never continually generate new codes to evade rejection |
+| Provider provisioning failure | Keep the operation and code; administrator retries the existing onboarding operation |
+| Lost credential response | Retry proof-authenticated redemption; an expired ticket can be replaced by polling |
+| Ticket expires during redemption | `410 ENROLLMENT_TICKET_EXPIRED`; discard only the ticket and poll the same approved enrollment, without a new code or approval |
+| Confirmed OAuth client-credential rejection | Refresh enrollment code using the same key; manager approves recovery for the original vehicle |
+| Gateway scope/mapping denial, clock/proof error, disabled lifecycle | Surface the diagnostic; do not rotate credentials or silently recreate a vehicle |
+
+Recovery never accepts another organization/vehicle binding or overwrites an
+inactive identity. Rotating an already provisioned client's secret remains
+behind the existing maintenance/drain guard: a revoked secret does not revoke
+previously signed JWTs or active RTC/control authority. Software keys and OAuth
+secrets remain cloneable if the vehicle filesystem is compromised; this MVP is
+not TPM-backed attestation or physical-driving certification.
+
+Progress is available in three separate places:
+
+- The administrator's onboarding operation exposes `status`, `stage` and
+  `error_code`, keyed by the enrollment's `operation_id`. The vehicle-management
+  panel follows provisioning and installation; an approved application is not
+  yet a completed installation.
+- The vehicle persists its request and phase in protected `enrollment.json`.
+  Safe troubleshooting can inspect only `request_id`, `status`, `stage`,
+  `failures`, `last_error_code`, `last_error_hint`, `last_http_status` and
+  `next_attempt_at`; never dump the complete state, key or device configuration.
+  `journalctl -u vehicle-bootstrap.service` shows the human code, deduplicated
+  retry/provisioning/blocked stage diagnostics and terminal messages. Exit `0`
+  also means graceful cancellation: require local `status=installed` and
+  completed backend installation, not exit status alone.
+- Gateway diagnostics include request correlation/error codes; enrollment and
+  onboarding audit events retain approval/delivery history in PostgreSQL.
+
+The example independent timer checks authentication after boot and every ten
+minutes after a run becomes inactive, with up to sixty seconds of jitter. It
+does not receive immediate authentication-failure events from a running Teleop
+process. Existing-client recovery additionally requires the Gateway's global
+maintenance/quiet window (at least eleven minutes and any longer issued-token
+horizon); enabling maintenance alone does not immediately permit rotation.
+Registration completion does not start Teleop, reload its credentials, establish
+vehicle telemetry, or grant remote driving permission.
+
 ### Unified organization operations entry
 
 The normal operations entry is `/#/`, with `?page=fleet`, `monitor`, `drive`,

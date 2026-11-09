@@ -126,7 +126,7 @@ func (s *OperationsStore) Ping(ctx context.Context) error {
 		return fmt.Errorf("operations database readiness: unsupported schema version %d", version)
 	}
 	for _, table := range []string{"operations_error_state", "data_snapshots", "data_events", "data_event_acknowledgements", "data_tasks"} {
-		var exists int
+		var exists bool
 		if err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM "+table+")").Scan(&exists); err != nil {
 			return fmt.Errorf("operations database readiness: %w", err)
 		}

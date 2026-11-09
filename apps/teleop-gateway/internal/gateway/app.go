@@ -88,6 +88,7 @@ func Run() {
 			log.Fatalf("configure automated onboarding: %v", err)
 		}
 		if onboarding != nil {
+			onboarding.acquireMutation = managedRuntime.BeforeMutation
 			verifier, ok := authenticator.(*OIDCAuthenticator)
 			if !ok {
 				log.Fatal("automated onboarding requires OIDC authentication")
@@ -109,14 +110,10 @@ func Run() {
 		log.Fatalf("connect control lease store: %v", err)
 	}
 	videoSessions = NewVideoSessionStore(controlLeases.client, videoGracePeriod())
-	databasePath := os.Getenv("OPERATIONS_DB_PATH")
-	if databasePath == "" {
-		databasePath = "data/operations.db"
-	}
-	if databasePath == ":memory:" {
+	if os.Getenv("OPERATIONS_DB_PATH") == ":memory:" {
 		log.Fatal("operations database must be persistent outside tests")
 	}
-	operations, err := OpenOperationsStore(databasePath)
+	operations, err := OpenOperationsStoreFromEnvironment()
 	if err != nil {
 		log.Fatalf("configure operations database: %v", err)
 	}
@@ -132,6 +129,7 @@ func Run() {
 		registerStaticOrganizationContext(mux, vehicleRegistry, vehicleAuthorizer)
 	}
 	if onboarding != nil {
+		onboarding.SetRateLimitRedis(controlLeases.client)
 		onboarding.Register(mux, AuthenticationMiddleware)
 		workerContext, stopWorker := context.WithCancel(context.Background())
 		workerDone := make(chan struct{})
@@ -155,25 +153,11 @@ func Run() {
 		authorizer: vehicleAuthorizer, identities: vehicleIdentities,
 	}
 	viewingAPI.register(mux)
-	registerControlHandover(mux)
-	registerDeviceControl(mux)
 	NewOperationsAPI(operations, vehicleRegistry, telemetryAPI.states,
 		vehicleAuthorizer, vehicleIdentities, nil).register(mux)
 	(&DataAPI{store: operations, registry: vehicleRegistry, authorizer: vehicleAuthorizer,
 		identities: vehicleIdentities}).register(mux)
-
-	// All operator and vehicle endpoints use the same authentication middleware.
-	mux.Handle("/api/token/operator", AuthenticationMiddleware(http.HandlerFunc(handleOperatorConnect)))
-	mux.Handle("/api/token/vehicle", AuthenticationMiddleware(http.HandlerFunc(handleVehicleConnect)))
-	mux.Handle("POST /api/vehicles/{vehicle_id}/control/acquire", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleAcquireControl))))
-	mux.Handle("GET /api/vehicles/{vehicle_id}/control", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleGetControl))))
-	mux.Handle("POST /api/control/{session_id}/renew", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleRenewControl))))
-	mux.Handle("POST /api/control/{session_id}/release", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleReleaseControl))))
-	mux.Handle("GET /api/auth/me", AuthenticationMiddleware(http.HandlerFunc(handleAuthMe)))
-	registerDeviceAuthCheck(mux)
-	mux.Handle("POST /api/vehicles/{vehicle_id}/video/acquire", AuthenticationMiddleware(http.HandlerFunc(handleAcquireVideo)))
-	mux.Handle("POST /api/video/{session_id}/release", AuthenticationMiddleware(http.HandlerFunc(handleReleaseVideo)))
-	mux.Handle("GET /api/vehicles/{vehicle_id}/video", AuthenticationMiddleware(http.HandlerFunc(handleGetVideo)))
+	registerSessionAndTokenRoutes(mux)
 
 	// LiveKit webhook for lifecycle events and audit records.
 	mux.HandleFunc("/api/webhook/livekit", handleLivekitWebhook)
@@ -209,6 +193,22 @@ func Run() {
 
 	log.Println("🚀 Industrial Teleop Gateway running on :8080")
 	log.Fatal(http.ListenAndServe(":8080", withRequestID(withCORS(mux))))
+}
+
+func registerSessionAndTokenRoutes(mux *http.ServeMux) {
+	mux.Handle("/api/token/operator", AuthenticationMiddleware(http.HandlerFunc(handleOperatorConnect)))
+	mux.Handle("/api/token/vehicle", AuthenticationMiddleware(http.HandlerFunc(handleVehicleConnect)))
+	mux.Handle("POST /api/vehicles/{vehicle_id}/control/acquire", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleAcquireControl))))
+	mux.Handle("GET /api/vehicles/{vehicle_id}/control", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleGetControl))))
+	mux.Handle("POST /api/control/{session_id}/renew", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleRenewControl))))
+	mux.Handle("POST /api/control/{session_id}/release", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleReleaseControl))))
+	mux.Handle("GET /api/auth/me", AuthenticationMiddleware(http.HandlerFunc(handleAuthMe)))
+	mux.Handle("POST /api/vehicles/{vehicle_id}/video/acquire", AuthenticationMiddleware(http.HandlerFunc(handleAcquireVideo)))
+	mux.Handle("POST /api/video/{session_id}/release", AuthenticationMiddleware(http.HandlerFunc(handleReleaseVideo)))
+	mux.Handle("GET /api/vehicles/{vehicle_id}/video", AuthenticationMiddleware(http.HandlerFunc(handleGetVideo)))
+	registerControlHandover(mux)
+	registerDeviceControl(mux)
+	registerDeviceAuthCheck(mux)
 }
 
 func withCORS(next http.Handler) http.Handler {

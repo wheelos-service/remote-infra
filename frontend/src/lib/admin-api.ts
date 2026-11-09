@@ -53,11 +53,26 @@ export const onboardingOperationSchema = z.object({
   id: z.string().min(1), kind: z.enum(['person', 'vehicle']), name: z.string(),
   email: z.string().optional(), vehicle_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/).optional(), status: z.string().min(1),
   stage: z.string(), error_code: z.string().nullable().optional(), user_id: z.string().optional(),
-  created_at: z.string(),
+  created_at: z.string(), device_enrollment: z.boolean().default(false),
 })
 export type OnboardingOperation = z.infer<typeof onboardingOperationSchema>
 export const installationTicketSchema = z.object({ token: z.string().min(1), expires_at: z.string().min(1) })
 export type InstallationTicket = z.infer<typeof installationTicketSchema>
+
+export const enrollmentUserCodeSchema = z.string().trim().transform(value => value.replace(/-/g, '').toUpperCase())
+  .pipe(z.string().regex(/^[A-HJ-NP-Z2-9]{8}$/, '请输入 8 位申请码（不含 I、O、0、1，可带横线）'))
+export const deviceEnrollmentSchema = z.object({
+  id: z.string().min(1), name: z.string(), serial: z.string(), platform: z.string(),
+  fingerprint: z.string().min(1), status: z.string().min(1), created_at: z.string(), expires_at: z.string(),
+  recovery: z.boolean(), vehicle_id: z.string().optional(),
+  error_code: z.string().nullable().optional(), operation_id: z.string().optional(),
+}).refine(value => !value.recovery || Boolean(value.vehicle_id), '恢复申请缺少已有车辆绑定')
+export type DeviceEnrollment = z.infer<typeof deviceEnrollmentSchema>
+export const deviceEnrollmentApprovalSchema = z.object({
+  name: onboardingName,
+  vehicle_number: z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9_.-]{0,23}$/, '车辆编号须为 1–24 位字母、数字、点、横线或下划线'),
+})
+export type DeviceEnrollmentApproval = z.infer<typeof deviceEnrollmentApprovalSchema>
 
 export function onboardingNeedsPolling(operation: OnboardingOperation): boolean {
   return !['completed', 'failed'].includes(operation.status)
@@ -129,6 +144,24 @@ function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.output<S> {
   return result.data
 }
 const orgPath = (orgId: string) => `/organizations/${encodeURIComponent(orgId)}`
+const enrollmentPath = (orgId: string) => `${orgPath(orgId)}/device-enrollments`
+export async function lookupDeviceEnrollment(orgId: string, token: string, userCode: string, signal?: AbortSignal): Promise<DeviceEnrollment> {
+  const code = enrollmentUserCodeSchema.safeParse(userCode)
+  if (!code.success) throw new AdminApiError(code.error.issues[0]?.message || '请检查申请码。')
+  return parse(deviceEnrollmentSchema, await request(`${enrollmentPath(orgId)}/lookup`, token, { user_code: code.data }, signal))
+}
+export async function approveDeviceEnrollment(orgId: string, token: string, enrollment: DeviceEnrollment, input?: DeviceEnrollmentApproval, signal?: AbortSignal): Promise<DeviceEnrollment> {
+  let body: unknown = {}
+  if (!enrollment.recovery) {
+    const parsed = deviceEnrollmentApprovalSchema.safeParse(input)
+    if (!parsed.success) throw new AdminApiError(parsed.error.issues[0]?.message || '请检查车辆信息。')
+    body = parsed.data
+  }
+  return parse(deviceEnrollmentSchema, await request(`${enrollmentPath(orgId)}/${encodeURIComponent(enrollment.id)}/approve`, token, body, signal))
+}
+export async function denyDeviceEnrollment(orgId: string, token: string, enrollmentId: string, signal?: AbortSignal): Promise<DeviceEnrollment> {
+  return parse(deviceEnrollmentSchema, await request(`${enrollmentPath(orgId)}/${encodeURIComponent(enrollmentId)}/deny`, token, {}, signal))
+}
 export async function fetchAdminContext(token: string, signal?: AbortSignal): Promise<AdminContext> {
   return parse(adminContextSchema, await request('/context', token, undefined, signal))
 }

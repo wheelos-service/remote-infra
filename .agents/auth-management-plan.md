@@ -198,7 +198,19 @@ dispatch and physical actuation remain outside this increment.
   login and viewer authorization; real vehicle creation, credential rotation/
   lost-response recovery, actual Python installation and replay rejection.
   The updated RTC runtime also passed the real 660.41-second quiet barrier.
+- Certificate-free Ed25519 device-code enrollment (`vehicle_bootstrap` in
+  `@sdk_kit//auth` + `004_device_enrollments.sql` + `/#/admin` lookup/approve):
+  vehicles generate a persistent `0600` Ed25519 keypair, request a `user_code`
+  (`POST /api/v1/device-enrollments`), wait for organization admin approval
+  (`POST /api/admin/organizations/{org_id}/device-enrollments/{id}/approve`),
+  and redeem a 5-minute key-bound ticket (`POST /api/v1/device-enrollments/token`
+  -> `POST /api/v1/device-enrollments/complete`) with zero-delay fast paths and
+  automatic credential recovery (`recovery = true`) if `/etc/teleop/device.json`
+  is lost.
+- Horizontal scaling & shared PostgreSQL operations support:
+  - Opt-in `AUTHORIZATION_MULTI_INSTANCE=true` in `managed_runtime.go` allows multiple stateless Gateway replicas to coordinate via `SERIALIZABLE` PostgreSQL transactions and `authz_policy_state.version` Casbin snapshot invalidation without the single-instance advisory lock (`pg_advisory_xact_lock(7439102342056782)` serializes concurrent schema migrations).
+  - `OpenPostgresOperationsStore` (`OPERATIONS_DATABASE_URL` in `operations_postgres.go`) enables shared PostgreSQL storage for `operations_*` and `data_*` tables across Gateway replicas while preserving SQLite (`OPERATIONS_DB_PATH`) for single-node deployments.
+  - `StartOnboarding` atomically guards concurrent worker claims, and `enrollmentRateLimiter` coordinates across replicas via shared Redis with in-memory fallback.
 - Production version/tenant privileges, native Email/CAPTCHA policies, real
   mailbox delivery and exclusive ingress remain operator acceptance gates.
-  Existing-account import, general online rotation/revocation, multi-instance
-  and physical actuation are not part of this increment.
+  Existing-account import, general online rotation/revocation, and physical actuation are not part of this increment.

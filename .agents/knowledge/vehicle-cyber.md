@@ -10,11 +10,12 @@ LiveKit transport, the vehicle's Gateway token permissions, or Apollo
   add a second broker, IPC layer, or module that combines network transport and
   Cyber/protobuf concerns.
 - **1. Teleop Edge (`apollo-base/data/sdk-kit` (`@sdk_kit`) and `apollo-base/modules/teleop`)**:
-  - `@sdk_kit//auth:vehicle_auth_sdk` and `@sdk_kit//auth:vehicle_auth_check`
-    (in `apollo-base/data/sdk-kit/auth`):
-    zero-Cyber standalone authentication SDK providing `AuthConfig`,
-    `HTTPClient`, thread-safe single-flight `SharedTokenProvider`,
-    `AuthenticatedClient`, `auth_diagnostics`, and `vehicle_auth_check`.
+  - `@sdk_kit//auth:vehicle_auth_sdk`, `@sdk_kit//auth:vehicle_auth_check`, and
+    `@sdk_kit//auth:vehicle_bootstrap` (in `apollo-base/data/sdk-kit/auth`):
+    zero-Cyber standalone authentication and device-code enrollment SDK
+    providing `AuthConfig`, `HTTPClient`, thread-safe single-flight
+    `SharedTokenProvider`, `AuthenticatedClient`, `auth_diagnostics`,
+    `vehicle_auth_check`, and certificate-free Ed25519 `vehicle_bootstrap`.
   - `@sdk_kit//livekit:vehicle_media_worker` and `@sdk_kit//livekit:encoded_video`
     (in `apollo-base/data/sdk-kit/livekit`, consuming pure third-party
     `@livekit_sdk//:livekit_sdk` from `apollo-base/data/bazel-central-registry/modules/livekit_sdk/1.13.0`):

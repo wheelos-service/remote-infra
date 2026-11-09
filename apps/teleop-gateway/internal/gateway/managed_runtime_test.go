@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -233,21 +234,7 @@ func newManagedFixture(t *testing.T) *managedFixture {
 		authorizer: vehicleAuthorizer, store: &ViewingLeaseStore{client: f.client}}).register(f.mux)
 	(&ManagedAdminAPI{Store: store, TrustedIssuer: managedTestIssuer,
 		BeforeMutation: f.runtime.BeforeMutation}).Register(f.mux, AuthenticationMiddleware)
-	for pattern, handler := range map[string]http.HandlerFunc{
-		"GET /api/auth/me": handleAuthMe, "GET /api/token/operator": handleOperatorConnect,
-		"GET /api/token/vehicle":                          handleVehicleConnect,
-		"POST /api/vehicles/{vehicle_id}/control/acquire": handleAcquireControl,
-		"POST /api/control/{session_id}/renew":            handleRenewControl,
-		"POST /api/control/{session_id}/release":          handleReleaseControl,
-		"GET /api/vehicles/{vehicle_id}/video":            handleGetVideo,
-		"POST /api/vehicles/{vehicle_id}/video/acquire":   handleAcquireVideo,
-		"POST /api/video/{session_id}/release":            handleReleaseVideo,
-	} {
-		f.mux.Handle(pattern, AuthenticationMiddleware(handler))
-	}
-	registerDeviceControl(f.mux)
-	registerControlHandover(f.mux)
-	registerDeviceAuthCheck(f.mux)
+	registerSessionAndTokenRoutes(f.mux)
 	(&DataAPI{registry: vehicleRegistry, identities: vehicleIdentities,
 		authorizer: vehicleAuthorizer}).register(f.mux)
 	return f
@@ -575,6 +562,83 @@ func TestManagedRuntimePostgresExclusiveInstanceAndLockLoss(t *testing.T) {
 	f.request(t, "GET", "/api/auth/me", "viewer", "", "", 503)
 	if _, err := first.BeforeMutation(context.Background(), f.orgID); err == nil {
 		t.Fatal("lost lifetime advisory lock did not disable mutation guard")
+	}
+}
+
+func TestManagedRuntimeMultiInstanceAndPostgresOperationsStore(t *testing.T) {
+	f := newManagedFixture(t)
+	dsn, err := url.Parse(os.Getenv("AUTHZ_POSTGRES_TEST_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := dsn.Query()
+	query.Set("search_path", f.schema)
+	dsn.RawQuery = query.Encode()
+	for _, name := range []string{"AUTHORIZATION_POLICY_FILE", "VEHICLE_REGISTRY_JSON",
+		"VEHICLE_SUBJECT_MAP_JSON", "VEHICLE_ACL_JSON"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("AUTHORIZATION_MODE", "managed")
+	t.Setenv("AUTH_MODE", "oidc")
+	t.Setenv("AUTHORIZATION_DATABASE_URL", dsn.String())
+	t.Setenv("AUTHORIZATION_MULTI_INSTANCE", "true")
+	t.Setenv("OIDC_ISSUER", managedTestIssuer)
+	t.Setenv("LIVEKIT_URL", "https://livekit.example")
+	t.Setenv("AUTHORIZATION_LIVEKIT_SERVER_VERSION", "v1.13.11")
+	t.Setenv("AUTHORIZATION_LIVEKIT_INGRESS_GATED", "true")
+
+	first, err := NewManagedRuntimeFromEnvironment(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := NewManagedRuntimeFromEnvironment(context.Background())
+	if err != nil {
+		t.Fatalf("second multi-instance Gateway failed to start: %v", err)
+	}
+	defer second.Close()
+
+	managedRuntime = second
+	f.request(t, "GET", "/api/auth/me", "viewer", "", "", 200)
+
+	opsA, err := OpenPostgresOperationsStore(dsn.String())
+	if err != nil {
+		t.Fatalf("open postgres operations store A: %v", err)
+	}
+	defer opsA.Close()
+	opsB, err := OpenPostgresOperationsStore(dsn.String())
+	if err != nil {
+		t.Fatalf("open postgres operations store B: %v", err)
+	}
+	defer opsB.Close()
+	if err := opsA.Ping(context.Background()); err != nil {
+		t.Fatalf("ping postgres operations store: %v", err)
+	}
+	if err := opsA.RecordMission(context.Background(), "car-one", OperationsMission{
+		MissionID: "mission-1", Status: "running", UpdatedAtMS: 1700000000000, Description: "cross-instance mission",
+	}); err != nil {
+		t.Fatalf("record mission on instance A: %v", err)
+	}
+	snap, err := opsB.Snapshot(context.Background(), "car-one")
+	if err != nil || len(snap.Missions) != 1 || snap.Missions[0].MissionID != "mission-1" {
+		t.Fatalf("read mission from instance B: %+v, err=%v", snap, err)
+	}
+	nowMS := time.Now().UnixMilli()
+	taskRaw := []byte(fmt.Sprintf(`{"schema_version":1,"type":"vehicle_task","vehicle_id":"car-one","request_id":"task-pg-1","created_at_ms":%d,"expires_at_ms":%d,"command":"navigate","parameters":{"target":"dock-a"}}`, nowMS, nowMS+60000))
+	if err := opsA.createDataTask(context.Background(), "car-one", "task-pg-1", taskRaw); err != nil {
+		t.Fatalf("create data task on instance A: %v", err)
+	}
+	pending, err := opsB.pendingDataTask(context.Background(), "car-one")
+	if err != nil || len(pending) == 0 {
+		t.Fatalf("read pending task from instance B: %s, err=%v", string(pending), err)
+	}
+	capView, err := opsB.dataCapacity(context.Background(), "car-one")
+	if err != nil || capView["tasks_pending"] != 1 {
+		t.Fatalf("data capacity from instance B: %+v, err=%v", capView, err)
+	}
+	recordsView, err := opsB.dataRecords(context.Background(), "car-one", "tasks", 0, 0)
+	if err != nil || len(recordsView["records"].([]map[string]any)) != 1 {
+		t.Fatalf("data records from instance B: %+v, err=%v", recordsView, err)
 	}
 }
 

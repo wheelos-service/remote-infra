@@ -73,6 +73,12 @@ func managedAuthorizationConfigured() (bool, error) {
 	if value := os.Getenv("AUTHORIZATION_MANAGED_MAINTENANCE"); value != "" && value != "true" && value != "false" {
 		return false, errors.New("AUTHORIZATION_MANAGED_MAINTENANCE must be true or false")
 	}
+	if value := os.Getenv("AUTHORIZATION_MULTI_INSTANCE"); value != "" && value != "true" && value != "false" {
+		return false, errors.New("AUTHORIZATION_MULTI_INSTANCE must be true or false")
+	}
+	if os.Getenv("AUTHORIZATION_MULTI_INSTANCE") == "true" && os.Getenv("AUTHORIZATION_MANAGED_MAINTENANCE") == "true" {
+		return false, errors.New("managed maintenance requires an exclusive single Gateway instance")
+	}
 	return true, nil
 }
 
@@ -98,20 +104,29 @@ func NewManagedRuntimeFromEnvironment(ctx context.Context) (*ManagedRuntime, err
 	if err := db.PingContext(startup); err != nil {
 		return nil, errors.New("connect managed authorization database")
 	}
-	// The pilot deliberately supports one Gateway, not eventual cross-instance
-	// policy propagation. A dedicated PostgreSQL session owns that boundary.
-	runtime.instance, err = db.Conn(startup)
-	if err != nil {
-		return nil, errors.New("reserve managed authorization instance")
-	}
-	var locked bool
-	if err := runtime.instance.QueryRowContext(startup,
-		"SELECT pg_try_advisory_lock(7439102342056781)").Scan(&locked); err != nil || !locked {
-		return nil, errors.New("managed authorization requires an exclusive single Gateway instance")
-	}
-	runtime.store, err = authorization.NewManagedStore(db, runtime.instance)
-	if err != nil {
-		return nil, err
+	if os.Getenv("AUTHORIZATION_MULTI_INSTANCE") == "true" {
+		// Multi-instance mode coordinates policy mutations via SERIALIZABLE
+		// transactions and version-checked Casbin snapshots on authz_policy_state.
+		runtime.store, err = authorization.NewStore(db)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Default single-instance mode binds policy writes to a dedicated
+		// PostgreSQL session guarded by an exclusive advisory lock.
+		runtime.instance, err = db.Conn(startup)
+		if err != nil {
+			return nil, errors.New("reserve managed authorization instance")
+		}
+		var locked bool
+		if err := runtime.instance.QueryRowContext(startup,
+			"SELECT pg_try_advisory_lock(7439102342056781)").Scan(&locked); err != nil || !locked {
+			return nil, errors.New("managed authorization requires an exclusive single Gateway instance")
+		}
+		runtime.store, err = authorization.NewManagedStore(db, runtime.instance)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := runtime.store.Migrate(startup); err != nil {
 		return nil, err

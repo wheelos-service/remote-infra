@@ -31,8 +31,51 @@ RTC reader. The actual Python installer redeems a one-time ticket, saves a
 mode-0600 configuration, obtains OAuth credentials and verifies identity/
 vehicle mapping before reporting completion. Explicit recovery rotates a
 previously delivered secret; ticket replay is rejected.
+It additionally exercises signed device-code registration, manager lookup and
+approval, actual per-device OAuth provisioning, key-bound credential redemption
+and lost-response retry, exact Gateway vehicle matching and installation
+confirmation. PostgreSQL Gateway tests cover replay/expiry/denial, code refresh
+without rebinding, cross-organization rejection and rejection of device-bound
+tickets at the bearer-only installer.
 It does not prove production email delivery, camera/actuation readiness, or
 an existing deployment using another version.
+
+The real Apollo C++ bootstrap can also exercise the Gateway wire contract:
+
+```bash
+cd apps/teleop-gateway
+AUTHZ_POSTGRES_TEST_DSN='<disposable PostgreSQL DSN>' \
+VEHICLE_BOOTSTRAP_TEST_BINARY='/absolute/path/to/vehicle_bootstrap' \
+go test ./internal/gateway -run 'TestPostgresVehicleBootstrap(Client|DenialAndExpiry)$' -count=1 -v
+```
+
+Run this in an isolated root test container with Go 1.24, a compatible bootstrap
+binary and disposable PostgreSQL. It creates protected temporary configuration
+and state directories, approves registration, verifies credential persistence
+and installation acknowledgment, then checks OAuth outages, wrong vehicle mapping,
+same-identity `invalid_client` recovery, denied restarts, server-simulated expiry
+and graceful cancellation without readiness. OAuth responses are synthetic here.
+Never supply a production database DSN.
+
+For the continuous real-C++/real-Casdoor chain, run from the repository root:
+
+```bash
+VEHICLE_BOOTSTRAP_TEST_BINARY='/absolute/path/to/vehicle_bootstrap' \
+python3 tests/casdoor-contract.py
+```
+
+This opt-in uses an isolated root Go container and a host-compatible Linux
+x86-64 bootstrap binary; it does not require running the host command as root.
+It validates actual OAuth `teleop:vehicle` grants and Gateway JWT/JWKS enforcement,
+discards the first successful credential response and installation acknowledgment,
+restarts the vehicle client, and finishes administrator-approved same-vehicle
+credential recovery. Recovery is rejected outside safely drained maintenance,
+the old secret cannot obtain a new grant, and credential/state permissions remain
+`0600`. It waits the actual **eleven-minute** Gateway quiet window without
+advancing a test clock; allow about fifteen minutes plus cold downloads.
+Only the disposable fixture's initially issued browser/device tokens are extended
+to thirty minutes for that wait. The ordinary Casdoor invocation above remains supported without the C++
+binary. No teleop process, systemd unit, existing service or real vehicle is started.
 
 Installer rejection and filesystem checks can also run without services:
 
@@ -56,6 +99,14 @@ camera media, physical control, or an external production proxy topology.
 - Vehicle C++ SDK & Apollo Teleop tests live in `apollo-base`:
   - `cd /apollo/data/sdk-kit && bazel test //...`
   - `cd /apollo && bazel test //modules/teleop/... //modules/guardian/... //modules/canbus:canbus_test`
+
+With a shared `AUTHZ_POSTGRES_TEST_DSN`, use `go test -p 1 ./...` or separate
+databases per package: the managed Gateway instance lock is database-wide,
+so isolated schemas alone do not isolate simultaneous package fixtures.
+`TestPostgresDeviceEnrollmentConcurrentFleet` exercises 100 simulated devices
+sharing a loopback source, simultaneous same-request retries, pending progress,
+and per-device poll throttling using actual Ed25519 proofs and PostgreSQL.
+This is not a production fleet-size or cellular-network performance claim.
 
 ## Platform mock contracts
 
