@@ -59,6 +59,7 @@ func (s *OnboardingService) Register(mux *http.ServeMux, authenticate func(http.
 		"GET /api/admin/organizations/{org_id}/onboarding/{operation_id}",
 		"POST /api/admin/organizations/{org_id}/onboarding/{operation_id}/retry",
 		"POST /api/admin/organizations/{org_id}/onboarding/{operation_id}/installation-ticket",
+		"POST /api/admin/organizations/{org_id}/onboarding/{operation_id}/registration-link",
 	} {
 		mux.Handle(pattern, authenticate(http.HandlerFunc(s.serveAdmin)))
 	}
@@ -127,6 +128,13 @@ func (s *OnboardingService) serveAdmin(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if request.Kind == "person" && request.Email == "" {
+			ciphertext, err = s.newRegistrationCode()
+			if err != nil {
+				onboardingHTTPError(w, r, err)
+				return
+			}
+		}
 		err = s.mutate(r.Context(), org, func() error {
 			var e error
 			op, e = s.store.CreateOnboarding(r.Context(), claims.UserID, org, request, ciphertext)
@@ -142,6 +150,13 @@ func (s *OnboardingService) serveAdmin(w http.ResponseWriter, r *http.Request) {
 			op, e = s.store.RetryOnboarding(r.Context(), claims.UserID, org, r.PathValue("operation_id"))
 			return e
 		})
+	case "POST /api/admin/organizations/{org_id}/onboarding/{operation_id}/registration-link":
+		if err := onboardingEmptyBody(w, r); err != nil {
+			managedAdminError(w, r, err)
+			return
+		}
+		s.serveRegistrationLink(w, r, claims.UserID, org, r.PathValue("operation_id"))
+		return
 	default:
 		if err := onboardingEmptyBody(w, r); err != nil {
 			managedAdminError(w, r, err)
@@ -219,7 +234,25 @@ func (s *OnboardingService) process(ctx context.Context, op authorization.Onboar
 		}
 		return
 	}
-	if op.Stage == "planned" || op.Stage == "provider" {
+	if op.Kind == "person" && op.Email == "" {
+		if op.Stage == "planned" || op.Stage == "provider" {
+			err = s.ensureRegistration(attempt, op)
+			if err == nil {
+				err = s.mutate(attempt, op.OrganizationID, func() error { return s.store.AwaitRegistration(attempt, op) })
+			}
+		} else if op.Stage == "registration" {
+			var subject string
+			subject, err = s.registeredPerson(attempt, op)
+			if err == nil {
+				err = s.mutate(attempt, op.OrganizationID, func() error {
+					if subject == "" {
+						return s.store.AwaitRegistration(attempt, op)
+					}
+					return s.store.BindOnboarding(attempt, op, s.issuer, subject)
+				})
+			}
+		}
+	} else if op.Stage == "planned" || op.Stage == "provider" {
 		if op.Kind == "person" {
 			err = s.ensurePerson(attempt, op)
 		} else {

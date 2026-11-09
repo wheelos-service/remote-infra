@@ -33,6 +33,9 @@ var onboardingMigrationText string
 //go:embed migrations/004_device_enrollments.sql
 var deviceEnrollmentMigrationText string
 
+//go:embed migrations/005_registration_links.sql
+var registrationMigrationText string
+
 type Role string
 type Scope string
 
@@ -163,7 +166,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(7439102342056782)"); err != nil {
 		return fmt.Errorf("lock authorization migration: %w", err)
 	}
-	for _, statement := range strings.Split(migrationText+"\n"+managementMigrationText+"\n"+onboardingMigrationText+"\n"+deviceEnrollmentMigrationText, ";") {
+	for _, statement := range strings.Split(migrationText+"\n"+managementMigrationText+"\n"+onboardingMigrationText+"\n"+deviceEnrollmentMigrationText+"\n"+registrationMigrationText, ";") {
 		statement = strings.TrimSpace(statement)
 		if statement == "" {
 			continue

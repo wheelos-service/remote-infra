@@ -99,7 +99,7 @@ func isCanonicalUUID(id string) bool {
 func (s *Store) CreateDeviceEnrollment(ctx context.Context, in DeviceEnrollment) (DeviceEnrollment, error) {
 	if !isCanonicalUUID(in.ID) || len(in.PublicKey) != 32 || len(in.DeviceCodeHash) != 32 ||
 		len(in.DeviceCodeCiphertext) < 28 || len(in.UserCode) != 8 || !validText(in.Name, 200) ||
-		!validText(in.Serial, 128) || !validText(in.Platform, 128) {
+		(in.Serial != "" && !validText(in.Serial, 128)) || !validText(in.Platform, 128) {
 		return DeviceEnrollment{}, ErrEnrollmentInvalid
 	}
 	tx, err := s.beginWriteTx(ctx)

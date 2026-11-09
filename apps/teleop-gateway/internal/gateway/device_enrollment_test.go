@@ -59,7 +59,7 @@ func TestPostgresDeviceEnrollmentApprovalDeliveryAndCodeRecovery(t *testing.T) {
 	s.Register(f.mux, AuthenticationMiddleware)
 	public, key, _ := ed25519.GenerateKey(rand.Reader)
 	p := enrollmentProof{RequestID: uuid.NewString(), PublicKey: base64.RawURLEncoding.EncodeToString(public),
-		Name: "First device", Serial: "SN-TEST-1", Platform: "Orin"}
+		Name: "First device", Serial: "", Platform: "apollo"}
 	call := func(path string, body any, token string, want int) map[string]any {
 		t.Helper()
 		raw, _ := json.Marshal(body)
@@ -97,13 +97,13 @@ func TestPostgresDeviceEnrollmentApprovalDeliveryAndCodeRecovery(t *testing.T) {
 		// An unrelated provider handshake must not block a fresh approval.
 		s.workMu.Lock()
 		defer s.workMu.Unlock()
-		return call(adminPath+"/"+p.RequestID+"/approve", map[string]string{"name": "Test truck", "vehicle_number": "truck-001"}, "admin", 202)
+		return call(adminPath+"/"+p.RequestID+"/approve", map[string]string{"name": "Test truck"}, "admin", 202)
 	}()
 	opID, vehicle := approved["operation_id"].(string), approved["vehicle_id"].(string)
 	if !strings.HasPrefix(vehicle, "v-") {
 		t.Fatal("untrusted device name became vehicle ID")
 	}
-	call(adminPath+"/"+p.RequestID+"/approve", map[string]string{"name": "Test truck", "vehicle_number": "truck-001"}, "admin", 202)
+	call(adminPath+"/"+p.RequestID+"/approve", map[string]string{"name": "Test truck"}, "admin", 202)
 	var count int
 	if err := f.db.QueryRow(`SELECT count(*) FROM authz_onboarding_operations WHERE operation_id=$1`, opID).Scan(&count); err != nil || count != 1 {
 		t.Fatal("approval retry duplicated provisioning")
@@ -112,6 +112,9 @@ func TestPostgresDeviceEnrollmentApprovalDeliveryAndCodeRecovery(t *testing.T) {
 	op, err := f.store.GetOnboarding(ctx, f.adminID, f.orgID, opID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if op.Request.VehicleNumber != "vehicle-"+strings.ReplaceAll(p.RequestID, "-", "")[:12] {
+		t.Fatal("vehicle number was not generated deterministically by the server")
 	}
 	if err := f.store.StartOnboarding(ctx, op.ID); err != nil {
 		t.Fatal(err)

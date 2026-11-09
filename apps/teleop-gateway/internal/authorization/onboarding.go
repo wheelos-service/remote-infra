@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/mail"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,10 @@ import (
 )
 
 var ErrInstallationTicket = errors.New("installation ticket is invalid, expired, or consumed")
+
+var registrationUsername = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*([-_][A-Za-z0-9]+)*$`)
+
+const RegistrationLifetime = 7 * 24 * time.Hour
 
 type OnboardingRequest struct {
 	Kind           string   `json:"kind"`
@@ -61,10 +66,22 @@ func normalizeOnboarding(r OnboardingRequest) (OnboardingRequest, error) {
 	case "person":
 		if r.Scope == "" {
 			r.Scope = ScopeNone
+			if r.Role == RoleOrgAdmin {
+				r.Scope = ScopeAll
+			}
 		}
-		address, err := mail.ParseAddress(r.Email)
-		if err != nil || address.Address != r.Email || !validText(r.Email, 254) || r.VehicleID != "" || r.VehicleNumber != "" {
+		if r.VehicleID != "" || r.VehicleNumber != "" {
 			return r, ErrInvalidRegistration
+		}
+		if r.Email == "" {
+			if len(r.Name) < 2 || len(r.Name) > 64 || !registrationUsername.MatchString(r.Name) {
+				return r, ErrInvalidRegistration
+			}
+		} else {
+			address, err := mail.ParseAddress(r.Email)
+			if err != nil || address.Address != r.Email || !validText(r.Email, 254) {
+				return r, ErrInvalidRegistration
+			}
 		}
 		r.Email = strings.ToLower(r.Email)
 		if r.Role != RoleViewer && r.Role != RoleRemoteOperator && r.Role != RoleOrgAdmin {
@@ -118,7 +135,7 @@ func (s *Store) CreateOnboarding(ctx context.Context, actor, org string, request
 	if err != nil {
 		return OnboardingOperation{}, err
 	}
-	if r.Kind == "vehicle" && (len(ciphertext) < 28 || len(ciphertext) > 4096) {
+	if (r.Kind == "vehicle" || r.Email == "") && (len(ciphertext) < 28 || len(ciphertext) > 4096) {
 		return OnboardingOperation{}, ErrInvalidRegistration
 	}
 	tx, _, err := s.managementTx(ctx, actor, org)
@@ -249,7 +266,7 @@ func (s *Store) ListOnboarding(ctx context.Context, actor, org string) ([]Onboar
 }
 
 func (s *Store) NextOnboarding(ctx context.Context) (OnboardingOperation, error) {
-	return scanOnboarding(s.db.QueryRowContext(ctx, onboardingSelect+` WHERE (status='pending' AND attempts<3 OR status='running') AND next_attempt_at<=now() ORDER BY next_attempt_at,created_at LIMIT 1`))
+	return scanOnboarding(s.db.QueryRowContext(ctx, onboardingSelect+` WHERE (status IN ('pending','awaiting_registration') AND attempts<3 OR status='running') AND next_attempt_at<=now() ORDER BY next_attempt_at,created_at LIMIT 1`))
 }
 
 // StartOnboarding persists the unknown-result recovery stage before calling
@@ -269,7 +286,7 @@ func (s *Store) StartOnboarding(ctx context.Context, id string) error {
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE authz_onboarding_operations SET status='running',attempts=attempts+1,
 		stage=CASE WHEN stage='planned' THEN 'provider' ELSE stage END,error_code='',updated_at=now(),
-		next_attempt_at=now()+interval '10 seconds' WHERE operation_id=$1 AND (status='pending' OR (status='running' AND next_attempt_at<=now())) AND attempts<3`, id)
+		next_attempt_at=now()+interval '60 seconds' WHERE operation_id=$1 AND (status IN ('pending','awaiting_registration') OR (status='running' AND next_attempt_at<=now())) AND attempts<3`, id)
 	if err != nil {
 		return err
 	}
@@ -305,7 +322,7 @@ func (s *Store) FailOnboarding(ctx context.Context, id, code string) error {
 
 func validOnboardingError(code string) bool {
 	switch code {
-	case "PROVIDER_UNAVAILABLE", "PROVIDER_CONFLICT", "PROVIDER_REJECTED", "INVITATION_UNAVAILABLE", "AUTHORIZATION_CHANGED", "BINDING_CONFLICT", "CONFIGURATION_INVALID":
+	case "PROVIDER_UNAVAILABLE", "PROVIDER_CONFLICT", "PROVIDER_REJECTED", "INVITATION_UNAVAILABLE", "AUTHORIZATION_CHANGED", "BINDING_CONFLICT", "CONFIGURATION_INVALID", "REGISTRATION_EXPIRED":
 		return true
 	}
 	return false
@@ -318,7 +335,7 @@ func (s *Store) RejectOnboardingAuthorization(ctx context.Context, id string) er
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `UPDATE authz_onboarding_operations SET status='failed',error_code='AUTHORIZATION_CHANGED',updated_at=now()
-			WHERE operation_id=$1 AND status IN ('pending','running')`, id); err != nil {
+			WHERE operation_id=$1 AND status IN ('pending','running','awaiting_registration')`, id); err != nil {
 		return err
 	}
 	if err := onboardingEvent(ctx, tx, id, "authorization_rejected", "AUTHORIZATION_CHANGED"); err != nil {
@@ -339,6 +356,9 @@ func (s *Store) RetryOnboarding(ctx context.Context, actor, org, id string) (Onb
 	}
 	// Do not transfer a stale plan to a different administrator.
 	if op.ActorUserID != actor || op.Status != "failed" {
+		return op, ErrConflict
+	}
+	if op.ErrorCode == "REGISTRATION_EXPIRED" {
 		return op, ErrConflict
 	}
 	if err := onboardingRoleAllowed(ctx, tx, actor, op.Request); err != nil {
@@ -372,7 +392,8 @@ func (s *Store) BindOnboarding(ctx context.Context, op OnboardingOperation, issu
 	if err != nil {
 		return err
 	}
-	if current.Stage != "provider" || current.Status != "running" || current.PlannedIdentityID != op.PlannedIdentityID || !validText(issuer, 2048) {
+	registration := current.Kind == "person" && current.Email == "" && current.Stage == "registration"
+	if (!registration && (current.Stage != "provider" || (current.Kind == "person" && current.Email == ""))) || current.Status != "running" || current.PlannedIdentityID != op.PlannedIdentityID || !validText(issuer, 2048) {
 		return ErrConflict
 	}
 	op = current
@@ -380,7 +401,7 @@ func (s *Store) BindOnboarding(ctx context.Context, op OnboardingOperation, issu
 		return err
 	}
 	if op.Kind == "person" {
-		if subject != op.PlannedIdentityID || op.ActorUserID == subject {
+		if (!registration && subject != op.PlannedIdentityID) || (registration && !isCanonicalUUID(subject)) || op.ActorUserID == subject {
 			return ErrSelfAssignment
 		}
 		for _, id := range op.Request.VehicleIDs {
@@ -405,7 +426,14 @@ func (s *Store) BindOnboarding(ctx context.Context, op OnboardingOperation, issu
 		if err := replaceUserAssignment(ctx, tx, a, assignmentRules(a, "grant:"+uuid.NewString())); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE authz_onboarding_operations SET user_id=$2,stage='invitation',attempts=1,updated_at=now() WHERE operation_id=$1`, op.ID, op.PlannedIdentityID); err != nil {
+		stage := "invitation"
+		if registration {
+			stage = "completed"
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE authz_onboarding_operations SET user_id=$2,stage=$3,attempts=1,updated_at=now(),
+			status=CASE WHEN $3='completed' THEN 'completed' ELSE status END,
+			credential_ciphertext=CASE WHEN $3='completed' THEN NULL ELSE credential_ciphertext END
+			WHERE operation_id=$1`, op.ID, op.PlannedIdentityID, stage); err != nil {
 			return err
 		}
 	} else {

@@ -64,7 +64,7 @@ func (p enrollmentProof) verify(action string, now time.Time) ([]byte, bool) {
 	}
 	switch action {
 	case "create":
-		if !enrollmentText(p.Name, 200) || !enrollmentText(p.Serial, 128) || !enrollmentText(p.Platform, 128) || p.DeviceCode != "" || p.Ticket != "" {
+		if !enrollmentText(p.Name, 200) || (p.Serial != "" && !enrollmentText(p.Serial, 128)) || !enrollmentText(p.Platform, 128) || p.DeviceCode != "" || p.Ticket != "" {
 			return nil, false
 		}
 	case "poll", "complete":
@@ -129,6 +129,7 @@ func (l *enrollmentRateLimiter) allow(remote string, limit int) bool {
 }
 
 func (s *OnboardingService) registerDeviceEnrollments(mux *http.ServeMux, authenticate func(http.Handler) http.Handler) {
+	mux.Handle("GET /api/admin/organizations/{org_id}/device-enrollments/setup", authenticate(http.HandlerFunc(s.serveEnrollmentSetup)))
 	for _, route := range []struct{ path, action string }{
 		{"POST /api/v1/device-enrollments", "create"},
 		{"POST /api/v1/device-enrollments/token", "poll"},
@@ -451,6 +452,9 @@ func (s *OnboardingService) approveEnrollment(ctx context.Context, actor, org, i
 		return e, nil
 	}
 	if !e.Recovery {
+		if number == "" {
+			number = "vehicle-" + strings.ReplaceAll(id, "-", "")[:12]
+		}
 		secret, err := onboardingRandom()
 		if err != nil {
 			return e, err
@@ -530,4 +534,28 @@ func (s *OnboardingService) approveEnrollment(ctx context.Context, actor, org, i
 		return err
 	})
 	return e, err
+}
+
+func (s *OnboardingService) serveEnrollmentSetup(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	claims, _ := r.Context().Value("user").(*UserClaims)
+	org := r.PathValue("org_id")
+	if claims == nil || claims.UserID == "" || claims.Issuer != s.issuer || !onboardingUUID(org) {
+		managedAdminError(w, r, authorization.ErrNotOrganizationAdmin)
+		return
+	}
+	allowed, err := s.store.CanManageOrganization(r.Context(), claims.UserID, org)
+	if err != nil {
+		managedAdminError(w, r, err)
+		return
+	}
+	if !allowed {
+		managedAdminError(w, r, authorization.ErrNotOrganizationAdmin)
+		return
+	}
+	console := s.config.ConsoleURL
+	if console == "" {
+		console = s.config.GatewayURL
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"gateway_url": s.config.GatewayURL, "console_url": console, "platform": "apollo"})
 }

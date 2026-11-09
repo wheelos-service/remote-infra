@@ -11,9 +11,10 @@ const { outputFiles } = await esbuild.build({
       import React from 'react';
       import {renderToStaticMarkup} from 'react-dom/server';
       import {StaticRouter} from 'react-router';
-      import Admin, {AdminForms, AdminNotice, RoleRangeFields, OnboardingForms, OnboardingOperations, InstallationInstructions, OnboardingManager, AdminTabs, AdminDirectory, DeviceEnrollmentPanel} from './src/pages/Admin';
+      import Admin, {AdminForms, AdminNotice, RoleRangeFields, OnboardingForms, OnboardingOperations, InstallationInstructions, OnboardingManager, AdminTabs, AdminDirectory, DeviceEnrollmentPanel, VehicleRegistration, CopyText} from './src/pages/Admin';
       import * as api from './src/lib/admin-api';
-      export {api, RoleRangeFields, OnboardingForms, OnboardingOperations, OnboardingManager, AdminTabs, AdminDirectory, DeviceEnrollmentPanel};
+      export {vehicleBootstrapJSON} from './src/lib/vehicle-bootstrap';
+      export {api, RoleRangeFields, OnboardingForms, OnboardingOperations, OnboardingManager, AdminTabs, AdminDirectory, DeviceEnrollmentPanel, VehicleRegistration, CopyText};
       export const renderTree = tree => renderToStaticMarkup(tree);
       export const renderTabs = props => renderToStaticMarkup(<AdminTabs {...props} />);
       export const renderDirectory = props => renderToStaticMarkup(<AdminDirectory {...props} />);
@@ -93,7 +94,7 @@ try {
 }
 const { api, render, renderForms, renderError, formTree, componentTree, RoleRangeFields,
   OnboardingForms, OnboardingOperations, OnboardingManager, renderOnboarding, renderOperations, renderInstallation,
-  AdminTabs, AdminDirectory, renderTabs, renderDirectory, DeviceEnrollmentPanel, renderTree } = module.exports
+  AdminTabs, AdminDirectory, renderTabs, renderDirectory, DeviceEnrollmentPanel, VehicleRegistration, CopyText, vehicleBootstrapJSON, renderTree } = module.exports
 globalThis.crypto ??= webcrypto
 const person = { user_id: 'user-1', name: 'Person', subject: 'verified-person', status: 'active', role: 'viewer', scope: 'all', vehicle_ids: [] }
 const vehicle = { vehicle_id: 'car-1', name: 'Vehicle', status: 'active', subject: 'verified-device' }
@@ -178,8 +179,9 @@ test('each tab contains only its own creation or permission form and an edit ope
   assert.match(vehicleHtml, /name="vehicle_number"/)
   assert.doesNotMatch(vehicleHtml, /name="email"|固定角色/)
   const personHtml = renderOnboarding({ ...props, kind: 'person' })
-  assert.match(personHtml, /name="email"/)
-  assert.match(personHtml, /初始权限/)
+  assert.match(personHtml, /用户名/)
+  assert.doesNotMatch(personHtml, /name="email"|type="password"/)
+  assert.match(personHtml, /生成注册链接/)
   assert.doesNotMatch(personHtml, /name="vehicle_number"/)
   for (const section of ['vehicles', 'people']) {
     const manual = renderForms({ ...baseProps, platformAdmin: true, section })
@@ -392,16 +394,14 @@ test('automated forms default to no vehicle authority and reuse a key after an u
     assert.match(manual, /保存权限分配/)
     const html = renderOnboarding(props)
     assert.match(html, /添加人员/)
-    assert.match(html, /type="email"/)
+    assert.match(html, /生成注册链接/)
+    assert.doesNotMatch(html, /type="email"|操作车辆范围/)
     assert.match(html, /添加车辆/)
-    assert.match(html, /none · 无操作权限（默认）/)
-    assert.match(html, /操作车辆范围/)
-    assert.match(html, /包括新增车辆/)
     assert.doesNotMatch(html, /subject|client_secret|type="password"/)
     const emptyFleet = renderOnboarding({ ...props, vehicles: [] })
-    assert.match(emptyFleet, /none · 无操作权限（默认）/)
+    assert.match(emptyFleet, /value="viewer" selected/)
     assert.doesNotMatch(emptyFleet, /<button[^>]*\sdisabled(?:=""|\s|>)[^>]*>添加人员并发送邀请/)
-    assert.doesNotMatch(renderOnboarding({ ...props, platformAdmin: false }), /value="org_admin"/)
+    assert.match(renderOnboarding({ ...props, platformAdmin: false }), /value="org_admin" disabled/)
     const submissions = []
     let succeeds = false
     const harness = componentTree(OnboardingForms, { ...props, onSubmit: async (body, key) => {
@@ -409,7 +409,7 @@ test('automated forms default to no vehicle authority and reuse a key after an u
     } })
     let tree = harness.render()
     const submit = (form, values) => form.props.onSubmit({ preventDefault() {}, currentTarget: values })
-    submit(elements(tree, 'form')[0], { name: 'Person', email: 'bad-email' })
+    submit(elements(tree, 'form')[0], { name: 'bad username' })
     assert.equal(submissions.length, 0)
     submit(elements(tree, 'form')[0], { name: ' Person ', email: ' person@example.test ' })
     await Promise.resolve()
@@ -418,7 +418,7 @@ test('automated forms default to no vehicle authority and reuse a key after an u
     assert.equal(submissions.length, 2)
     assert.match(submissions[0].key, /^[0-9a-f-]{36}$/)
     assert.equal(submissions[0].key, submissions[1].key)
-    assert.deepEqual(submissions[0].body, { kind: 'person', name: 'Person', email: 'person@example.test', role: 'viewer', scope: 'none', vehicle_ids: [] })
+    assert.deepEqual(submissions[0].body, { kind: 'person', name: 'Person', role: 'viewer', scope: 'none', vehicle_ids: [] })
     tree = harness.render({ ...props, kind: 'vehicle', onSubmit: async (body, key) => { submissions.push({ body, key }); return false } })
     submit(elements(tree, 'form')[0], { vehicle_number: 'truck-002', name: 'Vehicle' })
     await Promise.resolve()
@@ -446,10 +446,8 @@ test('operation rendering distinguishes pending delivery and installation, and r
     { ...operation, id: 'unknown', status: 'new-state' },
   ]
   const html = renderOperations({ operations, busy: false, onRetry() {}, onTicket() {} })
-  assert.match(html, /邮件邀请尚未确认完成/)
   assert.match(html, /等待车辆安装（尚未接入）/)
-  assert.match(html, /账号与权限已配置；请通过 Casdoor 邮件完成账号设置/)
-  assert.match(html, /不代表已完成首次登录/)
+  assert.match(html, /账号设置邀请已处理/)
   assert.match(html, /车辆认证安装已完成；不代表车辆在线、摄像头或视频已就绪/)
   assert.match(html, /operation_id:.*stage:/)
   assert.match(html, /MAIL_UNAVAILABLE/)
@@ -498,7 +496,7 @@ test('device enrollment lookup shows unverified reports and fresh approval sends
       device_code: 'never-display-device-code', ticket: 'never-display-ticket', private_key: 'never-display-private-key',
     }), { status: url.endsWith('/approve') ? 202 : 200 })
   }
-  const harness = componentTree(DeviceEnrollmentPanel, { ...enrollmentProps, onDirectoryChange() { refreshes++ } })
+  const harness = componentTree(DeviceEnrollmentPanel, { ...enrollmentProps, vehicleName: ' Verified Vehicle ', onDirectoryChange() { refreshes++ } })
   try {
     harness.render(); harness.flushEffects()
     assert.equal(requests.length, 0, 'lookup must be explicit')
@@ -510,22 +508,19 @@ test('device enrollment lookup shows unverified reports and fresh approval sends
     for (const value of ['Device Report', 'SERIAL-42', 'Apollo', enrollment.fingerprint, enrollment.created_at, enrollment.expires_at]) {
       assert.ok(html.includes(value))
     }
-    assert.match(html, /设备自行报告，未经核实/)
-    assert.match(html, /设备名称（未核实）/)
+    assert.match(html, /信息由设备报告/)
+    assert.match(html, /车端名称/)
     assert.match(html, /序列号（未核实）/)
     assert.match(html, /平台（未核实）/)
     assert.match(html, /公钥 SHA256 指纹/)
-    assert.match(html, /不授予驾驶或控制权限/)
     assert.doesNotMatch(html, /never-display-|device_code|private_key/)
     assert.deepEqual(requests[0].body, { user_code: 'ABCDEFGH' })
     assert.equal(requests[0].url, 'https://admin.test.invalid/api/admin/organizations/org%20%2F1/device-enrollments/lookup')
     assert.equal(requests[0].options.headers.Authorization, 'Bearer admin-bearer')
-    const inputs = elements(tree, 'input')
-    inputs.find(input => input.props.name === 'name').props.onChange({ target: { value: ' Verified Vehicle ' } })
-    inputs.find(input => input.props.name === 'vehicle_number').props.onChange({ target: { value: ' CAR-42 ' } })
+    assert.doesNotMatch(html, /name="vehicle_number"|name="name"/)
     tree = harness.render()
     elements(tree, 'form')[1].props.onSubmit({ preventDefault() {} }); await settle()
-    assert.deepEqual(requests[1].body, { name: 'Verified Vehicle', vehicle_number: 'car-42' })
+    assert.deepEqual(requests[1].body, { name: 'Verified Vehicle' })
     assert.match(requests[1].url, /\/enrollment%20%2F1\/approve$/)
     assert.equal(refreshes, 1)
     tree = harness.render()
@@ -550,8 +545,8 @@ test('recovery enrollment cannot override its bound vehicle, rejection and appro
     enterEnrollmentCode(harness); lookupEnrollment(harness); await settle()
     let tree = harness.render()
     const html = renderTree(tree)
-    assert.match(html, /恢复申请：是/)
-    assert.match(html, /不能更改组织或车辆/)
+    assert.match(html, /恢复已有车辆凭据/)
+    assert.match(html, /保留原车辆和组织绑定/)
     assert.match(html, /已绑定车辆 ID：.*existing-car/)
     assert.doesNotMatch(html, /name="vehicle_number"|name="vehicle_id"|name="name"/)
     elements(tree, 'button').find(button => button.props.children === '拒绝申请').props.onClick(); await settle()
@@ -630,7 +625,6 @@ test('expired device applications cannot be approved and an uncertain approval i
     expired = false
     lookupEnrollment(harness); await settle()
     tree = harness.render()
-    elements(tree, 'input').find(input => input.props.name === 'vehicle_number').props.onChange({ target: { value: 'car-1' } })
     elements(harness.render(), 'form')[1].props.onSubmit({ preventDefault() {} }); await settle()
     assert.equal(calls, 3)
     assert.match(renderTree(harness.render()), /结果未知/)
@@ -663,7 +657,7 @@ test('approved enrollment discovers a failed provisioning task after an empty pr
     panel.render(); panel.flushEffects()
     enterEnrollmentCode(panel); lookupEnrollment(panel); await settle()
     const panelTree = panel.render()
-    assert.match(renderTree(panelTree), /设备码注册/)
+    assert.match(renderTree(panelTree), /输入车端注册码/)
     assert.match(renderTree(panelTree), /enrollment-op/)
     assert.match(renderTree(panelTree), /下方“接入与邀请进度”.*重试失败任务.*无需重新批准/)
     assert.equal(elements(panelTree, 'fieldset')[1].props.disabled, true)
@@ -696,7 +690,7 @@ test('switching tabs filters onboarding operations and discards an installation 
   try {
     harness.render(); harness.flushEffects(); await settle()
     let tree = harness.render()
-    assert.equal(elements(tree, OnboardingForms)[0].props.kind, 'vehicle')
+    assert.equal(elements(tree, OnboardingForms).length, 0)
     const panel = elements(tree, OnboardingOperations)[0]
     assert.deepEqual(panel.props.operations.map(item => item.kind), ['vehicle'])
     panel.props.onTicket('vehicle-op')
@@ -815,4 +809,103 @@ test('installation tickets are explicit, transient, expire, and never reach pers
     globalThis.localStorage = originalStorage; globalThis.sessionStorage = originalSessionStorage
     context.mock.timers.reset()
   }
+})
+
+test('bootstrap JSON matches the vehicle contract and contains only server defaults and the name', () => {
+  const settings = { gateway_url: 'https://api.example.test', console_url: 'https://console.example.test', platform: 'apollo' }
+  assert.deepEqual(JSON.parse(vehicleBootstrapJSON({ ...settings, name: ' Vehicle 01 ' })), {
+    ...settings, name: 'Vehicle 01', serial: '', state_directory: '/var/lib/teleop/bootstrap',
+    device_template: '/etc/teleop/device.template.json', device_config: '/etc/teleop/device.json',
+    allow_insecure_localhost: false, allow_legacy_complete_404: false,
+  })
+  for (const change of [{ name: '' }, { name: 'bad\nname' }, { client_secret: 'must-not-copy' },
+    { gateway_url: 'http://remote.example' }, { console_url: 'https://u:p@example.test' }]) {
+    assert.throws(() => vehicleBootstrapJSON({ ...settings, name: 'Vehicle', ...change }))
+  }
+})
+
+test('vehicle registration loads server endpoints automatically, asks only for a name, and cancels stale setup', async () => {
+  const original = globalThis.fetch
+  const requests = []
+  const settings = { gateway_url: 'https://api.example.test', console_url: 'https://console.example.test', platform: 'apollo' }
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options })
+    return new Response(JSON.stringify(settings))
+  }
+  const harness = componentTree(VehicleRegistration, enrollmentProps)
+  try {
+    harness.render(); harness.flushEffects(); await settle()
+    let tree = harness.render()
+    assert.equal(elements(tree, 'input').length, 1)
+    assert.equal(elements(tree, CopyText).length, 0)
+    assert.equal(elements(tree, DeviceEnrollmentPanel)[0].props.disabled, true)
+    elements(tree, 'input')[0].props.onChange({ target: { value: 'Vehicle 01' } })
+    tree = harness.render()
+    assert.deepEqual(JSON.parse(elements(tree, CopyText)[0].props.value), JSON.parse(vehicleBootstrapJSON({ ...settings, name: 'Vehicle 01' })))
+    assert.equal(elements(tree, DeviceEnrollmentPanel)[0].props.vehicleName, 'Vehicle 01')
+    assert.equal(elements(tree, DeviceEnrollmentPanel)[0].props.disabled, false)
+    assert.match(requests[0].url, /org%20%2F1\/device-enrollments\/setup$/)
+    assert.equal(requests[0].options.cache, 'no-store')
+    assert.equal(requests[0].options.headers.Authorization, 'Bearer admin-bearer')
+    let resolve
+    globalThis.fetch = async (_url, options) => {
+      requests.push({ options })
+      return new Promise(done => { resolve = done })
+    }
+    harness.render({ ...enrollmentProps, orgId: 'other-org' }); harness.flushEffects()
+    assert.equal(elements(harness.render(), CopyText).length, 0)
+    harness.unmount()
+    assert.equal(requests.at(-1).options.signal.aborted, true)
+    resolve(new Response(JSON.stringify(settings))); await settle()
+    assert.equal(elements(harness.render(), CopyText).length, 0)
+  } finally { harness.unmount(); globalThis.fetch = original }
+})
+
+test('registration link is explicit, copyable without email, and cleared on completion and organization changes', async () => {
+  const original = globalThis.fetch
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const requests = [], copied = []
+  const waiting = { ...operation, name: 'new-operator', email: undefined, status: 'awaiting_registration', stage: 'registration' }
+  const link = { url: 'https://auth.example.test/signup/browser?invitationCode=fixture', expires_at: new Date(Date.now() + 60_000).toISOString() }
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async value => { copied.push(value) } } } })
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options })
+    return new Response(JSON.stringify(url.endsWith('/registration-link') ? link : [waiting]))
+  }
+  const props = { ...enrollmentProps, platformAdmin: true, vehicles: [], tab: 'people' }
+  const harness = componentTree(OnboardingManager, props)
+  try {
+    harness.render(); harness.flushEffects(); await settle()
+    let tree = harness.render()
+    const panel = elements(tree, OnboardingOperations)[0]
+    const html = renderOperations(panel.props)
+    assert.match(html, /等待用户完成注册|复制注册链接/)
+    assert.doesNotMatch(html, /邮件|邮箱|type="password"/)
+    assert.equal(requests.length, 1)
+    for (const status of ['running', 'pending', 'awaiting_registration']) {
+      assert.equal(api.registrationLinkAvailable({ ...waiting, status }), true)
+    }
+    assert.equal(api.registrationLinkAvailable({ ...waiting, status: 'completed' }), false)
+    panel.props.onRegistrationLink(waiting.id); await settle()
+    tree = harness.render(); harness.flushEffects()
+    assert.deepEqual(copied, [link.url])
+    assert.equal(elements(tree, CopyText)[0].props.value, link.url)
+    assert.ok(requests.every(({ url }) => !url.includes('invitationCode')))
+    assert.equal(requests[1].options.method, 'POST')
+    harness.render({ ...props, orgId: 'other-org' }); harness.flushEffects()
+    assert.equal(elements(harness.render(), CopyText).length, 0)
+    await settle()
+  } finally {
+    harness.unmount(); globalThis.fetch = original
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator)
+    else delete globalThis.navigator
+  }
+})
+
+test('clipboard failure leaves selectable registration content and gives a manual-copy instruction', async () => {
+  const harness = componentTree(CopyText, { value: 'https://auth.example.test/signup/browser?invitationCode=fixture', label: '复制注册链接' })
+  const tree = harness.render()
+  await elements(tree, 'button')[0].props.onClick()
+  assert.match(renderTree(harness.render()), /手动复制/)
+  assert.equal(elements(harness.render(), 'textarea')[0].props.readOnly, true)
 })

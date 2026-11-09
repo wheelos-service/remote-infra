@@ -25,7 +25,9 @@ The shared library no longer depends on either legacy runtime.
 The opt-in [managed authorization pilot](auth-management.md) is a new,
 single-Gateway deployment mode, not a transparent import of legacy JWT roles
 or static ACLs. Its `/#/admin` UI supports opt-in automatic Casdoor onboarding,
-with manually verified identity bindings as the fallback, fixed business roles
+using Casdoor signup invitation links without email, automatically generated
+vehicle bootstrap JSON and registration-code approval, with manually verified
+identity bindings as the fallback, fixed business roles
 and vehicle ranges. Fresh automatic onboarding may run online; existing rights
 changes retain the maintenance/drain boundary. Default static mode remains
 compatible. Managed mode is limited to monitoring and explicitly allowlisted

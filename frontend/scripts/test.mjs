@@ -4,9 +4,6 @@ import * as esbuild from 'esbuild'
 import { webcrypto } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { convertMap, parseMapText } from './prepare-maps.mjs'
-import './admin-test.mjs'
-import './platform-test.mjs'
-import './auth-context-test.mjs'
 globalThis.crypto ??= webcrypto
 
 globalThis.window = {

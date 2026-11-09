@@ -8,7 +8,7 @@
     "pretypecheck": "npm run build:shared",
     "prepare:maps": "node scripts/prepare-maps.mjs",
     "dev": "node scripts/build.mjs",
-    "test": "node scripts/test.mjs",
+    "test": "node --test scripts/test.mjs scripts/admin-test.mjs scripts/platform-test.mjs scripts/auth-context-test.mjs",
     "typecheck": "tsc -p . --noEmit --incremental false",
     "build": "npm run typecheck && node scripts/build.mjs --production"
   },
