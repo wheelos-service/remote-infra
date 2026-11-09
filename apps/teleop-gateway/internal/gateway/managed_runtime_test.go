@@ -233,7 +233,8 @@ func newManagedFixture(t *testing.T) *managedFixture {
 	(&ViewingLeaseAPI{registry: vehicleRegistry, identities: vehicleIdentities,
 		authorizer: vehicleAuthorizer, store: &ViewingLeaseStore{client: f.client}}).register(f.mux)
 	(&ManagedAdminAPI{Store: store, TrustedIssuer: managedTestIssuer,
-		BeforeMutation: f.runtime.BeforeMutation}).Register(f.mux, AuthenticationMiddleware)
+		BeforeMutation: f.runtime.BeforeMutation, BeforeAdditive: f.runtime.BeforeAdditive,
+		Runtime: f.runtime}).Register(f.mux, AuthenticationMiddleware)
 	registerSessionAndTokenRoutes(f.mux)
 	(&DataAPI{registry: vehicleRegistry, identities: vehicleIdentities,
 		authorizer: vehicleAuthorizer}).register(f.mux)
@@ -640,6 +641,89 @@ func TestManagedRuntimeMultiInstanceAndPostgresOperationsStore(t *testing.T) {
 	if err != nil || len(recordsView["records"].([]map[string]any)) != 1 {
 		t.Fatalf("data records from instance B: %+v, err=%v", recordsView, err)
 	}
+}
+
+func TestManagedRuntimeOnlineLifecycleAndLeaseEviction(t *testing.T) {
+	f := newManagedFixture(t)
+	ctx := context.Background()
+	f.runtime.onlineMutations = true
+
+	// 1. Online organization creation by platform admin (viewer is rejected)
+	f.request(t, "POST", "/api/admin/organizations", "viewer", "", `{"name":"Illegal Fleet"}`, 403)
+	orgResp := f.request(t, "POST", "/api/admin/organizations", "admin", "", `{"name":"Online Lifecycle Fleet"}`, 201)
+	var newOrg authorization.Organization
+	if err := json.Unmarshal(orgResp.Body.Bytes(), &newOrg); err != nil || newOrg.OrganizationID == "" {
+		t.Fatalf("create org response=%s err=%v", orgResp.Body.String(), err)
+	}
+	base := "/api/admin/organizations/" + newOrg.OrganizationID
+
+	// 2. Add existing member (operator) and register vehicles online without maintenance drain
+	f.request(t, "POST", base+"/members", "admin", newOrg.OrganizationID, `{"subject":"operator"}`, 201)
+	f.request(t, "POST", base+"/vehicles", "admin", newOrg.OrganizationID, `{"vehicle_id":"car-live-1","name":"Live 1","subject":"dev-live-1"}`, 201)
+	f.request(t, "POST", base+"/vehicles", "admin", newOrg.OrganizationID, `{"vehicle_id":"car-live-2","name":"Live 2","subject":"dev-live-2"}`, 201)
+
+	// 3. Grant operator remote_operator on [car-live-1, car-live-2] and acquire control on car-live-1
+	f.request(t, "POST", base+"/assignments", "admin", newOrg.OrganizationID,
+		`{"user_id":"`+f.operatorID+`","role":"remote_operator","scope":"selected","vehicle_ids":["car-live-1","car-live-2"]}`, 200)
+	s1 := newTestControlSession("car-live-1", f.operatorID, uuid.NewString(), time.Minute)
+	s1.OperatorTenant, s1.ProtocolVersion = newOrg.OrganizationID, 2
+	if err := controlLeases.AcquireControlSession(ctx, s1); err != nil {
+		t.Fatalf("AcquireControlSession car-live-1: %v", err)
+	}
+	if active, err := controlLeases.GetControlSession(ctx, "car-live-1"); err != nil || active.OperatorID != f.operatorID {
+		t.Fatalf("expected active control lease on car-live-1, got %+v err=%v", active, err)
+	}
+
+	// 4. Narrow operator's vehicle scope to [car-live-2] -> car-live-1 control lease is immediately revoked to PENDING fence
+	f.request(t, "POST", base+"/assignments", "admin", newOrg.OrganizationID,
+		`{"user_id":"`+f.operatorID+`","role":"remote_operator","scope":"selected","vehicle_ids":["car-live-2"]}`, 200)
+	if _, err := controlLeases.GetControlSession(ctx, "car-live-1"); !errors.Is(err, ErrControlSessionNotFound) {
+		t.Fatalf("expected car-live-1 active lease to be deleted after scope narrowing, err=%v", err)
+	}
+	if handover, err := controlLeases.GetHandover(ctx, "car-live-1"); err != nil || handover.State != "PENDING" {
+		t.Fatalf("expected car-live-1 handover state PENDING after scope narrowing, got %+v err=%v", handover, err)
+	}
+	f.request(t, "POST", "/api/vehicles/car-live-1/control/acquire", "operator", newOrg.OrganizationID, `{}`, 403)
+	// Confirm handover on car-live-1 (or purge it) so operator's pending fence is cleared before driving car-live-2
+	if err := controlLeases.PurgeVehicleLeases(ctx, "car-live-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Acquire control on car-live-2, then revoke operator's role via DELETE /assignments/{user_id}
+	s2 := newTestControlSession("car-live-2", f.operatorID, uuid.NewString(), time.Minute)
+	s2.OperatorTenant, s2.ProtocolVersion = newOrg.OrganizationID, 2
+	if err := controlLeases.AcquireControlSession(ctx, s2); err != nil {
+		t.Fatalf("AcquireControlSession car-live-2: %v", err)
+	}
+	f.request(t, "DELETE", base+"/assignments/"+f.operatorID, "admin", newOrg.OrganizationID, "", 200)
+	if _, err := controlLeases.GetControlSession(ctx, "car-live-2"); !errors.Is(err, ErrControlSessionNotFound) {
+		t.Fatalf("expected car-live-2 active lease to be deleted after role revocation, err=%v", err)
+	}
+	if handover, err := controlLeases.GetHandover(ctx, "car-live-2"); err != nil || handover.State != "PENDING" {
+		t.Fatalf("expected car-live-2 handover state PENDING after role revocation, got %+v err=%v", handover, err)
+	}
+	f.request(t, "POST", "/api/vehicles/car-live-2/control/acquire", "operator", newOrg.OrganizationID, `{}`, 403)
+	// Operator is still a member with baseline view access
+	f.request(t, "GET", "/api/vehicles/car-live-2/state", "operator", newOrg.OrganizationID, "", 200)
+
+	// 6. Kick operator from organization via DELETE /members/{user_id}, then re-add
+	f.request(t, "DELETE", base+"/members/"+f.operatorID, "admin", newOrg.OrganizationID, "", 200)
+	f.request(t, "GET", "/api/vehicles/car-live-2/state", "operator", newOrg.OrganizationID, "", 403)
+	f.request(t, "POST", base+"/members", "admin", newOrg.OrganizationID, `{"subject":"operator"}`, 201)
+	f.request(t, "GET", "/api/vehicles/car-live-2/state", "operator", newOrg.OrganizationID, "", 200)
+
+	// 7. Kick vehicle car-live-2 via DELETE /vehicles/car-live-2 -> purges Redis lease and disables vehicle, then re-register
+	f.request(t, "DELETE", base+"/vehicles/car-live-2", "admin", newOrg.OrganizationID, "", 200)
+	if handover, err := controlLeases.GetHandover(ctx, "car-live-2"); err != nil || handover.State != "NONE" || handover.SessionID != "" {
+		t.Fatalf("expected car-live-2 handover to be completely purged, got %+v err=%v", handover, err)
+	}
+	f.request(t, "GET", "/api/vehicles/car-live-2/state", "admin", newOrg.OrganizationID, "", 403)
+	f.request(t, "POST", base+"/vehicles", "admin", newOrg.OrganizationID, `{"vehicle_id":"car-live-2","name":"Live 2 Reborn","subject":"dev-live-2-reborn"}`, 201)
+	f.request(t, "GET", "/api/vehicles/car-live-2/state", "admin", newOrg.OrganizationID, "", 200)
+
+	// 8. Disable organization via DELETE /api/admin/organizations/{org_id}
+	f.request(t, "DELETE", base, "admin", newOrg.OrganizationID, "", 200)
+	f.request(t, "GET", "/api/vehicles/car-live-1/state", "admin", newOrg.OrganizationID, "", 403)
 }
 
 func TestManagedRuntimePostgresFailuresNeverUseStaleAuthority(t *testing.T) {

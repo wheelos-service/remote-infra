@@ -31,30 +31,46 @@ Authentication (Casdoor IdP) is strictly decoupled from authorization and tenant
   - Immutable `vehicle_id` format: `v-<org_uuid_prefix8>-<customer_vehicle_number>-<random16>` (e.g., `v-12ab34cd-truck-001-8f02a31d65b746cb`).
   - Bound to a dedicated Casdoor confidential OAuth client (`client_id = teleop-device-<op_id>`, `subject = admin/teleop-<op_id>`, `identity_kind = 'vehicle'`) and, for device-code enrollment, anchored to the vehicle's hardware/persistent Ed25519 public key in `authz_enrolled_device_keys`.
 
-## 3. Registration & Organization Binding Flows
+## 3. Registration, Organization Binding & Full Lifecycle Management
 
-### 3.1 Creating an Organization
-- Executed offline via `cmd/auth-admin --input bootstrap.json --database-url-file db.dsn` while the Gateway is stopped (enforced by PostgreSQL advisory lock `7439102342056781`).
-- Atomically creates the `Organization`, initial `platform_admin` `User`, `(issuer, subject)` binding, membership, and `org_admin` policy.
+### 3.1 Organization Lifecycle (Create & Disable)
+- **Offline Initial Bootstrap**: `cmd/auth-admin --input bootstrap.json --database-url-file db.dsn` while the Gateway is stopped (enforced by PostgreSQL advisory lock `7439102342056781`) atomically creates the first `Organization`, initial `platform_admin` `User`, `(issuer, subject)` binding, membership, and `org_admin` policy.
+- **Online Organization Creation (`POST /api/admin/organizations`)**: `platform_admin` creates new organizations online (`Store.CreateOrganization`), automatically binding the creator as initial `org_admin` (`scope = all`) without service interruption.
+- **Online Organization Decommission (`DELETE /api/admin/organizations/{org_id}`)**: `platform_admin` soft-disables an organization (`Store.DisableOrganization`), atomically setting `authz_organizations.status = 'disabled'`, marking all memberships `removed`, disabling all vehicles and revoking `authz_vehicle_identities`, releasing `authz_enrolled_device_keys` and `vehicle_number` reservations, expiring pending enrollments/tickets, clearing `org:<org_id>` Casbin policies, and triggering `ManagedRuntime.EvictVehicles` to purge Redis control/viewing/video leases and close active LiveKit rooms.
 
-### 3.2 Registering & Adding People to an Organization
+### 3.2 Person Lifecycle (Register, Join, Kick & Re-join)
 - **Path A — Automated Email Invitation (New Person, Primary Flow)**:
   1. Admin submits `{kind: "person", name, email, role, scope, vehicle_ids, idempotency_key}` to `POST /api/admin/organizations/{org_id}/onboarding`.
   2. Gateway reserves an immutable `planned_identity_id` in `authz_onboarding_operations` (`stage: planned -> provider -> binding -> invitation -> completed`).
   3. Background worker creates the Casdoor user, binds `(issuer, subject) -> user_id`, inserts `authz_organization_memberships(org_id, user_id)`, writes Casbin rules, and triggers Casdoor's native verification/password-setup email (`%link`).
   4. The user sets their password directly in Casdoor (Gateway never handles user passwords) and signs in via OIDC PKCE.
-- **Path B — Adding an Existing User to Another Organization**:
-  - Admin submits `{subject}` to `POST /api/admin/organizations/{org_id}/members` (`Store.AddExistingMember`). Gateway never merges or adopts accounts by mutable email address.
+- **Path B — Adding an Existing User to Another Organization (`POST /api/admin/organizations/{org_id}/members`)**:
+  - Admin submits `{subject}` (`Store.AddExistingMember`). Gateway never merges or adopts accounts by mutable email address.
+- **Kicking a Member (`DELETE /api/admin/organizations/{org_id}/members/{user_id}`) & Re-joining**:
+  - `Store.RemoveOrganizationMember` prevents self-removal and last-admin removal, sets `authz_organization_memberships.status = 'removed'`, deletes all `casbin_rule` grants in that organization while preserving the user's global identity and memberships in other organizations, and invokes `ManagedRuntime.EvictMember` to immediately release any active Redis control lease (transitioning the vehicle to the `PENDING` handover fence) and remove the participant from LiveKit rooms.
+  - A previously kicked (`removed`) or `suspended` user can cleanly re-join the organization via `POST .../members` or `POST .../people` (`ON CONFLICT (org_id, user_id) DO UPDATE SET status = 'active'`).
 
-### 3.3 Registering & Binding Vehicles to an Organization
+### 3.3 Vehicle Lifecycle (Enroll, Bind, Kick & Re-enroll)
 - **Path A — Vehicle-Initiated Ed25519 Device-Code Enrollment (Recommended Zero-Touch Flow)**:
   1. Vehicle runs `vehicle_bootstrap`, generates a persistent `0600` Ed25519 keypair (`/etc/teleop/device-key.pem`), and signs `POST /api/v1/device-enrollments` (`request_id`, `public_key`, `name`, `serial`, `platform`, `timestamp`, `nonce`, `signature`) to receive an 8-character `user_code` (`XXXX-XXXX`) and `device_code`.
   2. Admin selects the target organization in `/#/admin`, looks up `user_code` (`POST /api/admin/organizations/{org_id}/device-enrollments/lookup`), and approves with `{name, vehicle_number}` (`POST .../approve`).
   3. Gateway atomically binds the enrollment and `public_key` (`authz_enrolled_device_keys`) to `org_id`, generates `vehicle_id`, and provisions the Casdoor confidential client in the background.
   4. Vehicle polls `POST /api/v1/device-enrollments/token` -> receives a 5-minute key-bound `ticket` -> immediately redeems `POST /api/v1/device-enrollments/complete` -> writes `/etc/teleop/device.json` -> verifies OAuth `client_credentials` (`teleop:vehicle`) + `/api/vehicles/{vehicle_id}/device-auth-check` -> calls `POST /api/vehicles/{vehicle_id}/installation-complete` (`status = active`).
-  5. **Credential Recovery**: If `/etc/teleop/device.json` is lost on the vehicle, re-running `vehicle_bootstrap` with the same `device-key.pem` automatically sets `recovery = true`; admin approval rotates the Casdoor secret under the drain guard while preserving the existing `vehicle_id` and `org_id`.
+  5. **Credential Recovery**: If `/etc/teleop/device.json` is lost on the vehicle, re-running `vehicle_bootstrap` with the same `device-key.pem` automatically sets `recovery = true`; admin approval rotates the Casdoor secret under the guard while preserving the existing `vehicle_id` and `org_id`.
 - **Path B — Admin Pre-Created Installation Ticket (Fallback Flow)**:
   - Admin creates `{kind: "vehicle", name, vehicle_number}` via `POST /api/admin/organizations/{org_id}/onboarding`, issues a 5-minute one-time bearer ticket (`POST .../installation-ticket`), and runs `infra/scripts/install-vehicle-auth.py` on the vehicle.
+- **Kicking / Unbinding a Vehicle (`DELETE /api/admin/organizations/{org_id}/vehicles/{vehicle_id}`) & Re-enrolling**:
+  - `Store.RemoveVehicle` sets `authz_vehicles.status = 'disabled'`, revokes `authz_vehicle_identities`, deletes `authz_enrolled_device_keys`, clears `vehicle_number` uniqueness reservations, expires pending enrollments/tickets, removes the vehicle from `selected` Casbin grants (downgrading any grant that loses its last selected vehicle to `ScopeNone`), and triggers `ManagedRuntime.EvictVehicles` (`PurgeVehicleLeases` + LiveKit `DeleteRoom`).
+  - Once removed, the vehicle's hardware `device-key.pem` and `vehicle_number` are free to re-enroll into the same or another organization.
+
+### 3.4 Human Permission Lifecycle (Grant, Narrow & Revoke)
+- **Granting / Updating Permissions (`POST /api/admin/organizations/{org_id}/assignments`)**:
+  - Assigns `role` (`viewer | remote_operator | org_admin`) and `scope` (`none | selected | all` + `vehicle_ids`).
+  - If an operator's role is downgraded or their `selected` vehicle set is narrowed while holding a control lease on an excluded vehicle, `ManagedRuntime.EvictMember(..., keepAllowedControl=true)` immediately revokes that control lease (`ReleaseControlSession` -> `PENDING` handover fence).
+- **Revoking Permissions (`DELETE /api/admin/organizations/{org_id}/assignments/{user_id}`)**:
+  - `Store.RevokeManagedRole` clears the member's Casbin role/scope in the organization (returning them to baseline organization read-only membership without kicking them from the organization) and immediately revokes any active control lease.
+- **Online Execution (`AUTHORIZATION_ONLINE_MUTATIONS=true` / `AUTHORIZATION_MULTI_INSTANCE=true`)**:
+  - Management mutations execute online via `BeforeAdditive` + `SERIALIZABLE` PostgreSQL transactions + targeted Redis/LiveKit eviction (`EvictVehicles`, `EvictMember`), eliminating the legacy 11-minute global maintenance drain barrier while preserving strict single-instance drain semantics when `onlineMutations` is disabled.
 
 ### 3.4 Human vs. Vehicle Registration Summary
 

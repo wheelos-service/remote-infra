@@ -362,3 +362,134 @@ func TestPostgresManagedAuditRollbackAndDurableTokenHorizon(t *testing.T) {
 		t.Fatal("database outage allowed cached management")
 	}
 }
+
+func TestPostgresFullLifecycleOrganizationMemberVehicleAndPermissions(t *testing.T) {
+	store, _ := managementTestStore(t)
+	ctx := context.Background()
+	const issuer = "https://manual-idp.example.test"
+	bootstrap := BootstrapInput{
+		OrganizationID:   testOrgID,
+		OrganizationName: "Primary Fleet",
+		UserID:           testUserID,
+		Name:             "Platform Admin",
+		Issuer:           issuer,
+		Subject:          "platform-admin-sub",
+	}
+	if err := store.Bootstrap(ctx, bootstrap); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. CreateOrganization (platform admin vs ordinary org admin)
+	newOrgID := uuid.NewString()
+	createdOrg, err := store.CreateOrganization(ctx, bootstrap.UserID, newOrgID, "Expansion Fleet")
+	if err != nil || createdOrg.OrganizationID != newOrgID || createdOrg.Name != "Expansion Fleet" {
+		t.Fatalf("CreateOrganization=%+v err=%v", createdOrg, err)
+	}
+	orgAdmin, err := store.RegisterPerson(ctx, bootstrap.UserID, newOrgID, issuer, "Org Admin", "org-admin-sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssignManagedRole(ctx, Assignment{
+		ActorUserID: bootstrap.UserID, UserID: orgAdmin.UserID, OrganizationID: newOrgID, Role: RoleOrgAdmin, Scope: ScopeAll,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateOrganization(ctx, orgAdmin.UserID, uuid.NewString(), "Unauthorized Org"); !errors.Is(err, ErrNotOrganizationAdmin) {
+		t.Fatalf("ordinary org admin created organization: %v", err)
+	}
+
+	// 2. Person Register, Permission Grant, Permission Revoke, Kick, and Re-join
+	operator, err := store.RegisterPerson(ctx, bootstrap.UserID, newOrgID, issuer, "Operator One", "operator-one-sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1, err := store.RegisterVehicle(ctx, bootstrap.UserID, newOrgID, issuer, "car-lc-1", "Car 1", "dev-lc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2, err := store.RegisterVehicle(ctx, bootstrap.UserID, newOrgID, issuer, "car-lc-2", "Car 2", "dev-lc-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssignManagedRole(ctx, Assignment{
+		ActorUserID: orgAdmin.UserID, UserID: operator.UserID, OrganizationID: newOrgID,
+		Role: RoleRemoteOperator, Scope: ScopeSelected, VehicleIDs: []string{v1.VehicleID, v2.VehicleID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Vehicle Kick & Selected Scope Adjustment + Re-registration
+	if err := store.RemoveVehicle(ctx, orgAdmin.UserID, newOrgID, v1.VehicleID); err != nil {
+		t.Fatalf("RemoveVehicle v1: %v", err)
+	}
+	if _, err := store.ResolveVehicle(ctx, issuer, "dev-lc-1"); !errors.Is(err, ErrUnknownIdentity) {
+		t.Fatalf("removed vehicle identity still resolves: %v", err)
+	}
+	assignAfterV1, err := store.UserAssignment(ctx, operator.UserID, newOrgID)
+	if err != nil || assignAfterV1.Scope != ScopeSelected || len(assignAfterV1.VehicleIDs) != 1 || assignAfterV1.VehicleIDs[0] != v2.VehicleID {
+		t.Fatalf("expected ScopeSelected [car-lc-2] after removing car-lc-1, got %+v err=%v", assignAfterV1, err)
+	}
+	if err := store.RemoveVehicle(ctx, orgAdmin.UserID, newOrgID, v2.VehicleID); err != nil {
+		t.Fatalf("RemoveVehicle v2: %v", err)
+	}
+	assignAfterV2, err := store.UserAssignment(ctx, operator.UserID, newOrgID)
+	if err != nil || assignAfterV2.Role != RoleRemoteOperator || assignAfterV2.Scope != ScopeNone || len(assignAfterV2.VehicleIDs) != 0 {
+		t.Fatalf("expected ScopeNone after removing last selected vehicle, got %+v err=%v", assignAfterV2, err)
+	}
+	listedVehicles, err := store.ListVehicles(ctx, orgAdmin.UserID, newOrgID, issuer)
+	if err != nil || len(listedVehicles) != 0 {
+		t.Fatalf("expected 0 active vehicles listed, got %+v err=%v", listedVehicles, err)
+	}
+	// Re-register v1 into the organization
+	if _, err := store.RegisterVehicle(ctx, bootstrap.UserID, newOrgID, issuer, v1.VehicleID, "Car 1 Reborn", "dev-lc-1-new"); err != nil {
+		t.Fatalf("re-register removed vehicle: %v", err)
+	}
+	if resolved, err := store.ResolveVehicle(ctx, issuer, "dev-lc-1-new"); err != nil || resolved.VehicleID != v1.VehicleID {
+		t.Fatalf("re-registered vehicle resolve=%+v err=%v", resolved, err)
+	}
+
+	// 4. RevokeManagedRole keeps membership active but clears role/scope
+	if _, err := store.RevokeManagedRole(ctx, orgAdmin.UserID, newOrgID, operator.UserID); err != nil {
+		t.Fatalf("RevokeManagedRole: %v", err)
+	}
+	revokedAssign, err := store.UserAssignment(ctx, operator.UserID, newOrgID)
+	if err != nil || revokedAssign.Role != "" || revokedAssign.Scope != "" {
+		t.Fatalf("expected empty role/scope after RevokeManagedRole, got %+v err=%v", revokedAssign, err)
+	}
+	if allowed, err := store.Enforce(ctx, operator.UserID, newOrgID, v1.VehicleID, ActionVehicleRead); err != nil || !allowed {
+		t.Fatalf("member with revoked role should still have baseline org read access: allowed=%v err=%v", allowed, err)
+	}
+
+	// 5. RemoveOrganizationMember kicks member and allows clean re-join
+	if err := store.RemoveOrganizationMember(ctx, orgAdmin.UserID, newOrgID, orgAdmin.UserID); !errors.Is(err, ErrSelfAssignment) {
+		t.Fatalf("expected ErrSelfAssignment on self kick, got %v", err)
+	}
+	if err := store.RemoveOrganizationMember(ctx, orgAdmin.UserID, newOrgID, operator.UserID); err != nil {
+		t.Fatalf("RemoveOrganizationMember: %v", err)
+	}
+	if allowed, err := store.Enforce(ctx, operator.UserID, newOrgID, v1.VehicleID, ActionVehicleRead); err != nil || allowed {
+		t.Fatalf("kicked member still enforced: allowed=%v err=%v", allowed, err)
+	}
+	rejoined, err := store.AddExistingMember(ctx, orgAdmin.UserID, newOrgID, issuer, "operator-one-sub")
+	if err != nil || rejoined.UserID != operator.UserID {
+		t.Fatalf("re-join kicked member via AddExistingMember: %+v err=%v", rejoined, err)
+	}
+	if allowed, err := store.Enforce(ctx, operator.UserID, newOrgID, v1.VehicleID, ActionVehicleRead); err != nil || !allowed {
+		t.Fatalf("re-joined member missing baseline read access: allowed=%v err=%v", allowed, err)
+	}
+
+	// 6. DisableOrganization cascades cleanup and blocks ordinary org admin
+	if _, err := store.DisableOrganization(ctx, orgAdmin.UserID, newOrgID); !errors.Is(err, ErrNotOrganizationAdmin) {
+		t.Fatalf("ordinary org admin disabled organization: %v", err)
+	}
+	disabledVehicles, err := store.DisableOrganization(ctx, bootstrap.UserID, newOrgID)
+	if err != nil || len(disabledVehicles) != 1 || disabledVehicles[0] != v1.VehicleID {
+		t.Fatalf("DisableOrganization vehicles=%v err=%v", disabledVehicles, err)
+	}
+	if _, err := store.ResolveVehicle(ctx, issuer, "dev-lc-1-new"); !errors.Is(err, ErrUnknownIdentity) {
+		t.Fatalf("vehicle in disabled organization still resolves: %v", err)
+	}
+	if allowed, err := store.Enforce(ctx, orgAdmin.UserID, newOrgID, v1.VehicleID, ActionVehicleRead); err != nil || allowed {
+		t.Fatalf("disabled organization still allows access: allowed=%v err=%v", allowed, err)
+	}
+}

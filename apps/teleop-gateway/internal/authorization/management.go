@@ -239,7 +239,7 @@ func (s *Store) people(ctx context.Context, orgID, issuer, userID string) ([]Per
 		LEFT JOIN authz_external_identity_bindings b ON b.user_id=u.user_id AND b.status='active' AND ($2='' OR b.issuer=$2)
 		LEFT JOIN casbin_rule g ON g.ptype='g' AND g.v0='user:'||u.user_id::text AND g.v2='org:'||m.org_id::text
 		LEFT JOIN casbin_rule p ON p.ptype='p' AND p.v0=g.v2 AND p.v1=g.v1 AND p.v3='vehicle.read'
-		WHERE m.org_id=$1 AND ($3='' OR u.user_id::text=$3) ORDER BY u.user_id,p.v5`, orgID, issuer, userID)
+		WHERE m.org_id=$1 AND m.status<>'removed' AND ($3='' OR u.user_id::text=$3) ORDER BY u.user_id,p.v5`, orgID, issuer, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -277,8 +277,8 @@ func (s *Store) ListVehicles(ctx context.Context, actor, orgID, issuer string) (
 		return nil, ErrNotOrganizationAdmin
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT v.vehicle_id,v.org_id,v.name,v.status,COALESCE(i.subject,'')
-		FROM authz_vehicles v LEFT JOIN authz_vehicle_identities i ON i.vehicle_id=v.vehicle_id AND i.issuer=$2
-		WHERE v.org_id=$1 ORDER BY v.vehicle_id`, orgID, issuer)
+		FROM authz_vehicles v LEFT JOIN authz_vehicle_identities i ON i.vehicle_id=v.vehicle_id AND i.issuer=$2 AND i.status='active'
+		WHERE v.org_id=$1 AND v.status<>'disabled' ORDER BY v.vehicle_id`, orgID, issuer)
 	if err != nil {
 		return nil, err
 	}
@@ -366,13 +366,204 @@ func (s *Store) registerPerson(ctx context.Context, actor, orgID, issuer, name, 
 	if p.UserID == actor {
 		return Person{}, ErrSelfAssignment
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO authz_organization_memberships(org_id,user_id,status) VALUES($1,$2,'active')`, orgID, p.UserID); err != nil {
+	res, err := tx.ExecContext(ctx, `INSERT INTO authz_organization_memberships(org_id,user_id,status,updated_at) VALUES($1,$2,'active',now())
+		ON CONFLICT(org_id,user_id) DO UPDATE SET status='active',updated_at=now()
+		WHERE authz_organization_memberships.status IN ('removed','suspended')`, orgID, p.UserID)
+	if err != nil {
 		return Person{}, mutationError(err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return Person{}, ErrConflict
 	}
 	if err = commitManagement(ctx, tx, version, actor, orgID, p.UserID, "person_registered", map[string]string{"user_id": p.UserID}); err != nil {
 		return Person{}, err
 	}
 	return p, nil
+}
+
+func (s *Store) CreateOrganization(ctx context.Context, actor, orgID, name string) (Organization, error) {
+	var err error
+	if actor, err = canonicalUUID(actor); err != nil {
+		return Organization{}, ErrInvalidRegistration
+	}
+	if orgID == "" {
+		orgID = uuid.NewString()
+	} else if orgID, err = canonicalUUID(orgID); err != nil {
+		return Organization{}, ErrInvalidRegistration
+	}
+	if !validText(name, 200) {
+		return Organization{}, ErrInvalidRegistration
+	}
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return Organization{}, err
+	}
+	defer tx.Rollback()
+	version, err := readVersion(ctx, tx, true)
+	if err != nil {
+		return Organization{}, err
+	}
+	var platform bool
+	if err := tx.QueryRowContext(ctx, `SELECT platform_admin FROM authz_users WHERE user_id=$1 AND status='active'`, actor).Scan(&platform); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Organization{}, ErrNotOrganizationAdmin
+		}
+		return Organization{}, err
+	}
+	if !platform {
+		return Organization{}, ErrNotOrganizationAdmin
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO authz_organizations(org_id,status,name) VALUES($1,'active',$2)`, orgID, name); err != nil {
+		return Organization{}, mutationError(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO authz_organization_memberships(org_id,user_id,status) VALUES($1,$2,'active')`, orgID, actor); err != nil {
+		return Organization{}, mutationError(err)
+	}
+	assignment := Assignment{ActorUserID: actor, UserID: actor, OrganizationID: orgID, Role: RoleOrgAdmin, Scope: ScopeAll}
+	if err := replaceUserAssignment(ctx, tx, assignment, assignmentRules(assignment, "grant:"+uuid.NewString())); err != nil {
+		return Organization{}, err
+	}
+	if err := commitManagement(ctx, tx, version, actor, orgID, actor, "organization_created", map[string]string{"org_id": orgID, "name": name}); err != nil {
+		return Organization{}, err
+	}
+	return Organization{OrganizationID: orgID, Name: name}, nil
+}
+
+func (s *Store) DisableOrganization(ctx context.Context, actor, orgID string) ([]string, error) {
+	var err error
+	if actor, err = canonicalUUID(actor); err != nil {
+		return nil, ErrInvalidRegistration
+	}
+	if orgID, err = canonicalUUID(orgID); err != nil {
+		return nil, ErrInvalidRegistration
+	}
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	version, err := readVersion(ctx, tx, true)
+	if err != nil {
+		return nil, err
+	}
+	var platform bool
+	if err := tx.QueryRowContext(ctx, `SELECT platform_admin FROM authz_users WHERE user_id=$1 AND status='active'`, actor).Scan(&platform); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotOrganizationAdmin
+		}
+		return nil, err
+	}
+	if !platform {
+		return nil, ErrNotOrganizationAdmin
+	}
+	var status string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM authz_organizations WHERE org_id=$1 FOR UPDATE`, orgID).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrInactiveLifecycle
+		}
+		return nil, err
+	}
+	if status != "active" {
+		return nil, ErrInactiveLifecycle
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT vehicle_id FROM authz_vehicles WHERE org_id=$1 AND status='active' ORDER BY vehicle_id`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	vehicles := make([]string, 0)
+	for rows.Next() {
+		var vid string
+		if err := rows.Scan(&vid); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		vehicles = append(vehicles, vid)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_organizations SET status='disabled' WHERE org_id=$1`, orgID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_organization_memberships SET status='removed',updated_at=now() WHERE org_id=$1 AND status<>'removed'`, orgID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_vehicles SET status='disabled' WHERE org_id=$1 AND status<>'disabled'`, orgID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_vehicle_identities SET status='revoked',updated_at=now()
+		WHERE vehicle_id IN (SELECT vehicle_id FROM authz_vehicles WHERE org_id=$1) AND status<>'revoked'`, orgID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM authz_enrolled_device_keys
+		WHERE operation_id IN (SELECT operation_id FROM authz_onboarding_operations WHERE org_id=$1)`, orgID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_onboarding_operations SET request=request-'vehicle_number',updated_at=now()
+		WHERE org_id=$1 AND kind='vehicle' AND COALESCE(request->>'vehicle_number','')<>''`, orgID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_device_enrollments SET status='expired',ticket_hash=NULL,ticket_ciphertext=NULL,ticket_expires_at=NULL
+		WHERE org_id=$1 AND status IN ('pending','approved')`, orgID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_installation_tickets SET revoked_at=now()
+		WHERE operation_id IN (SELECT operation_id FROM authz_onboarding_operations WHERE org_id=$1) AND revoked_at IS NULL`, orgID); err != nil {
+		return nil, err
+	}
+	orgDomain := "org:" + orgID
+	if _, err := tx.ExecContext(ctx, `DELETE FROM casbin_rule WHERE (ptype='p' AND v0=$1) OR (ptype='g' AND v2=$1)`, orgDomain); err != nil {
+		return nil, err
+	}
+	if err := commitManagement(ctx, tx, version, actor, orgID, "", "organization_disabled", map[string]string{"org_id": orgID}); err != nil {
+		return nil, err
+	}
+	return vehicles, nil
+}
+
+func (s *Store) RemoveOrganizationMember(ctx context.Context, actor, orgID, userID string) error {
+	var err error
+	if userID, err = canonicalUUID(userID); err != nil {
+		return ErrInvalidRegistration
+	}
+	tx, version, err := s.managementTx(ctx, actor, orgID)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if actor == userID {
+		return ErrSelfAssignment
+	}
+	snapshot, err := s.snapshotFor(ctx, tx, version)
+	if err != nil {
+		return err
+	}
+	var status string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM authz_organization_memberships WHERE org_id=$1 AND user_id=$2 FOR UPDATE`, orgID, userID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) || status == "removed" {
+		return ErrInactiveLifecycle
+	}
+	if err != nil {
+		return err
+	}
+	if snapshot.canManageOrganization(userID, orgID) {
+		hasAnotherAdmin, err := hasOtherOrganizationAdmin(ctx, tx, snapshot, orgID, userID)
+		if err != nil {
+			return err
+		}
+		if !hasAnotherAdmin {
+			return ErrLastOrganizationAdmin
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_organization_memberships SET status='removed',updated_at=now() WHERE org_id=$1 AND user_id=$2`, orgID, userID); err != nil {
+		return err
+	}
+	if err := replaceUserAssignment(ctx, tx, Assignment{UserID: userID, OrganizationID: orgID}, nil); err != nil {
+		return err
+	}
+	return commitManagement(ctx, tx, version, actor, orgID, userID, "member_removed", map[string]string{"user_id": userID})
 }
 
 func insertUserBinding(ctx context.Context, tx *sql.Tx, issuer, subject, userID string) error {
@@ -400,8 +591,26 @@ func (s *Store) RegisterVehicle(ctx context.Context, actor, orgID, issuer, vehic
 		return Vehicle{}, ErrIdentityBindingRestricted
 	}
 	v := Vehicle{VehicleID: vehicleID, OrganizationID: orgID, Name: name, Status: "active", Subject: subject}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO authz_vehicles(vehicle_id,org_id,status,name) VALUES($1,$2,'active',$3)`, vehicleID, orgID, name); err != nil {
+	res, err := tx.ExecContext(ctx, `INSERT INTO authz_vehicles(vehicle_id,org_id,status,name) VALUES($1,$2,'active',$3)
+		ON CONFLICT(vehicle_id) DO UPDATE SET org_id=EXCLUDED.org_id,status='active',name=EXCLUDED.name
+		WHERE authz_vehicles.status='disabled'`, vehicleID, orgID, name)
+	if err != nil {
 		return Vehicle{}, mutationError(err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return Vehicle{}, ErrConflict
+	}
+	var oldIssuer, oldSubject string
+	err = tx.QueryRowContext(ctx, `SELECT issuer,subject FROM authz_vehicle_identities WHERE vehicle_id=$1 AND status='revoked'`, vehicleID).Scan(&oldIssuer, &oldSubject)
+	if err == nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM authz_vehicle_identities WHERE vehicle_id=$1 AND status='revoked'`, vehicleID); err != nil {
+			return Vehicle{}, mutationError(err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM authz_identity_subjects WHERE issuer=$1 AND subject=$2 AND identity_kind='vehicle'`, oldIssuer, oldSubject); err != nil {
+			return Vehicle{}, mutationError(err)
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Vehicle{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO authz_identity_subjects(issuer,subject,identity_kind) VALUES($1,$2,'vehicle')`, issuer, subject); err != nil {
 		return Vehicle{}, mutationError(err)
@@ -417,6 +626,90 @@ func (s *Store) RegisterVehicle(ctx context.Context, actor, orgID, issuer, vehic
 		return Vehicle{}, err
 	}
 	return v, nil
+}
+
+func (s *Store) RemoveVehicle(ctx context.Context, actor, orgID, vehicleID string) error {
+	if !validVehicleID(vehicleID) || vehicleID == "*" {
+		return ErrInvalidRegistration
+	}
+	tx, version, err := s.managementTx(ctx, actor, orgID)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status string
+	err = tx.QueryRowContext(ctx, `SELECT status FROM authz_vehicles WHERE org_id=$1 AND vehicle_id=$2 FOR UPDATE`, orgID, vehicleID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) || status == "disabled" {
+		return ErrInactiveLifecycle
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_vehicles SET status='disabled' WHERE org_id=$1 AND vehicle_id=$2`, orgID, vehicleID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_vehicle_identities SET status='revoked',updated_at=now() WHERE vehicle_id=$1 AND status<>'revoked'`, vehicleID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM authz_enrolled_device_keys
+		WHERE operation_id IN (SELECT operation_id FROM authz_onboarding_operations WHERE org_id=$1 AND vehicle_id=$2)`, orgID, vehicleID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_onboarding_operations SET request=request-'vehicle_number',updated_at=now()
+		WHERE org_id=$1 AND vehicle_id=$2 AND kind='vehicle'`, orgID, vehicleID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_device_enrollments SET status='expired',ticket_hash=NULL,ticket_ciphertext=NULL,ticket_expires_at=NULL
+		WHERE operation_id IN (SELECT operation_id FROM authz_onboarding_operations WHERE org_id=$1 AND vehicle_id=$2)
+		  AND status IN ('pending','approved')`, orgID, vehicleID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE authz_installation_tickets SET revoked_at=now()
+		WHERE operation_id IN (SELECT operation_id FROM authz_onboarding_operations WHERE org_id=$1 AND vehicle_id=$2)
+		  AND revoked_at IS NULL`, orgID, vehicleID); err != nil {
+		return err
+	}
+	orgDomain := "org:" + orgID
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT v1,v2 FROM casbin_rule WHERE ptype='p' AND v0=$1 AND v4='selected' AND v5=$2`, orgDomain, vehicleID)
+	if err != nil {
+		return err
+	}
+	type grantRole struct{ grantID, role string }
+	affected := make([]grantRole, 0)
+	for rows.Next() {
+		var gr grantRole
+		if err := rows.Scan(&gr.grantID, &gr.role); err != nil {
+			rows.Close()
+			return err
+		}
+		affected = append(affected, gr)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(affected) > 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM casbin_rule WHERE ptype='p' AND v0=$1 AND v4='selected' AND v5=$2`, orgDomain, vehicleID); err != nil {
+			return err
+		}
+		for _, gr := range affected {
+			var hasRemaining bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM casbin_rule WHERE ptype='p' AND v0=$1 AND v1=$2)`, orgDomain, gr.grantID).Scan(&hasRemaining); err != nil {
+				return err
+			}
+			if !hasRemaining {
+				role := Role(strings.TrimPrefix(gr.role, "role:"))
+				for _, action := range roleActions[role] {
+					if _, err := tx.ExecContext(ctx, `INSERT INTO casbin_rule(ptype,v0,v1,v2,v3,v4,v5) VALUES('p',$1,$2,$3,$4,'none','')`,
+						orgDomain, gr.grantID, gr.role, action); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return commitManagement(ctx, tx, version, actor, orgID, "", "vehicle_removed", map[string]string{"vehicle_id": vehicleID})
 }
 
 func commitManagement(ctx context.Context, tx *sql.Tx, version int64, actor, orgID, subject, eventType string, details any) error {
@@ -605,4 +898,46 @@ func (s *Store) AssignManagedRole(ctx context.Context, a Assignment) (int64, err
 	}
 	version, err := s.AssignRole(ctx, a)
 	return version, mutationError(err)
+}
+
+func (s *Store) RevokeManagedRole(ctx context.Context, actor, orgID, userID string) (int64, error) {
+	var err error
+	if userID, err = canonicalUUID(userID); err != nil {
+		return 0, ErrInvalidAssignment
+	}
+	tx, version, err := s.managementTx(ctx, actor, orgID)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if actor == userID {
+		return 0, ErrSelfAssignment
+	}
+	snapshot, err := s.snapshotFor(ctx, tx, version)
+	if err != nil {
+		return 0, err
+	}
+	active, err := activeMember(ctx, tx, orgID, userID)
+	if err != nil {
+		return 0, err
+	}
+	if !active {
+		return 0, ErrInactiveLifecycle
+	}
+	if snapshot.canManageOrganization(userID, orgID) {
+		hasAnotherAdmin, err := hasOtherOrganizationAdmin(ctx, tx, snapshot, orgID, userID)
+		if err != nil {
+			return 0, err
+		}
+		if !hasAnotherAdmin {
+			return 0, ErrLastOrganizationAdmin
+		}
+	}
+	if err := replaceUserAssignment(ctx, tx, Assignment{UserID: userID, OrganizationID: orgID}, nil); err != nil {
+		return 0, err
+	}
+	if err := commitManagement(ctx, tx, version, actor, orgID, userID, "role_revoked", map[string]string{"user_id": userID}); err != nil {
+		return 0, err
+	}
+	return version + 1, nil
 }

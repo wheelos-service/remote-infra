@@ -27,15 +27,17 @@ type managedRequestClaims struct {
 }
 
 type ManagedRuntime struct {
-	store       *authorization.Store
-	db          *sql.DB
-	instance    *sql.Conn
-	issuer      string
-	maintenance bool
-	mu          sync.RWMutex
-	additiveMu  sync.Mutex
-	roomsEmpty  func(context.Context) error
-	rtcProxy    http.Handler
+	store           *authorization.Store
+	db              *sql.DB
+	instance        *sql.Conn
+	issuer          string
+	maintenance     bool
+	onlineMutations bool
+	mu              sync.RWMutex
+	additiveMu      sync.Mutex
+	roomsEmpty      func(context.Context) error
+	evictRoom       func(context.Context, string, string)
+	rtcProxy        http.Handler
 }
 
 var (
@@ -76,6 +78,9 @@ func managedAuthorizationConfigured() (bool, error) {
 	if value := os.Getenv("AUTHORIZATION_MULTI_INSTANCE"); value != "" && value != "true" && value != "false" {
 		return false, errors.New("AUTHORIZATION_MULTI_INSTANCE must be true or false")
 	}
+	if value := os.Getenv("AUTHORIZATION_ONLINE_MUTATIONS"); value != "" && value != "true" && value != "false" {
+		return false, errors.New("AUTHORIZATION_ONLINE_MUTATIONS must be true or false")
+	}
 	if os.Getenv("AUTHORIZATION_MULTI_INSTANCE") == "true" && os.Getenv("AUTHORIZATION_MANAGED_MAINTENANCE") == "true" {
 		return false, errors.New("managed maintenance requires an exclusive single Gateway instance")
 	}
@@ -91,8 +96,11 @@ func NewManagedRuntimeFromEnvironment(ctx context.Context) (*ManagedRuntime, err
 	if err != nil {
 		return nil, errors.New("open managed authorization database")
 	}
+	onlineMutations := os.Getenv("AUTHORIZATION_MULTI_INSTANCE") == "true" ||
+		os.Getenv("AUTHORIZATION_ONLINE_MUTATIONS") == "true"
 	runtime := &ManagedRuntime{db: db, issuer: os.Getenv("OIDC_ISSUER"),
-		maintenance: os.Getenv("AUTHORIZATION_MANAGED_MAINTENANCE") == "true"}
+		maintenance:     os.Getenv("AUTHORIZATION_MANAGED_MAINTENANCE") == "true",
+		onlineMutations: onlineMutations}
 	success := false
 	defer func() {
 		if !success {
@@ -135,6 +143,7 @@ func NewManagedRuntimeFromEnvironment(ctx context.Context) (*ManagedRuntime, err
 	if err != nil {
 		return nil, err
 	}
+	runtime.evictRoom = managedRoomEvictor(os.Getenv("LIVEKIT_URL"))
 	endpoint, _ := url.Parse(os.Getenv("LIVEKIT_URL"))
 	switch endpoint.Scheme {
 	case "ws":
@@ -208,7 +217,7 @@ func (m *ManagedRuntime) authorizeRequest(r *http.Request, claims *UserClaims) (
 		return fail(err)
 	}
 	*claims = *bound
-	if r.Method == http.MethodPost && (strings.HasPrefix(r.URL.Path, "/api/admin/") ||
+	if (r.Method == http.MethodPost || r.Method == http.MethodDelete) && (strings.HasPrefix(r.URL.Path, "/api/admin/") ||
 		(strings.HasPrefix(r.URL.Path, "/api/vehicles/") && strings.HasSuffix(r.URL.Path, "/installation-complete"))) {
 		// BeforeMutation obtains the exclusive lock and the Store rechecks the
 		// administrator inside its transaction; avoid a read-to-write deadlock.
@@ -263,7 +272,11 @@ func (m *ManagedRuntime) resolveAdminClaims(r *http.Request, original *UserClaim
 		return nil, err
 	}
 	organizationID := ""
-	if r.URL.Path != "/api/admin/context" {
+	if r.URL.Path == "/api/admin/organizations" {
+		if !management.PlatformAdmin {
+			return nil, errManagedDenied
+		}
+	} else if r.URL.Path != "/api/admin/context" {
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		if len(parts) < 4 || parts[2] != "organizations" {
 			return nil, errManagedDenied
@@ -483,7 +496,10 @@ func writeManagedError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-func (m *ManagedRuntime) BeforeMutation(ctx context.Context, _ string) (func(), error) {
+func (m *ManagedRuntime) BeforeMutation(ctx context.Context, orgID string) (func(), error) {
+	if m.onlineMutations && !m.maintenance {
+		return m.BeforeAdditive(ctx, orgID)
+	}
 	if !m.maintenance {
 		return nil, errManagedDrain
 	}
@@ -493,6 +509,56 @@ func (m *ManagedRuntime) BeforeMutation(ctx context.Context, _ string) (func(), 
 		return nil, err
 	}
 	return m.mu.Unlock, nil
+}
+
+func (m *ManagedRuntime) EvictVehicles(ctx context.Context, vehicleIDs []string) {
+	if m == nil {
+		return
+	}
+	for _, vid := range vehicleIDs {
+		if controlLeases != nil {
+			_ = controlLeases.PurgeVehicleLeases(ctx, vid)
+		}
+		if m.evictRoom != nil {
+			m.evictRoom(ctx, vid, "")
+		}
+	}
+}
+
+func (m *ManagedRuntime) EvictMember(ctx context.Context, orgID, userID string, keepAllowedControl bool) {
+	if m == nil {
+		return
+	}
+	if keepAllowedControl {
+		if controlLeases != nil && m.store != nil {
+			session, err := controlLeases.ActiveOperatorSession(ctx, orgID, userID)
+			if err == nil && session.VehicleID != "" {
+				if allowed, enfErr := m.store.Enforce(ctx, userID, orgID, session.VehicleID, authorization.ActionRemoteControl); enfErr == nil && !allowed {
+					_, _ = controlLeases.RevokeOperatorControl(ctx, orgID, userID)
+				}
+			}
+		}
+		return
+	}
+	var controlledVehicle string
+	if controlLeases != nil {
+		controlledVehicle, _ = controlLeases.RevokeOperatorControl(ctx, orgID, userID)
+	}
+	if m.evictRoom != nil {
+		if controlledVehicle != "" {
+			m.evictRoom(ctx, controlledVehicle, userID)
+		}
+		if m.store != nil {
+			vehicles, err := m.store.ActiveOrganizationVehicles(ctx, orgID)
+			if err == nil {
+				for _, v := range vehicles {
+					if v.VehicleID != controlledVehicle {
+						m.evictRoom(ctx, v.VehicleID, userID)
+					}
+				}
+			}
+		}
+	}
 }
 
 // Fresh-identity transactions cannot revoke existing authority. Unlike the
@@ -679,4 +745,40 @@ func managedRoomDrainCheck(rawURL string) (func(context.Context) error, error) {
 		}
 		return nil
 	}, nil
+}
+
+func managedRoomEvictor(rawURL string) func(context.Context, string, string) {
+	endpoint, err := url.Parse(rawURL)
+	if err != nil || endpoint.Host == "" {
+		return nil
+	}
+	switch endpoint.Scheme {
+	case "ws":
+		endpoint.Scheme = "http"
+	case "wss":
+		endpoint.Scheme = "https"
+	}
+	service := livekit.NewRoomServiceProtobufClient(endpoint.String(), &http.Client{Timeout: 3 * time.Second})
+	return func(ctx context.Context, vehicleID, identity string) {
+		if lkApiKey == "" || lkApiSecret == "" || vehicleID == "" {
+			return
+		}
+		roomName := "teleop-" + vehicleID
+		token, err := auth.NewAccessToken(lkApiKey, lkApiSecret).
+			AddGrant(&auth.VideoGrant{RoomAdmin: true, RoomCreate: true, Room: roomName}).SetValidFor(30 * time.Second).ToJWT()
+		if err != nil {
+			return
+		}
+		headers := make(http.Header)
+		headers.Set("Authorization", "Bearer "+token)
+		reqCtx, err := twirp.WithHTTPRequestHeaders(ctx, headers)
+		if err != nil {
+			return
+		}
+		if identity == "" {
+			_, _ = service.DeleteRoom(reqCtx, &livekit.DeleteRoomRequest{Room: roomName})
+			return
+		}
+		_, _ = service.RemoveParticipant(reqCtx, &livekit.RoomParticipantIdentity{Room: roomName, Identity: identity})
+	}
 }

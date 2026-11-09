@@ -231,3 +231,78 @@ func (s *ControlLeaseStore) getSessionByID(ctx context.Context, sessionID string
 func controlSessionIndexKey(sessionID string) string {
 	return "control-session:" + sessionID
 }
+
+var purgeVehicleLeasesScript = redis.NewScript(`
+local raw = redis.call('GET', KEYS[1])
+if raw then
+  local ok, session = pcall(cjson.decode, raw)
+  if ok and type(session) == 'table' and type(session.session_id) == 'string' and session.session_id ~= '' then
+    redis.call('DEL', 'control-session:' .. session.session_id)
+  end
+end
+local hSession = redis.call('HGET', KEYS[2], 'session')
+if hSession then
+  local ok, session = pcall(cjson.decode, hSession)
+  if ok and type(session) == 'table' and type(session.session_id) == 'string' and session.session_id ~= '' then
+    redis.call('DEL', 'control-session:' .. session.session_id)
+  end
+end
+local opKey = redis.call('HGET', KEYS[2], 'operator_key')
+if opKey and opKey ~= '' then
+  redis.call('DEL', opKey)
+end
+local vRaw = redis.call('GET', KEYS[5])
+if vRaw then
+  local ok, vs = pcall(cjson.decode, vRaw)
+  if ok and type(vs) == 'table' and type(vs.session_id) == 'string' and vs.session_id ~= '' then
+    redis.call('DEL', 'video_viewer:' .. vs.session_id)
+  end
+end
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5])
+return 1
+`)
+
+func (s *ControlLeaseStore) PurgeVehicleLeases(ctx context.Context, vehicleID string) error {
+	if s == nil || s.client == nil || vehicleID == "" {
+		return nil
+	}
+	return purgeVehicleLeasesScript.Run(ctx, s.client, []string{
+		controlLeaseKey(vehicleID),
+		controlHandoverKey(vehicleID),
+		"viewing:" + vehicleID + ":active",
+		"viewing:" + vehicleID + ":demand",
+		videoSessionKey(vehicleID),
+	}).Err()
+}
+
+func (s *ControlLeaseStore) ActiveOperatorSession(ctx context.Context, tenant, operatorID string) (ControlSession, error) {
+	if s == nil || s.client == nil || tenant == "" || operatorID == "" {
+		return ControlSession{}, ErrControlSessionNotFound
+	}
+	sessionID, err := s.client.Get(ctx, operatorControlKey(tenant, operatorID)).Result()
+	if errors.Is(err, redis.Nil) || sessionID == "" {
+		return ControlSession{}, ErrControlSessionNotFound
+	}
+	if err != nil {
+		return ControlSession{}, err
+	}
+	return s.getSessionByID(ctx, sessionID)
+}
+
+func (s *ControlLeaseStore) RevokeOperatorControl(ctx context.Context, tenant, operatorID string) (string, error) {
+	session, err := s.ActiveOperatorSession(ctx, tenant, operatorID)
+	if errors.Is(err, ErrControlSessionNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if err := s.ReleaseControlSession(ctx, session.SessionID, session.OperatorID); err != nil && !errors.Is(err, ErrControlSessionNotFound) {
+		return "", err
+	}
+	if videoSessions != nil {
+		_, _ = videoSessions.ClearController(ctx, session.VehicleID, session.SessionID)
+	}
+	return session.VehicleID, nil
+}
+

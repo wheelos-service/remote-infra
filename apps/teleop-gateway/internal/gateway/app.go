@@ -122,7 +122,8 @@ func Run() {
 	mux := http.NewServeMux()
 	if managedRuntime != nil {
 		(&ManagedAdminAPI{Store: managedRuntime.store, TrustedIssuer: managedRuntime.issuer,
-			BeforeMutation: managedRuntime.BeforeMutation, OnboardingEnabled: onboarding != nil}).Register(mux, AuthenticationMiddleware)
+			BeforeMutation: managedRuntime.BeforeMutation, BeforeAdditive: managedRuntime.BeforeAdditive,
+			Runtime: managedRuntime, OnboardingEnabled: onboarding != nil}).Register(mux, AuthenticationMiddleware)
 		mux.HandleFunc("/rtc", managedRuntime.RTCIngress)
 		mux.HandleFunc("/rtc/", managedRuntime.RTCIngress)
 	} else {
@@ -234,7 +235,7 @@ func withCORS(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Organization-ID")
 			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, X-Error-Code")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 			w.Header().Set("Vary", "Origin")
 		}
 

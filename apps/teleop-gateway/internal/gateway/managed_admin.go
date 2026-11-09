@@ -17,6 +17,8 @@ type ManagedAdminAPI struct {
 	Store             *authorization.Store
 	TrustedIssuer     string
 	BeforeMutation    func(context.Context, string) (func(), error)
+	BeforeAdditive    func(context.Context, string) (func(), error)
+	Runtime           *ManagedRuntime
 	OnboardingEnabled bool
 }
 
@@ -24,12 +26,17 @@ func (api *ManagedAdminAPI) Register(mux *http.ServeMux, authenticate func(http.
 	for _, pattern := range []string{
 		"GET /api/organizations/context",
 		"GET /api/admin/context",
+		"POST /api/admin/organizations",
+		"DELETE /api/admin/organizations/{org_id}",
 		"GET /api/admin/organizations/{org_id}/people",
 		"POST /api/admin/organizations/{org_id}/people",
 		"POST /api/admin/organizations/{org_id}/members",
+		"DELETE /api/admin/organizations/{org_id}/members/{user_id}",
 		"GET /api/admin/organizations/{org_id}/vehicles",
 		"POST /api/admin/organizations/{org_id}/vehicles",
+		"DELETE /api/admin/organizations/{org_id}/vehicles/{vehicle_id}",
 		"POST /api/admin/organizations/{org_id}/assignments",
+		"DELETE /api/admin/organizations/{org_id}/assignments/{user_id}",
 	} {
 		mux.Handle(pattern, authenticate(http.HandlerFunc(api.serveHTTP)))
 	}
@@ -74,6 +81,55 @@ func (api *ManagedAdminAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}{result, api.OnboardingEnabled})
 		return
 	}
+	if r.URL.Path == "/api/admin/organizations" && r.Method == http.MethodPost {
+		var organization struct {
+			OrganizationID string `json:"org_id"`
+			Name           string `json:"name"`
+		}
+		if err := decodeManagedBody(w, r, &organization, "org_id", "name"); err != nil {
+			writeDiagnosticError(w, r, "expected a bounded JSON object with unique, recognized fields", "MANAGED_INVALID_REQUEST", http.StatusBadRequest)
+			return
+		}
+		if organization.OrganizationID == "" {
+			organization.OrganizationID = uuid.NewString()
+		}
+		if parsed, err := uuid.Parse(organization.OrganizationID); err != nil || parsed.String() != organization.OrganizationID {
+			writeDiagnosticError(w, r, "invalid organization ID", "MANAGED_INVALID_REQUEST", http.StatusBadRequest)
+			return
+		}
+		guard := api.BeforeAdditive
+		if guard == nil && api.Runtime != nil {
+			guard = api.Runtime.BeforeAdditive
+		}
+		if guard == nil {
+			guard = api.BeforeMutation
+		}
+		if guard == nil {
+			writeDiagnosticError(w, r, "management writes require a runtime drain guard", "MANAGED_DRAIN_UNAVAILABLE", http.StatusServiceUnavailable)
+			return
+		}
+		release, err := guard(r.Context(), organization.OrganizationID)
+		if err != nil {
+			if errors.Is(err, errManagedDrain) || errors.Is(err, errManagedMaintenance) {
+				writeDiagnosticError(w, r, err.Error(), "MANAGED_DRAIN_REQUIRED", http.StatusConflict)
+			} else {
+				writeDiagnosticError(w, r, "management drain verification is unavailable", "MANAGED_DRAIN_UNAVAILABLE", http.StatusServiceUnavailable)
+			}
+			return
+		}
+		if release == nil {
+			writeDiagnosticError(w, r, "management drain guard is unavailable", "MANAGED_DRAIN_UNAVAILABLE", http.StatusServiceUnavailable)
+			return
+		}
+		defer release()
+		result, err := api.Store.CreateOrganization(r.Context(), claims.UserID, organization.OrganizationID, organization.Name)
+		if err != nil {
+			managedAdminError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, result)
+		return
+	}
 	orgID := r.PathValue("org_id")
 	id, err := uuid.Parse(orgID)
 	if err != nil || id.String() != orgID {
@@ -110,19 +166,21 @@ func (api *ManagedAdminAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		Scope      authorization.Scope `json:"scope"`
 		VehicleIDs []string            `json:"vehicle_ids"`
 	}
-	switch r.Pattern {
-	case "POST /api/admin/organizations/{org_id}/members":
-		err = decodeManagedBody(w, r, &person, "subject")
-	case "POST /api/admin/organizations/{org_id}/people":
-		err = decodeManagedBody(w, r, &person, "name", "subject")
-	case "POST /api/admin/organizations/{org_id}/vehicles":
-		err = decodeManagedBody(w, r, &vehicle, "vehicle_id", "name", "subject")
-	default:
-		err = decodeManagedBody(w, r, &assignment, "user_id", "role", "scope", "vehicle_ids")
-	}
-	if err != nil {
-		writeDiagnosticError(w, r, "expected a bounded JSON object with unique, recognized fields", "MANAGED_INVALID_REQUEST", http.StatusBadRequest)
-		return
+	if r.Method == http.MethodPost {
+		switch r.Pattern {
+		case "POST /api/admin/organizations/{org_id}/members":
+			err = decodeManagedBody(w, r, &person, "subject")
+		case "POST /api/admin/organizations/{org_id}/people":
+			err = decodeManagedBody(w, r, &person, "name", "subject")
+		case "POST /api/admin/organizations/{org_id}/vehicles":
+			err = decodeManagedBody(w, r, &vehicle, "vehicle_id", "name", "subject")
+		default:
+			err = decodeManagedBody(w, r, &assignment, "user_id", "role", "scope", "vehicle_ids")
+		}
+		if err != nil {
+			writeDiagnosticError(w, r, "expected a bounded JSON object with unique, recognized fields", "MANAGED_INVALID_REQUEST", http.StatusBadRequest)
+			return
+		}
 	}
 	allowed, err := api.Store.CanManageOrganization(r.Context(), claims.UserID, orgID)
 	if err != nil {
@@ -154,6 +212,47 @@ func (api *ManagedAdminAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// Authorization is rechecked by the store transaction after acquiring the
 	// guard; a pre-guard administrator snapshot cannot authorize a stale write.
 	switch r.Pattern {
+	case "DELETE /api/admin/organizations/{org_id}":
+		vehicleIDs, err := api.Store.DisableOrganization(r.Context(), claims.UserID, orgID)
+		if err != nil {
+			managedAdminError(w, r, err)
+			return
+		}
+		if api.Runtime != nil {
+			api.Runtime.EvictVehicles(r.Context(), vehicleIDs)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "status": "disabled"})
+	case "DELETE /api/admin/organizations/{org_id}/members/{user_id}":
+		userID := r.PathValue("user_id")
+		if err := api.Store.RemoveOrganizationMember(r.Context(), claims.UserID, orgID, userID); err != nil {
+			managedAdminError(w, r, err)
+			return
+		}
+		if api.Runtime != nil {
+			api.Runtime.EvictMember(r.Context(), orgID, userID, false)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"user_id": userID, "status": "removed"})
+	case "DELETE /api/admin/organizations/{org_id}/vehicles/{vehicle_id}":
+		vehicleID := r.PathValue("vehicle_id")
+		if err := api.Store.RemoveVehicle(r.Context(), claims.UserID, orgID, vehicleID); err != nil {
+			managedAdminError(w, r, err)
+			return
+		}
+		if api.Runtime != nil {
+			api.Runtime.EvictVehicles(r.Context(), []string{vehicleID})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"vehicle_id": vehicleID, "status": "disabled"})
+	case "DELETE /api/admin/organizations/{org_id}/assignments/{user_id}":
+		userID := r.PathValue("user_id")
+		version, err := api.Store.RevokeManagedRole(r.Context(), claims.UserID, orgID, userID)
+		if err != nil {
+			managedAdminError(w, r, err)
+			return
+		}
+		if api.Runtime != nil {
+			api.Runtime.EvictMember(r.Context(), orgID, userID, false)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"user_id": userID, "authorization_version": version})
 	case "POST /api/admin/organizations/{org_id}/members":
 		result, err := api.Store.AddExistingMember(r.Context(), claims.UserID, orgID, api.TrustedIssuer, person.Subject)
 		if err != nil {
@@ -181,6 +280,9 @@ func (api *ManagedAdminAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			managedAdminError(w, r, err)
 			return
+		}
+		if api.Runtime != nil {
+			api.Runtime.EvictMember(r.Context(), orgID, assignment.UserID, true)
 		}
 		writeJSON(w, http.StatusOK, map[string]int64{"authorization_version": version})
 	}
