@@ -130,7 +130,7 @@ async function request(path: string, token: string, body?: unknown, signal?: Abo
       const detail = z.object({ error: z.string().optional(), code: z.string().optional(), request_id: z.string().optional() }).safeParse(data)
       const code = detail.success ? detail.data.code : undefined
       const message = code === 'MANAGED_DRAIN_REQUIRED'
-        ? '未保存：仍有活动视频/驾驶会话，或已签发令牌的 TTL 尚未到期。请安全结束会话并等待令牌过期后，手动重试；不会自动生效。'
+        ? '未保存：当前部署要求管理维护模式，且视频/驾驶会话与已签发令牌的 TTL 必须排空。请联系运维完成维护准备后手动重试；不会自动生效。'
         : response.status === 401 ? '登录已失效，请退出后重新登录。'
           : response.status === 403 ? '当前账号没有此组织的管理权限。'
             : (detail.success ? detail.data.error : text.trim()) || `管理请求失败 (${response.status})`

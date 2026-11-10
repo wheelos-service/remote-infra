@@ -405,7 +405,7 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
     }}>
       <fieldset disabled={disabled || busy} className="flex flex-wrap items-end gap-3">
         <label className="min-w-48 max-w-sm flex-1 text-sm">车辆名称 <input className={fieldClass} name="vehicle_name"
-          required maxLength={200} value={name} placeholder="例如 巡检车 01"
+          required maxLength={200} value={name} placeholder="CTZY001"
           onChange={event => changeDetails(event.target.value, userCode)} /></label>
         <label className="min-w-48 max-w-xs flex-1 text-sm">机器码 <input className={`${fieldClass} font-mono`} name="user_code"
           autoComplete="off" spellCheck={false} required maxLength={9} value={userCode} placeholder="ABCD-EFGH"
@@ -721,8 +721,8 @@ export default function Admin() {
             </div>
             <button className={buttonClass} disabled={loading || saving} onClick={() => { setError(''); setRevision(value => value + 1) }}><RefreshCw size={15} aria-hidden="true" />刷新列表</button>
           </div>
-          {tab === 'permissions' && <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200">
-            修改已有权限前，需由运维启用管理维护模式，并排空视频/控制会话、等待已签发令牌过期。修改被拒绝后不会自动生效。{context.onboarding_enabled && '新增人员和车辆不需要中断已有会话。'}
+          {tab === 'permissions' && <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-4 text-sm text-slate-300">
+            请以保存成功后的权限列表为准。若保存时提示需要维护排空，请联系运维处理后手动重试；被拒绝的修改不会自动生效。{context.onboarding_enabled && '新增人员和车辆不需要中断已有会话。'}
           </div>}
           {!context.onboarding_enabled && <p className="rounded-lg border border-amber-500/30 p-4 text-sm text-amber-200">手工预配试点：请先由平台运维在 Casdoor 创建身份，并核实可信 issuer 下的 subject，再创建绑定。本界面不是邀请流程，不生成账号密码、车辆凭据或密钥。保存前需维护排空。</p>}
           {context.onboarding_enabled && tab === 'vehicles' && <VehicleRegistration key={orgId + ':' + token}
