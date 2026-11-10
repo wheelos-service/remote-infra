@@ -472,12 +472,17 @@ test('device-code operations hide manual installation tickets while legacy opera
 const settle = () => new Promise(resolve => setImmediate(resolve))
 
 const enrollment = {
-  id: 'enrollment /1', name: 'Device Report', serial: 'SERIAL-42', platform: 'Apollo',
+  id: 'enrollment /1',
   fingerprint: 'SHA256:public-key-fingerprint', status: 'pending',
   created_at: '2026-11-07T01:00:00Z', expires_at: '2099-01-01T00:00:00Z', recovery: false,
 }
 const enrollmentProps = { orgId: 'org /1', token: 'admin-bearer', disabled: false, onDirectoryChange() {} }
-function enterEnrollmentCode(harness, code = 'abcd-efgh') {
+function enterEnrollmentName(harness, name) {
+  const tree = harness.render()
+  elements(tree, 'input').find(input => input.props.name === 'vehicle_name').props.onChange({ target: { value: name } })
+}
+function enterEnrollmentCode(harness, code = 'abcd-efgh', name = ' Verified Vehicle ') {
+  enterEnrollmentName(harness, name)
   const tree = harness.render()
   elements(tree, 'input').find(input => input.props.name === 'user_code').props.onChange({ target: { value: code } })
 }
@@ -485,7 +490,7 @@ function lookupEnrollment(harness) {
   elements(harness.render(), 'form')[0].props.onSubmit({ preventDefault() {} })
 }
 
-test('device enrollment lookup shows unverified reports and fresh approval sends only verified metadata', async () => {
+test('device enrollment needs no vehicle metadata and approval uses the administrator name', async () => {
   const original = globalThis.fetch
   const requests = []
   let refreshes = 0
@@ -496,7 +501,7 @@ test('device enrollment lookup shows unverified reports and fresh approval sends
       device_code: 'never-display-device-code', ticket: 'never-display-ticket', private_key: 'never-display-private-key',
     }), { status: url.endsWith('/approve') ? 202 : 200 })
   }
-  const harness = componentTree(DeviceEnrollmentPanel, { ...enrollmentProps, vehicleName: ' Verified Vehicle ', onDirectoryChange() { refreshes++ } })
+  const harness = componentTree(DeviceEnrollmentPanel, { ...enrollmentProps, onDirectoryChange() { refreshes++ } })
   try {
     harness.render(); harness.flushEffects()
     assert.equal(requests.length, 0, 'lookup must be explicit')
@@ -505,19 +510,19 @@ test('device enrollment lookup shows unverified reports and fresh approval sends
     enterEnrollmentCode(harness); lookupEnrollment(harness); await settle()
     let tree = harness.render(); harness.flushEffects()
     const html = renderTree(tree)
-    for (const value of ['Device Report', 'SERIAL-42', 'Apollo', enrollment.fingerprint, enrollment.created_at, enrollment.expires_at]) {
+    for (const value of [enrollment.fingerprint, enrollment.created_at, enrollment.expires_at]) {
       assert.ok(html.includes(value))
     }
-    assert.match(html, /信息由设备报告/)
-    assert.match(html, /车端名称/)
-    assert.match(html, /序列号（未核实）/)
-    assert.match(html, /平台（未核实）/)
+    assert.match(html, /核对机器码和公钥指纹/)
+    assert.doesNotMatch(html, /车端名称|序列号|平台（/)
     assert.match(html, /公钥 SHA256 指纹/)
     assert.doesNotMatch(html, /never-display-|device_code|private_key/)
     assert.deepEqual(requests[0].body, { user_code: 'ABCDEFGH' })
     assert.equal(requests[0].url, 'https://admin.test.invalid/api/admin/organizations/org%20%2F1/device-enrollments/lookup')
     assert.equal(requests[0].options.headers.Authorization, 'Bearer admin-bearer')
     assert.doesNotMatch(html, /name="vehicle_number"|name="name"/)
+    assert.equal(elements(tree, 'input').find(input => input.props.name === 'vehicle_name').props.value, ' Verified Vehicle ',
+      'lookup must preserve the administrator name')
     tree = harness.render()
     elements(tree, 'form')[1].props.onSubmit({ preventDefault() {} }); await settle()
     assert.deepEqual(requests[1].body, { name: 'Verified Vehicle' })
@@ -580,14 +585,14 @@ test('enrollment requests abort on organization switch, code change and unmount 
     assert.equal(requests[0].options.signal.aborted, true)
     requests[0].resolve(new Response(JSON.stringify(enrollment))); await settle()
     tree = harness.render()
-    assert.doesNotMatch(renderTree(tree), /SERIAL-42|批准接入新车辆/)
+    assert.doesNotMatch(renderTree(tree), /SHA256:public-key-fingerprint|批准接入新车辆/)
     enterEnrollmentCode(harness); lookupEnrollment(harness)
     requests[1].resolve(new Response(JSON.stringify(enrollment))); await settle()
     tree = harness.render(); harness.flushEffects()
     const oldApproval = elements(tree, 'form')[1].props.onSubmit
     // Even before organization effects flush, old details and callbacks are invalid.
     tree = harness.render({ ...enrollmentProps, orgId: 'third-org' })
-    assert.doesNotMatch(renderTree(tree), /SERIAL-42/)
+    assert.doesNotMatch(renderTree(tree), /SHA256:public-key-fingerprint/)
     oldApproval({ preventDefault() {} }); await settle()
     assert.equal(requests.length, 2)
     harness.flushEffects()
@@ -595,7 +600,7 @@ test('enrollment requests abort on organization switch, code change and unmount 
     enterEnrollmentCode(harness, 'JKLM-NPQR')
     assert.equal(requests[2].options.signal.aborted, true)
     requests[2].resolve(new Response(JSON.stringify(enrollment))); await settle()
-    assert.doesNotMatch(renderTree(harness.render()), /SERIAL-42/)
+    assert.doesNotMatch(renderTree(harness.render()), /SHA256:public-key-fingerprint/)
     lookupEnrollment(harness)
     assert.deepEqual(JSON.parse(requests[3].options.body), { user_code: 'JKLMNPQR' })
     harness.unmount()
@@ -657,7 +662,7 @@ test('approved enrollment discovers a failed provisioning task after an empty pr
     panel.render(); panel.flushEffects()
     enterEnrollmentCode(panel); lookupEnrollment(panel); await settle()
     const panelTree = panel.render()
-    assert.match(renderTree(panelTree), /输入车端注册码/)
+    assert.match(renderTree(panelTree), /机器码/)
     assert.match(renderTree(panelTree), /enrollment-op/)
     assert.match(renderTree(panelTree), /下方“接入与邀请进度”.*重试失败任务.*无需重新批准/)
     assert.equal(elements(panelTree, 'fieldset')[1].props.disabled, true)
@@ -811,53 +816,88 @@ test('installation tickets are explicit, transient, expire, and never reach pers
   }
 })
 
-test('bootstrap JSON matches the vehicle contract and contains only server defaults and the name', () => {
-  const settings = { gateway_url: 'https://api.example.test', console_url: 'https://console.example.test', platform: 'apollo' }
-  assert.deepEqual(JSON.parse(vehicleBootstrapJSON({ ...settings, name: ' Vehicle 01 ' })), {
-    ...settings, name: 'Vehicle 01', serial: '', state_directory: '/var/lib/teleop/bootstrap',
+test('bootstrap JSON contains only endpoints, protected paths and safety flags', () => {
+  const settings = { gateway_url: 'https://api.example.test', console_url: 'https://console.example.test' }
+  assert.deepEqual(JSON.parse(vehicleBootstrapJSON(settings)), {
+    ...settings, state_directory: '/var/lib/teleop/bootstrap',
     device_template: '/etc/teleop/device.template.json', device_config: '/etc/teleop/device.json',
     allow_insecure_localhost: false, allow_legacy_complete_404: false,
   })
-  for (const change of [{ name: '' }, { name: 'bad\nname' }, { client_secret: 'must-not-copy' },
+  for (const change of [{ name: 'Vehicle' }, { serial: 'SN' }, { platform: 'apollo' }, { client_secret: 'must-not-copy' },
     { gateway_url: 'http://remote.example' }, { console_url: 'https://u:p@example.test' }]) {
-    assert.throws(() => vehicleBootstrapJSON({ ...settings, name: 'Vehicle', ...change }))
+    assert.throws(() => vehicleBootstrapJSON({ ...settings, ...change }))
   }
 })
 
-test('vehicle registration loads server endpoints automatically, asks only for a name, and cancels stale setup', async () => {
+test('vehicle registration asks for a name and machine code without loading or copying bootstrap JSON', async () => {
   const original = globalThis.fetch
   const requests = []
-  const settings = { gateway_url: 'https://api.example.test', console_url: 'https://console.example.test', platform: 'apollo' }
   globalThis.fetch = async (url, options) => {
     requests.push({ url, options })
-    return new Response(JSON.stringify(settings))
+    throw new Error('registration form must not fetch setup')
   }
   const harness = componentTree(VehicleRegistration, enrollmentProps)
   try {
     harness.render(); harness.flushEffects(); await settle()
-    let tree = harness.render()
-    assert.equal(elements(tree, 'input').length, 1)
+    const tree = harness.render()
+    const html = renderTree(tree)
+    assert.equal((html.match(/<input /g) || []).length, 2)
+    assert.match(html, /车辆名称/)
+    assert.match(html, /机器码/)
+    assert.match(html, /核对车辆/)
+    assert.doesNotMatch(html, /bootstrap|gateway_url|console_url|复制配置|读取服务器配置/)
     assert.equal(elements(tree, CopyText).length, 0)
-    assert.equal(elements(tree, DeviceEnrollmentPanel)[0].props.disabled, true)
-    elements(tree, 'input')[0].props.onChange({ target: { value: 'Vehicle 01' } })
-    tree = harness.render()
-    assert.deepEqual(JSON.parse(elements(tree, CopyText)[0].props.value), JSON.parse(vehicleBootstrapJSON({ ...settings, name: 'Vehicle 01' })))
-    assert.equal(elements(tree, DeviceEnrollmentPanel)[0].props.vehicleName, 'Vehicle 01')
     assert.equal(elements(tree, DeviceEnrollmentPanel)[0].props.disabled, false)
-    assert.match(requests[0].url, /org%20%2F1\/device-enrollments\/setup$/)
-    assert.equal(requests[0].options.cache, 'no-store')
-    assert.equal(requests[0].options.headers.Authorization, 'Bearer admin-bearer')
-    let resolve
-    globalThis.fetch = async (_url, options) => {
-      requests.push({ options })
-      return new Promise(done => { resolve = done })
+    const disabled = harness.render({ ...enrollmentProps, disabled: true })
+    assert.equal(elements(disabled, DeviceEnrollmentPanel)[0].props.disabled, true)
+    assert.equal(requests.length, 0)
+  } finally { harness.unmount(); globalThis.fetch = original }
+})
+
+test('registration rejects missing, control-character and overlong vehicle names before lookup or approval', async () => {
+  const original = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = async () => { calls++; return new Response(JSON.stringify(enrollment)) }
+  const harness = componentTree(DeviceEnrollmentPanel, enrollmentProps)
+  try {
+    harness.render(); harness.flushEffects()
+    for (const name of ['', '   ', 'bad\nname', '车'.repeat(67)]) {
+      enterEnrollmentCode(harness, 'ABCD-EFGH', name)
+      lookupEnrollment(harness); await settle()
+      assert.match(renderTree(harness.render()), /role="alert"/)
+      await assert.rejects(() => api.approveDeviceEnrollment('org', 'admin-bearer', enrollment, { name }))
     }
-    harness.render({ ...enrollmentProps, orgId: 'other-org' }); harness.flushEffects()
-    assert.equal(elements(harness.render(), CopyText).length, 0)
-    harness.unmount()
-    assert.equal(requests.at(-1).options.signal.aborted, true)
-    resolve(new Response(JSON.stringify(settings))); await settle()
-    assert.equal(elements(harness.render(), CopyText).length, 0)
+    assert.equal(calls, 0)
+    enterEnrollmentCode(harness, 'ABCD-EFGH', '车'.repeat(66))
+    lookupEnrollment(harness); await settle()
+    assert.equal(calls, 1)
+  } finally { harness.unmount(); globalThis.fetch = original }
+})
+
+test('editing the vehicle name cancels stale lookup and requires a fresh confirmation before approval', async () => {
+  const original = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, options) => new Promise(resolve => requests.push({ url, options, resolve }))
+  const harness = componentTree(DeviceEnrollmentPanel, enrollmentProps)
+  try {
+    harness.render(); harness.flushEffects()
+    enterEnrollmentCode(harness); lookupEnrollment(harness)
+    enterEnrollmentName(harness, 'Changed name')
+    assert.equal(requests[0].options.signal.aborted, true)
+    requests[0].resolve(new Response(JSON.stringify(enrollment))); await settle()
+    assert.doesNotMatch(renderTree(harness.render()), /SHA256:public-key-fingerprint/)
+    lookupEnrollment(harness)
+    requests[1].resolve(new Response(JSON.stringify(enrollment))); await settle()
+    const oldApproval = elements(harness.render(), 'form')[1].props.onSubmit
+    enterEnrollmentName(harness, 'Final name')
+    oldApproval({ preventDefault() {} }); await settle()
+    assert.equal(requests.length, 2, 'a stale callback must not approve an old name')
+    assert.equal(elements(harness.render(), 'form').length, 1)
+    lookupEnrollment(harness)
+    requests[2].resolve(new Response(JSON.stringify(enrollment))); await settle()
+    elements(harness.render(), 'form')[1].props.onSubmit({ preventDefault() {} })
+    assert.deepEqual(JSON.parse(requests[3].options.body), { name: 'Final name' })
+    requests[3].resolve(new Response(JSON.stringify({ ...enrollment, status: 'approved' }))); await settle()
   } finally { harness.unmount(); globalThis.fetch = original }
 })
 

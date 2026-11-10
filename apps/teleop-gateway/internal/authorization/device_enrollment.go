@@ -19,10 +19,11 @@ var (
 )
 
 type DeviceEnrollment struct {
-	ID                   string    `json:"id"`
-	Name                 string    `json:"name"`
-	Serial               string    `json:"serial"`
-	Platform             string    `json:"platform"`
+	ID string `json:"id"`
+	// Retain historical v1 metadata for idempotent retries across SDK upgrades.
+	Name                 string    `json:"-"`
+	Serial               string    `json:"-"`
+	Platform             string    `json:"-"`
 	Status               string    `json:"status"`
 	CreatedAt            time.Time `json:"created_at"`
 	ExpiresAt            time.Time `json:"expires_at"`
@@ -98,8 +99,8 @@ func isCanonicalUUID(id string) bool {
 
 func (s *Store) CreateDeviceEnrollment(ctx context.Context, in DeviceEnrollment) (DeviceEnrollment, error) {
 	if !isCanonicalUUID(in.ID) || len(in.PublicKey) != 32 || len(in.DeviceCodeHash) != 32 ||
-		len(in.DeviceCodeCiphertext) < 28 || len(in.UserCode) != 8 || !validText(in.Name, 200) ||
-		(in.Serial != "" && !validText(in.Serial, 128)) || !validText(in.Platform, 128) {
+		len(in.DeviceCodeCiphertext) < 28 || len(in.UserCode) != 8 || (in.Name != "" && !validText(in.Name, 200)) ||
+		(in.Serial != "" && !validText(in.Serial, 128)) || (in.Platform != "" && !validText(in.Platform, 128)) {
 		return DeviceEnrollment{}, ErrEnrollmentInvalid
 	}
 	tx, err := s.beginWriteTx(ctx)

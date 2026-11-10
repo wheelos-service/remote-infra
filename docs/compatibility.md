@@ -25,8 +25,8 @@ The shared library no longer depends on either legacy runtime.
 The opt-in [managed authorization pilot](auth-management.md) is a new,
 single-Gateway deployment mode, not a transparent import of legacy JWT roles
 or static ACLs. Its `/#/admin` UI supports opt-in automatic Casdoor onboarding,
-using Casdoor signup invitation links without email, automatically generated
-vehicle bootstrap JSON and registration-code approval, with manually verified
+using Casdoor signup invitation links without email and vehicle-name/machine-code
+approval after [vehicle-side bootstrap setup](add-vehicle.md), with manually verified
 identity bindings as the fallback, fixed business roles
 and vehicle ranges. Fresh automatic onboarding may run online; existing rights
 changes retain the maintenance/drain boundary. Default static mode remains
@@ -41,6 +41,15 @@ Opt-in managed onboarding also exposes proof-authenticated
 organization approval endpoints. These do not replace machine OAuth,
 vehicle-ID matching, control leases or the legacy manual installer; see
 [device-code registration](auth-management.md#vehicle-initiated-device-code-registration-no-client-certificate).
+The machine code is the existing enrollment `user_code`. Bootstrap configuration
+and new vehicle requests omit `name`, `serial`, and `platform`; the administrator
+names the vehicle at approval. The v1 signature retains three empty metadata
+slots, and legacy signed creation requests remain accepted for pending-request
+retries. Existing keys, credentials, and database history are preserved.
+Lookup responses now contain identity/status details without retired metadata,
+and the manager-only setup endpoint returns only Gateway/console URLs. Deploy
+the updated frontend and Gateway before the SDK; older Gateways reject creation
+without a name/platform. Existing bootstrap files remain readable by the new SDK.
 
 | Surface | Use | Compatibility rule |
 | --- | --- | --- |

@@ -8,16 +8,12 @@ const endpoint = z.string().max(2048).url().refine(value => {
       && !/[\s?#]/.test(value) && !/^https:\/\/[^/]*@/.test(value)
   } catch { return false }
 }, '请使用不含凭据、查询参数或片段的 HTTPS 地址')
-const text = (limit: number) => z.string().trim().min(1, '请填写车辆信息')
-  .refine(value => !/[\x00-\x1f\x7f]/.test(value) && new TextEncoder().encode(value).length <= limit, '字段包含控制字符或过长')
-
 export const vehicleSetupDefaultsSchema = z.object({
-  gateway_url: endpoint, console_url: endpoint, platform: text(128),
+  gateway_url: endpoint, console_url: endpoint,
 })
 export type VehicleSetupDefaults = z.infer<typeof vehicleSetupDefaultsSchema>
 export const vehicleBootstrapInputSchema = z.object({
   gateway_url: endpoint, console_url: endpoint,
-  name: text(200), serial: z.union([z.literal(''), text(128)]).default(''), platform: text(128),
 }).strict()
 
 export function vehicleBootstrapJSON(input: unknown): string {

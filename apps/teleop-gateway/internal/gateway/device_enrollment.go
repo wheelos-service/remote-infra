@@ -21,11 +21,13 @@ import (
 )
 
 type enrollmentProof struct {
-	RequestID  string `json:"request_id"`
-	PublicKey  string `json:"public_key"`
-	Name       string `json:"name"`
-	Serial     string `json:"serial"`
-	Platform   string `json:"platform"`
+	RequestID string `json:"request_id"`
+	PublicKey string `json:"public_key"`
+	// Legacy v1 metadata remains signature-bound for older clients and retries.
+	// New vehicles omit these fields; the administrator names the vehicle.
+	Name       string `json:"name,omitempty"`
+	Serial     string `json:"serial,omitempty"`
+	Platform   string `json:"platform,omitempty"`
 	DeviceCode string `json:"device_code"`
 	Ticket     string `json:"ticket"`
 	Timestamp  int64  `json:"timestamp"`
@@ -34,6 +36,7 @@ type enrollmentProof struct {
 }
 
 func (p enrollmentProof) message(action string) string {
+	// Retain the three empty metadata slots in the v1 signing format.
 	return strings.Join([]string{"teleop-enrollment-v1", action, p.RequestID, p.PublicKey, p.Name, p.Serial,
 		p.Platform, p.DeviceCode, p.Ticket, strconv.FormatInt(p.Timestamp, 10), p.Nonce}, "\n")
 }
@@ -64,7 +67,8 @@ func (p enrollmentProof) verify(action string, now time.Time) ([]byte, bool) {
 	}
 	switch action {
 	case "create":
-		if !enrollmentText(p.Name, 200) || (p.Serial != "" && !enrollmentText(p.Serial, 128)) || !enrollmentText(p.Platform, 128) || p.DeviceCode != "" || p.Ticket != "" {
+		if (p.Name != "" && !enrollmentText(p.Name, 200)) || (p.Serial != "" && !enrollmentText(p.Serial, 128)) ||
+			(p.Platform != "" && !enrollmentText(p.Platform, 128)) || p.DeviceCode != "" || p.Ticket != "" {
 			return nil, false
 		}
 	case "poll", "complete":
@@ -349,7 +353,7 @@ func (s *OnboardingService) completeDeviceEnrollment(w http.ResponseWriter, r *h
 
 func enrollmentView(e authorization.DeviceEnrollment) map[string]any {
 	hash := sha256.Sum256(e.PublicKey)
-	return map[string]any{"id": e.ID, "name": e.Name, "serial": e.Serial, "platform": e.Platform,
+	return map[string]any{"id": e.ID,
 		"status": e.Status, "fingerprint": "SHA256:" + hex.EncodeToString(hash[:]), "recovery": e.Recovery,
 		"created_at": e.CreatedAt, "expires_at": e.ExpiresAt, "vehicle_id": e.VehicleID, "operation_id": e.OperationID}
 }
@@ -557,5 +561,5 @@ func (s *OnboardingService) serveEnrollmentSetup(w http.ResponseWriter, r *http.
 	if console == "" {
 		console = s.config.GatewayURL
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"gateway_url": s.config.GatewayURL, "console_url": console, "platform": "apollo"})
+	writeJSON(w, http.StatusOK, map[string]string{"gateway_url": s.config.GatewayURL, "console_url": console})
 }

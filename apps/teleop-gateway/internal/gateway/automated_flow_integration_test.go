@@ -253,14 +253,14 @@ func TestAutomatedOnboardingActualFlow(t *testing.T) {
 	call("POST", "/api/vehicles/"+enrolledVehicle+"/installation-complete", granted.AccessToken, map[string]any{}, 204)
 	call("POST", "/api/v1/device-enrollments/complete", "", signEnrollment(enrollment, "complete", privateKey), 404)
 	if os.Getenv("VEHICLE_BOOTSTRAP_TEST_BINARY") != "" {
-		client := newVehicleBootstrapClient(t, server.URL, "ACTUAL-CPP-SN")
+		client := newVehicleBootstrapClient(t, server.URL)
 		bootstrapLoss.complete.Store(true)
 		bootstrapLoss.ack.Store(true)
 		began := time.Now()
 		process := client.start(75 * time.Second)
 		var enrollmentID, userCode string
 		waitForBootstrap(t, 12*time.Second, "actual Casdoor device approval", func() bool {
-			return f.db.QueryRow(`SELECT enrollment_id,user_code FROM authz_device_enrollments WHERE serial='ACTUAL-CPP-SN'`).Scan(&enrollmentID, &userCode) == nil
+			return f.db.QueryRow(`SELECT enrollment_id,user_code FROM authz_device_enrollments WHERE enrollment_id=$1`, client.enrollmentID()).Scan(&enrollmentID, &userCode) == nil
 		})
 		call("POST", enrollmentAdmin+"/lookup", adminToken, map[string]any{"user_code": userCode}, 200)
 		approval := call("POST", enrollmentAdmin+"/"+enrollmentID+"/approve", adminToken,
@@ -351,7 +351,7 @@ func TestAutomatedOnboardingActualFlow(t *testing.T) {
 			t.Fatal("old credential still obtained a grant after recovery approval")
 		}
 		var requests, operations int
-		if err := f.db.QueryRow(`SELECT count(*) FROM authz_device_enrollments WHERE serial='ACTUAL-CPP-SN'`).Scan(&requests); err != nil || requests != 2 {
+		if err := f.db.QueryRow(`SELECT count(*) FROM authz_device_enrollments WHERE public_key=(SELECT public_key FROM authz_device_enrollments WHERE enrollment_id=$1)`, enrollmentID).Scan(&requests); err != nil || requests != 2 {
 			t.Fatal("actual recovery or restart repeatedly refreshed the device code")
 		}
 		if err := f.db.QueryRow(`SELECT count(*) FROM authz_onboarding_operations WHERE vehicle_id=$1`, config["vehicle_id"]).Scan(&operations); err != nil || operations != 1 {

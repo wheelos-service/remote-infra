@@ -9,11 +9,10 @@ import {
   onboardingInputSchema, onboardingNeedsPolling, onboardingStatusLabel, registrationLinkAvailable,
   type OnboardingInput, type OnboardingOperation, type InstallationTicket,
   addExistingMember,
-  lookupDeviceEnrollment, approveDeviceEnrollment, denyDeviceEnrollment, enrollmentUserCodeSchema,
+  lookupDeviceEnrollment, approveDeviceEnrollment, denyDeviceEnrollment, enrollmentUserCodeSchema, deviceEnrollmentApprovalSchema,
   type DeviceEnrollment,
-  fetchVehicleSetupDefaults, fetchRegistrationLink, type RegistrationLink,
+  fetchRegistrationLink, type RegistrationLink,
 } from '../lib/admin-api'
-import { vehicleBootstrapJSON, type VehicleSetupDefaults } from '../lib/vehicle-bootstrap'
 
 const fieldClass = 'w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20'
 const buttonClass = 'inline-flex items-center justify-center gap-2 rounded-lg border border-slate-600 px-3 py-2 text-sm transition hover:border-sky-400 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400 disabled:cursor-not-allowed disabled:opacity-40'
@@ -59,7 +58,7 @@ export function AdminDirectory({ tab, people, vehicles, query, onEdit }: {
   const count = tab === 'vehicles' ? filteredVehicles.length : filteredPeople.length
   if (!count) return <div className="rounded-xl border border-dashed border-slate-700 px-6 py-12 text-center">
     <p className="font-medium">{search ? '没有匹配的记录' : tab === 'vehicles' ? '还没有登记车辆' : '还没有组织人员'}</p>
-    <p className="mt-2 text-sm text-slate-400">{search ? '尝试其他名称或编号，或清空搜索。' : tab === 'vehicles' ? '填写车辆名称，复制配置到车端，再输入注册码。' : '填写用户名和角色，复制注册链接发送给用户。'}</p>
+    <p className="mt-2 text-sm text-slate-400">{search ? '尝试其他名称或编号，或清空搜索。' : tab === 'vehicles' ? '填写车辆名称和车端生成的机器码，完成注册。' : '填写用户名和角色，复制注册链接发送给用户。'}</p>
   </div>
   return <div className="overflow-x-auto rounded-xl border border-slate-800">
     <table className="w-full min-w-[700px] text-left text-sm">
@@ -331,62 +330,31 @@ export function CopyText({ value, label }: { value: string; label: string }) {
 export function VehicleRegistration(props: {
   orgId: string; token: string; disabled: boolean; onDirectoryChange: () => void; onOperationFound?: (id: string) => void
 }) {
-  const [name, setName] = useState('')
-  const [defaults, setDefaults] = useState<VehicleSetupDefaults>()
-  const [error, setError] = useState('')
-  const [revision, setRevision] = useState(0)
-  useEffect(() => {
-    const controller = new AbortController()
-    setDefaults(undefined); setError('')
-    void fetchVehicleSetupDefaults(props.orgId, props.token, controller.signal).then(value => {
-      if (!controller.signal.aborted) setDefaults(value)
-    }).catch(cause => { if (!controller.signal.aborted) setError(adminErrorMessage(cause)) })
-    return () => controller.abort()
-  }, [props.orgId, props.token, revision])
-  let bootstrap = ''
-  if (defaults && name.trim()) {
-    try { bootstrap = vehicleBootstrapJSON({ ...defaults, name, serial: '' }) } catch { /* Invalid input cannot be copied. */ }
-  }
   return <section className="space-y-5 rounded-xl border border-slate-700 bg-slate-900/60 p-5">
     <h2 className="font-medium text-sky-200">注册车辆</h2>
-    <label className="block max-w-xl space-y-2 text-sm"><span>1. 车辆名称</span>
-      <input className={fieldClass} name="vehicle_name" required maxLength={200} value={name}
-        disabled={props.disabled} placeholder="例如 巡检车 01" onChange={event => setName(event.target.value)} />
-    </label>
-    <div className="max-w-2xl space-y-3">
-      <h3 className="text-sm">2. 复制配置到车辆</h3>
-      <p className="text-sm text-slate-400">保存为 <code>/etc/teleop/bootstrap.json</code>，运行车端 bootstrap，然后回填注册码。</p>
-      {error ? <><AdminNotice error={error} /><button className={buttonClass} onClick={() => setRevision(value => value + 1)}>重新加载配置</button></>
-        : !defaults ? <p role="status" className="text-sm text-slate-400">正在读取服务器配置…</p>
-          : bootstrap ? <CopyText value={bootstrap} label="复制 bootstrap JSON" />
-            : <p className="text-sm text-slate-400">填写车辆名称后自动生成配置。</p>}
-      <details className="text-xs text-slate-400"><summary className="cursor-pointer">车端运行命令</summary>
-        <pre className="mt-2 overflow-x-auto rounded bg-slate-950 p-3">sudo /usr/local/libexec/vehicle_bootstrap --config /etc/teleop/bootstrap.json</pre>
-      </details>
-    </div>
-    <DeviceEnrollmentPanel {...props} vehicleName={name} disabled={props.disabled || !bootstrap} />
+    <p className="text-sm text-slate-400">先在车端完成配置并运行注册程序，再填写车辆名称和生成的机器码。</p>
+    <DeviceEnrollmentPanel {...props} />
   </section>
 }
 
-export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChange, onOperationFound, vehicleName }: {
+export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChange, onOperationFound }: {
   orgId: string; token: string; disabled: boolean; onDirectoryChange: () => void; onOperationFound?: (id: string) => void
-  vehicleName?: string
 }) {
   const [userCode, setUserCode] = useState('')
-  const [result, setResult] = useState<{ orgId: string; token: string; code: string; record: DeviceEnrollment }>()
+  const [result, setResult] = useState<{ orgId: string; token: string; code: string; name: string; record: DeviceEnrollment }>()
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [, setClock] = useState(0)
   const request = useRef<AbortController | undefined>(undefined)
-  const scope = useRef({ orgId, token, code: userCode, disabled })
-  scope.current = { orgId, token, code: userCode, disabled }
+  const scope = useRef({ orgId, token, code: userCode, name, disabled })
+  scope.current = { orgId, token, code: userCode, name, disabled }
   useEffect(() => {
     request.current?.abort(); request.current = undefined
     setUserCode(''); setResult(undefined); setName(''); setBusy(false); setError('')
     return () => { request.current?.abort(); request.current = undefined }
   }, [orgId, token])
-  const record = result?.orgId === orgId && result.token === token && result.code === userCode ? result.record : undefined
+  const record = result?.orgId === orgId && result.token === token && result.code === userCode && result.name === name ? result.record : undefined
   const expiresAt = record ? Date.parse(record.expires_at) : NaN
   const pending = record?.status === 'pending' && Number.isFinite(expiresAt) && expiresAt > Date.now()
   useEffect(() => {
@@ -396,16 +364,16 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
   }, [record, expiresAt])
   const run = async (code: string, operation: (signal: AbortSignal) => Promise<DeviceEnrollment>, refresh = false) => {
     if (disabled || scope.current.disabled || request.current || scope.current.orgId !== orgId
-      || scope.current.token !== token || scope.current.code !== code) return
+      || scope.current.token !== token || scope.current.code !== code || scope.current.name !== name) return
     const controller = new AbortController()
     request.current = controller
     setBusy(true); setError('')
     const current = () => !controller.signal.aborted && request.current === controller
-      && scope.current.orgId === orgId && scope.current.token === token && scope.current.code === code
+      && scope.current.orgId === orgId && scope.current.token === token && scope.current.code === code && scope.current.name === name
     try {
       const next = await operation(controller.signal)
       if (!current()) return
-      setResult({ orgId, token, code, record: next }); setName(next.name)
+      setResult({ orgId, token, code, name, record: next })
       if (next.operation_id) onOperationFound?.(next.operation_id)
       if (refresh) onDirectoryChange()
     } catch (cause) {
@@ -414,6 +382,11 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
       if (current()) { request.current = undefined; setBusy(false) }
     }
   }
+  const changeDetails = (nextName: string, nextCode: string) => {
+    request.current?.abort(); request.current = undefined
+    scope.current.name = nextName; scope.current.code = nextCode
+    setName(nextName); setUserCode(nextCode); setResult(undefined); setError(''); setBusy(false)
+  }
   const status = record && ({
     pending: pending ? '等待审批' : '已过期，不能审批', approved: '已批准，等待设备完成接入',
     provisioning: '已批准，正在配置车辆身份', awaiting_install: '已批准，等待设备完成安装',
@@ -421,22 +394,24 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
     denied: '已拒绝', expired: '已过期', active: '注册完成',
   } as Record<string, string>)[record.status]
   return <section className="space-y-3">
-    <h3 className="text-sm">3. 输入车端注册码</h3>
     <form onSubmit={event => {
       event.preventDefault()
+      const vehicle = deviceEnrollmentApprovalSchema.safeParse({ name })
+      if (!vehicle.success) { setError(vehicle.error.issues[0]?.message || '请检查车辆名称。'); return }
       const parsed = enrollmentUserCodeSchema.safeParse(userCode)
-      if (!parsed.success) { setError(parsed.error.issues[0]?.message || '请检查申请码。'); return }
+      if (!parsed.success) { setError(parsed.error.issues[0]?.message || '请检查机器码。'); return }
       setResult(undefined)
       void run(userCode, signal => lookupDeviceEnrollment(orgId, token, parsed.data, signal))
     }}>
       <fieldset disabled={disabled || busy} className="flex flex-wrap items-end gap-3">
-        <label className="max-w-xs flex-1 text-sm">注册码 <input className={`${fieldClass} font-mono`} name="user_code"
+        <label className="min-w-48 max-w-sm flex-1 text-sm">车辆名称 <input className={fieldClass} name="vehicle_name"
+          required maxLength={200} value={name} placeholder="例如 巡检车 01"
+          onChange={event => changeDetails(event.target.value, userCode)} /></label>
+        <label className="min-w-48 max-w-xs flex-1 text-sm">机器码 <input className={`${fieldClass} font-mono`} name="user_code"
           autoComplete="off" spellCheck={false} required maxLength={9} value={userCode} placeholder="ABCD-EFGH"
           onChange={event => {
-            request.current?.abort(); request.current = undefined
             const code = event.target.value.trim().replace(/-/g, '').toUpperCase()
-            scope.current.code = code
-            setUserCode(code); setResult(undefined); setName(''); setError(''); setBusy(false)
+            changeDetails(name, code)
           }} /></label>
         <button type="submit" className={buttonClass}>核对车辆</button>
       </fieldset>
@@ -444,12 +419,9 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
     {busy && <p role="status" className="text-sm">正在处理，请勿重复操作…</p>}
     {error && <AdminNotice error={error} />}
     {record && <div className="space-y-3 text-sm">
-      <p>车端名称：<strong>{record.name}</strong> · {record.platform}</p>
       <details className="text-xs text-slate-400"><summary className="cursor-pointer">核对设备详情</summary>
-      <p className="mt-2">信息由设备报告，请与车端核对公钥指纹。</p>
+      <p className="mt-2">请与车端核对机器码和公钥指纹。</p>
       <dl className="mt-2 grid gap-2 break-all sm:grid-cols-2">
-        <div><dt className="text-slate-400">序列号（未核实）</dt><dd>{record.serial || '未提供'}</dd></div>
-        <div><dt className="text-slate-400">平台（未核实）</dt><dd>{record.platform || '未提供'}</dd></div>
         <div><dt className="text-slate-400">公钥 SHA256 指纹</dt><dd className="font-mono">{record.fingerprint}</dd></div>
         <div><dt className="text-slate-400">申请时间</dt><dd>{record.created_at}</dd></div>
         <div><dt className="text-slate-400">到期时间</dt><dd>{record.expires_at}</dd></div>
@@ -467,7 +439,7 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
         event.preventDefault()
         if (!pending || Date.parse(record.expires_at) <= Date.now()) return
         void run(userCode, signal => approveDeviceEnrollment(orgId, token, record,
-          record.recovery ? undefined : { name: vehicleName?.trim() || name }, signal), true)
+          record.recovery ? undefined : { name }, signal), true)
       }}>
         <fieldset disabled={disabled || busy || !pending} className="flex flex-col gap-3">
           <div className="flex gap-3">
@@ -743,7 +715,7 @@ export default function Admin() {
           </form></details>}
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div><h2 className="text-lg font-semibold">{adminTabs.find(item => item.id === tab)?.label}</h2>
-              <p className="mt-1 max-w-2xl text-sm text-slate-400">{tab === 'vehicles' ? '填写名称，复制车端配置，再输入注册码完成登记。'
+              <p className="mt-1 max-w-2xl text-sm text-slate-400">{tab === 'vehicles' ? '填写车辆名称和车端生成的机器码，核对后完成注册。'
                 : tab === 'people' ? '填写用户名和角色，发送链接，由用户完成注册。'
                   : '选择人员、设置角色和操作车辆范围。认证由 Casdoor 负责，业务权限由 Gateway 统一执行。'}</p>
             </div>

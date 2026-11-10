@@ -33,7 +33,7 @@ type vehicleBootstrapProcess struct {
 	child  *os.Process
 }
 
-func newVehicleBootstrapClient(t *testing.T, gatewayURL, serial string) *vehicleBootstrapClient {
+func newVehicleBootstrapClient(t *testing.T, gatewayURL string) *vehicleBootstrapClient {
 	t.Helper()
 	binary := os.Getenv("VEHICLE_BOOTSTRAP_TEST_BINARY")
 	if binary == "" {
@@ -50,7 +50,6 @@ func newVehicleBootstrapClient(t *testing.T, gatewayURL, serial string) *vehicle
 		t.Fatal(err)
 	}
 	c.write("bootstrap.json", map[string]any{"gateway_url": gatewayURL, "console_url": gatewayURL,
-		"name": "C++ bootstrap test", "serial": serial, "platform": "test",
 		"state_directory": "state", "device_template": "template.json", "device_config": "device.json",
 		"allow_insecure_localhost": true, "allow_legacy_complete_404": false})
 	c.write("template.json", map[string]any{"control_mode": "cyber", "media_enabled": false})
@@ -79,6 +78,24 @@ func (c *vehicleBootstrapClient) read(name string) map[string]any {
 		c.t.Fatal("could not decode protected test configuration")
 	}
 	return value
+}
+
+func (c *vehicleBootstrapClient) enrollmentID() string {
+	c.t.Helper()
+	raw, err := os.ReadFile(filepath.Join(c.dir, "state/enrollment.json"))
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		c.t.Fatal("could not read protected test enrollment state")
+	}
+	var state struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		c.t.Fatal("could not decode test enrollment state")
+	}
+	return state.RequestID
 }
 
 func (c *vehicleBootstrapClient) start(timeout time.Duration) *vehicleBootstrapProcess {
@@ -212,12 +229,12 @@ func TestPostgresVehicleBootstrapClient(t *testing.T) {
 	server := httptest.NewServer(withRequestID(f.mux))
 	defer server.Close()
 	s.config.GatewayURL, s.config.CasdoorURL = server.URL, server.URL
-	client := newVehicleBootstrapClient(t, server.URL, "cpp-bootstrap-test")
+	client := newVehicleBootstrapClient(t, server.URL)
 	first := client.start(30 * time.Second)
 	var id, userCode string
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		err := f.db.QueryRow(`SELECT enrollment_id,user_code FROM authz_device_enrollments WHERE serial='cpp-bootstrap-test'`).Scan(&id, &userCode)
+		err := f.db.QueryRow(`SELECT enrollment_id,user_code FROM authz_device_enrollments WHERE enrollment_id=$1`, client.enrollmentID()).Scan(&id, &userCode)
 		if err == nil {
 			break
 		}
@@ -225,6 +242,10 @@ func TestPostgresVehicleBootstrapClient(t *testing.T) {
 	}
 	if id == "" {
 		t.Fatalf("C++ client failed before registration: %v", first.wait())
+	}
+	var metadataEmpty bool
+	if err := f.db.QueryRow(`SELECT name='' AND serial='' AND platform='' FROM authz_device_enrollments WHERE enrollment_id=$1`, id).Scan(&metadataEmpty); err != nil || !metadataEmpty {
+		t.Fatal("C++ bootstrap sent retired vehicle metadata")
 	}
 	e, err := s.approveEnrollment(context.Background(), f.adminID, f.orgID, id, "C++ test vehicle", "cpp-001")
 	if err != nil {
@@ -253,7 +274,7 @@ func TestPostgresVehicleBootstrapClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status != "active" || result != nil {
-		t.Fatalf("C++ client did not acknowledge installation: exit=%v, enrollment=%s", result, status)
+		t.Fatalf("C++ client did not acknowledge installation: exit=%v, enrollment=%s, diagnostic=%s", result, status, first.output.String())
 	}
 	config := client.read("device.json")
 	if config["vehicle_id"] != op.VehicleID || config["client_id"] != clientID || config["control_mode"] != "disabled" {
@@ -304,7 +325,7 @@ func TestPostgresVehicleBootstrapClient(t *testing.T) {
 		t.Fatal("client-authentication failure duplicated the registered vehicle")
 	}
 	var enrollments int
-	if err := f.db.QueryRow(`SELECT count(*) FROM authz_device_enrollments WHERE serial='cpp-bootstrap-test'`).Scan(&enrollments); err != nil || enrollments != 2 {
+	if err := f.db.QueryRow(`SELECT count(*) FROM authz_device_enrollments WHERE public_key=(SELECT public_key FROM authz_device_enrollments WHERE enrollment_id=$1)`, id).Scan(&enrollments); err != nil || enrollments != 2 {
 		t.Fatal("mapping or transient errors created additional enrollment codes")
 	}
 }
@@ -321,12 +342,12 @@ func TestPostgresVehicleBootstrapDenialAndExpiry(t *testing.T) {
 			s.Register(f.mux, AuthenticationMiddleware)
 			server := httptest.NewServer(withRequestID(f.mux))
 			defer server.Close()
-			client := newVehicleBootstrapClient(t, server.URL, decision)
+			client := newVehicleBootstrapClient(t, server.URL)
 			process := client.start(30 * time.Second)
 			var id, userCode string
 			var key []byte
 			waitForBootstrap(t, 10*time.Second, "pending approval", func() bool {
-				return f.db.QueryRow(`SELECT enrollment_id,user_code,public_key FROM authz_device_enrollments WHERE serial=$1`, decision).Scan(&id, &userCode, &key) == nil
+				return f.db.QueryRow(`SELECT enrollment_id,user_code,public_key FROM authz_device_enrollments WHERE enrollment_id=$1`, client.enrollmentID()).Scan(&id, &userCode, &key) == nil
 			})
 			adminPath := "/api/admin/organizations/" + f.orgID + "/device-enrollments"
 			if decision == "cancelled" {
@@ -345,7 +366,7 @@ func TestPostgresVehicleBootstrapDenialAndExpiry(t *testing.T) {
 				var denied *exec.ExitError
 				if err := process.wait(); !errors.As(err, &denied) || denied.ExitCode() != 77 ||
 					!strings.Contains(process.output.String(), "code=ENROLLMENT_DENIED") {
-					t.Fatal("denial did not stop the actual vehicle client with exit 77 and ENROLLMENT_DENIED diagnostic")
+					t.Fatalf("denial did not stop the actual vehicle client with exit 77 and ENROLLMENT_DENIED diagnostic: %s", process.output.String())
 				}
 				if err := client.start(5 * time.Second).wait(); !errors.As(err, &denied) || denied.ExitCode() != 77 {
 					t.Fatal("restart did not preserve denied status")
@@ -362,7 +383,7 @@ func TestPostgresVehicleBootstrapDenialAndExpiry(t *testing.T) {
 				var freshID string
 				var freshKey []byte
 				waitForBootstrap(t, 18*time.Second, "fresh code after simulated server expiry", func() bool {
-					return f.db.QueryRow(`SELECT enrollment_id,public_key FROM authz_device_enrollments WHERE serial=$1 AND enrollment_id<>$2`, decision, id).Scan(&freshID, &freshKey) == nil
+					return f.db.QueryRow(`SELECT enrollment_id,public_key FROM authz_device_enrollments WHERE enrollment_id=$1 AND enrollment_id<>$2`, client.enrollmentID(), id).Scan(&freshID, &freshKey) == nil
 				})
 				if !bytes.Equal(key, freshKey) {
 					t.Fatal("code expiry replaced the persistent device key")
@@ -378,7 +399,7 @@ func TestPostgresVehicleBootstrapDenialAndExpiry(t *testing.T) {
 			if decision == "expired" {
 				want = 2
 			}
-			if err := f.db.QueryRow(`SELECT count(*) FROM authz_device_enrollments WHERE serial=$1`, decision).Scan(&total); err != nil || total != want {
+			if err := f.db.QueryRow(`SELECT count(*) FROM authz_device_enrollments WHERE public_key=$1`, key).Scan(&total); err != nil || total != want {
 				t.Fatal("decision/restart created unexpected enrollment requests")
 			}
 		})

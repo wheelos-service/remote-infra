@@ -64,7 +64,7 @@ func TestPostgresVehicleSetupEndpointsAreConfiguredAndManagerOnly(t *testing.T) 
 		if want == "" {
 			want = s.config.GatewayURL
 		}
-		if len(value) != 3 || value["gateway_url"] != s.config.GatewayURL || value["console_url"] != want || value["platform"] != "apollo" {
+		if len(value) != 2 || value["gateway_url"] != s.config.GatewayURL || value["console_url"] != want {
 			t.Fatal("setup leaked non-public config or returned incorrect endpoints")
 		}
 		if w.Header().Get("Cache-Control") != "no-store" {
