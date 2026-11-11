@@ -134,7 +134,7 @@ def prepare(state):
         "gatewayUrl": APP, "livekitUrl": APP.replace("https:", "wss:").replace("http:", "ws:"),
         "authorizeUrl": AUTH + "/login/oauth/authorize",
         "tokenUrl": AUTH + "/api/login/oauth/access_token",
-        "clientId": values["browser_id"], "simulationControl": False,
+        "clientId": values["browser_id"],
     }) + ";\n")
     # This file is public browser configuration; Nginx's worker must read it.
     (state / "runtime-config.js").chmod(0o644)

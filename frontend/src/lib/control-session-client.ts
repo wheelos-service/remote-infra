@@ -230,7 +230,7 @@ export class ControlSessionClient {
     }
     if (data.session_id !== this.session.session_id || data.vehicle_id !== this.vehicleId) return
     if (this.feedback && (data.receiver_instance_id !== this.feedback.receiver_instance_id ||
-        data.revision !== this.feedback.revision || data.accepted_sequence < this.feedback.accepted_sequence)) {
+        data.revision !== this.feedback.revision || data.simulation !== this.feedback.simulation || data.accepted_sequence < this.feedback.accepted_sequence)) {
       this.fail('Receiver changed; release and acquire a new session', 'receiver_changed')
       return
     }
@@ -253,7 +253,7 @@ export class ControlSessionClient {
     if (data.status === 'LOCKED' || data.last_rejection) {
       const reason = data.last_rejection || data.reason
       this.fail(reason, reason === 'stale_command' ? 'stale_command' : 'vehicle_rejection')
-    } else if (data.status === 'READY' || data.status === 'APPLIED') this.state = 'ready'
+    } else if (data.status === 'READY' || data.status === 'ACCEPTED' || data.status === 'APPLIED') this.state = 'ready'
     this.changed()
   }
 
@@ -440,11 +440,11 @@ export class ControlSessionClient {
         }
         await new Promise((resolve) => setTimeout(resolve, 200))
       }
-      throw new Error('Simulation handover is still pending')
+      throw new Error('Vehicle handover is still pending')
     } catch (error) {
       this.state = 'pending'
       this.cleanupError = error instanceof ControlAPIError ? error.message :
-        error instanceof Error && error.message === 'Simulation handover is still pending' ? error.message :
+        error instanceof Error && error.message === 'Vehicle handover is still pending' ? error.message :
           'Control release failed; vehicle handover is not confirmed'
       this.record('release_failed')
       this.changed()

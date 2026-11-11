@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Simulation control v2",
+  "title": "Vehicle control v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "type", "vehicle_id", "session_id", "client_instance_id", "receiver_instance_id", "revision", "sequence", "timestamp_ms", "command", "signature"],

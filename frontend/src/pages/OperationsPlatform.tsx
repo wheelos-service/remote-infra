@@ -34,7 +34,7 @@ export default function OperationsPlatform() {
         </div>
       </header>}>
       <div className="space-y-4">
-        {auth.controlBusy && <p role="status" className="text-amber-200">模拟控制正在进行；请先安全释放并确认交接，再切换页面、组织或退出登录。</p>}
+        {auth.controlBusy && <p role="status" className="text-amber-200">控制会话正在进行；请先安全释放并确认交接，再切换页面、组织或退出登录。</p>}
         {auth.error && <p role="alert" className="text-red-300">{auth.error}</p>}
         {error && <p role="alert">{error}</p>}
         {!auth.accessToken ? <section className="space-y-4 rounded-xl border border-slate-800 p-8">

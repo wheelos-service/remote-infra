@@ -19,10 +19,10 @@ export const controlFeedbackSchema = z.object({
   receiver_instance_id: z.string().regex(/^[a-f0-9]{32}$/),
   revision: integer.nonnegative(),
   accepted_sequence: integer.nonnegative(),
-  status: z.enum(['DISABLED', 'READY', 'APPLIED', 'LOCKED']),
+  status: z.enum(['DISABLED', 'READY', 'ACCEPTED', 'APPLIED', 'LOCKED']),
   reason: z.string().max(64),
   last_rejection: z.string().max(64),
-  simulation: z.literal(true),
+  simulation: z.boolean(),
   command: controlCommandSchema.nullable(),
 }).strict()
 export type ControlFeedback = z.infer<typeof controlFeedbackSchema>

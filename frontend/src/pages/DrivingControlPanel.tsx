@@ -8,7 +8,7 @@ import {
   toV2ControlCommand, v2GamepadMapping, type GamepadView, type GamepadMapping,
 } from '../lib/control-input-adapter'
 
-export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyChange, onIntent }: {
+export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChange, onIntent }: {
   vehicleId: string
   bearer: string
   videoReady: boolean
@@ -42,7 +42,7 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
       allowVehicleActions: false,
       send: async (intent) => {
         const active = controller.current
-        if (active?.state !== 'ready' || !mediaReady.current) throw new Error('模拟控制或三路画面尚未就绪')
+        if (active?.state !== 'ready' || !mediaReady.current) throw new Error('控制或三路画面尚未就绪')
         const command = toV2ControlCommand(intent)
         active.setCommand(command)
         onIntent(vehicleId, command)
@@ -64,7 +64,7 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
       controls.suspend('页面离开：输入已停止')
       if (controller.current) void controller.current.release().catch(() => {
         if (mounted.current) render((n) => n + 1)
-        else console.error('模拟控制释放未确认；需检查 Gateway 交接状态')
+        else console.error('控制释放未确认；需检查 Gateway 交接状态')
       })
     }
     const hidden = () => { if (document.hidden) release() }
@@ -92,7 +92,7 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
     if (!mediaReady.current) return
     if (controller.current && !['idle', 'closed'].includes(controller.current.state)) return
     if (!globalThis.crypto?.subtle || typeof crypto.randomUUID !== 'function') {
-      setMessage('模拟签名要求 HTTPS 或 localhost，以及支持 Ed25519 的浏览器；不会降级到旧协议。')
+      setMessage('控制签名要求 HTTPS 或 localhost，以及支持 Ed25519 的浏览器；不会降级到旧协议。')
       return
     }
     setMessage('')
@@ -121,7 +121,7 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
     }
   }
   const release = async () => {
-    input.current?.suspend('正在释放模拟控制权')
+    input.current?.suspend('正在释放控制权')
     try { await controller.current?.release() } catch (error) {
       if (mounted.current) setMessage(error instanceof Error ? error.message : 'Handover pending')
     }
@@ -146,11 +146,11 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
   const button = 'rounded border border-amber-600 px-3 py-2 disabled:opacity-40'
   return (
     <section className="rounded-xl border border-amber-700 bg-amber-950/20 p-3 text-xs text-amber-100">
-      <p className="font-semibold">模拟控制链路 · 不连接实车执行器</p>
+      <p className="font-semibold">远程驾驶控制</p>
       <p className="mt-1">目标：{vehicleId || '未选择'} · 状态：{state}</p>
       <div className="mt-3 flex flex-wrap gap-2">
-        <button type="button" disabled={!vehicleId || busy || !videoReady} onClick={() => void acquire()} className={button}>申请模拟控制权</button>
-        <button type="button" disabled={!busy} onClick={() => void release()} className={button}>释放并等待模拟交接</button>
+        <button type="button" disabled={!vehicleId || busy || !videoReady} onClick={() => void acquire()} className={button}>申请控制权</button>
+        <button type="button" disabled={!busy} onClick={() => void release()} className={button}>释放并等待车辆交接</button>
         <button type="button" disabled={!ready} className={button}
           onClick={() => input.current?.setKeyboardEnabled(!inputState.keyboardEnabled)}>
           {inputState.keyboardEnabled ? '关闭键盘' : '启用键盘 WASD / 方向键'}
@@ -195,7 +195,7 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
       </details>
       <p className="mt-2">{videoReady ? '三路画面正在出帧' : '三路画面未就绪：禁止启用输入；画面恢复不会自动恢复控制'}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <select aria-label="模拟控制手柄" className="rounded border border-amber-800 bg-slate-950 p-2"
+        <select aria-label="控制手柄" className="rounded border border-amber-800 bg-slate-950 p-2"
           value={pad?.selectedIndex ?? ''} disabled={!ready} onChange={(event) => {
             gamepad.current?.select(event.target.value === '' ? null : Number(event.target.value))
             event.currentTarget.blur()
@@ -207,17 +207,17 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
           onClick={() => gamepad.current?.confirmMapping(!pad?.confirmed)}>{pad?.confirmed ? '撤销映射确认' : '确认标准映射'}</button>
         <button type="button" className={button} disabled={!ready || !pad?.canEnable}
           onClick={() => gamepad.current?.setEnabled(!inputState.gamepadEnabled)}>{inputState.gamepadEnabled ? '关闭手柄' : '启用手柄'}</button>
-        <span>左摇杆 X 转向 / 右摇杆 Y 前后 · LB 按住使能 · B 模拟制动；先松键回中</span>
+        <span>左摇杆 X 转向 / 右摇杆 Y 前后 · LB 按住使能 · B 制动；先松键回中</span>
       </div>
       <p className="mt-2">{inputState.message} · {pad?.validation || pad?.message}</p>
       {pad?.pad && <p className="mt-1">轴：{pad.pad.axes.map((value) => value.toFixed(2)).join(' / ')} · 按下按钮：{pad.pad.buttons.flatMap((value, index) => value.pressed ? [index] : []).join(', ') || '无'}</p>}
       <p className="mt-2">挡位和自动驾驶模式请求未接入 v2，不开放 1–4 / E / Q 及对应手柄动作；不回退到 v1。</p>
-      <p className="mt-2">键盘为离散请求，W+A 等组合方向会停止；手柄为比例输入，两者互斥。前三相机无后视覆盖，倒车仅限隔离模拟验收。</p>
+      <p className="mt-2">键盘为离散请求，W+A 等组合方向会停止；手柄为比例输入，两者互斥。前三相机无后视覆盖，倒车前需确认后方环境。</p>
       <p className="mt-2">反馈序号：{controller.current?.feedback?.accepted_sequence ?? '—'}；
-        {controller.current?.feedback?.reason ?? '等待车端 v2 SDK'}。仅证明模拟验包，不代表物理执行。失焦、断线或反馈超时停止发令；交接完成前禁止切换。</p>
+        {controller.current?.feedback?.reason ?? '等待车端 v2 SDK'}。反馈表示车端接收状态，底盘执行以车辆实测为准。失焦、断线或反馈超时停止发令；交接完成前禁止切换。</p>
       <p data-testid="control-feedback" data-sequence={controller.current?.feedback?.accepted_sequence}
         data-command={JSON.stringify(controller.current?.feedback?.command)} className="mt-2">
-        模拟设定（非底盘实测）：
+        指令设定（非底盘实测）：
         {controller.current?.feedback?.command ? `转向 ${controller.current.feedback.command.steering}‰ · 油门 ${controller.current.feedback.command.throttle}‰ · 制动 ${controller.current.feedback.command.brake}‰ · 方向 ${controller.current.feedback.command.direction}` : '等待反馈'}
       </p>
       {(message || controller.current?.error) && <p role="alert" className="mt-2 text-red-300">{controller.current?.error || message}</p>}
@@ -225,9 +225,9 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
       <button type="button" className={`${button} mt-2`} disabled={!controller.current}
         onClick={downloadDiagnostics}>导出近期控制时序诊断</button>
       <div className="fixed inset-x-0 bottom-0 z-[60] flex flex-wrap items-center justify-end gap-3 border-t border-amber-800 bg-slate-950 p-3 text-xs">
-        <span>{vehicleId} · {state} · {inputState.gamepadEnabled ? '手柄' : inputState.keyboardEnabled ? '键盘' : '输入未启用'} · 仅模拟</span>
+        <span>{vehicleId} · {state} · {inputState.gamepadEnabled ? '手柄' : inputState.keyboardEnabled ? '键盘' : '输入未启用'}</span>
         <button type="button" disabled={!ready} className={button} onClick={() => input.current?.suspend('已发送停止，请重新启用输入')}>停止并停用输入</button>
-        <button type="button" disabled={!ready} className="rounded border border-red-500 bg-red-950 px-4 py-2 disabled:opacity-40" onClick={() => input.current?.emergencyStop()}>模拟制动（Space）</button>
+        <button type="button" disabled={!ready} className="rounded border border-red-500 bg-red-950 px-4 py-2 disabled:opacity-40" onClick={() => input.current?.emergencyStop()}>制动（Space）</button>
       </div>
     </section>
   )

@@ -109,7 +109,7 @@ export function RoleRangeFields({ role, scope, vehicleIds, vehicles, onRole, onS
     }}>
       {platformAdmin && <option value="org_admin">管理员</option>}
       <option value="viewer">查看者</option>
-      <option value="remote_operator">操作员（仅模拟控制）</option>
+      <option value="remote_operator">操作员（远程驾驶）</option>
     </select></label>
     <label>操作车辆范围 <select className={fieldClass} disabled={role === 'org_admin'} value={scope} onChange={event => {
       const nextScope = event.target.value as Assignment['scope']
@@ -754,7 +754,7 @@ export default function Admin() {
             <summary className="cursor-pointer">角色说明与授权规则</summary>
             <dl className="mt-4 grid gap-4 sm:grid-cols-3">
               <div><dt className="font-medium text-slate-200">查看者</dt><dd className="mt-1">监看本组织全部有效车辆，不具备控制能力。</dd></div>
-              <div><dt className="font-medium text-slate-200">操作员</dt><dd className="mt-1">监看并申请授权车辆的模拟控制权；仍需有效控制租约，不开放实车驾驶。</dd></div>
+              <div><dt className="font-medium text-slate-200">操作员</dt><dd className="mt-1">监看并申请授权车辆的控制权；需有效控制租约及车端就绪。</dd></div>
               <div><dt className="font-medium text-slate-200">管理员</dt><dd className="mt-1">管理组织人员与权限，可监看本组织车辆，不获得驾驶或控制能力。</dd></div>
             </dl>
             <p className="mt-4">默认可监看本组织全部有效车辆及新增车辆，无操作权限；操作车辆范围仅限定显式操作授权。禁止修改自身权限。</p>

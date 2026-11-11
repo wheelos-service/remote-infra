@@ -141,13 +141,17 @@ test('static context opens the same platform without managed membership and resp
   assert.equal(api.canControlVehicle(context, '', 'car-other'), false)
   const drive = api.render(member, '/?page=drive&driveVehicle=car-one', entries)
   assert.match(drive, /data-testid="live-driving-workbench"/)
-  assert.doesNotMatch(drive, /当前角色无驾驶权限/)
+  assert.doesNotMatch(drive, /当前角色无驾驶权限|模拟控制|不连接实车执行器/)
+  assert.match(drive, /远程驾驶控制/)
+  assert.match(drive, /启用键盘 WASD/)
+  assert.match(drive, /手柄检测与映射/)
+  assert.match(drive, /制动（Space）/)
   const observer = api.render({
     ...member, operator: { Roles: ['admin'] },
     authorizationContext: { ...context, control_vehicle_ids: [] },
   }, '/?page=drive&driveVehicle=car-one', entries)
   assert.match(observer, /当前角色无驾驶权限/)
-  assert.match(observer, /<button[^>]*disabled=""[^>]*>申请模拟控制权/)
+  assert.match(observer, /<button[^>]*disabled=""[^>]*>申请控制权/)
 })
 
 test('missing, unknown and failed contexts never become static or invent a managed membership', async () => {
@@ -186,18 +190,18 @@ test('all members see task vehicles, admins can monitor, and none or out-of-scop
     assert.match(html, /任务服务暂不可用/)
     assert.match(html, /car-one/)
     assert.match(html, /car-new/)
-    assert.doesNotMatch(html, /申请模拟控制权/)
+    assert.doesNotMatch(html, /申请控制权/)
   }
   const monitor = api.render(member('org_admin', 'all'), '/?page=monitor&vehicle=car-one&view=detail', entries)
   assert.match(monitor, /data-testid="vehicle-monitor-detail"/)
-  assert.doesNotMatch(monitor, /申请模拟控制权|现有授权不包含实时视频/)
+  assert.doesNotMatch(monitor, /申请控制权|现有授权不包含实时视频/)
   const viewer = api.render(member('viewer', 'all'), '/?page=drive&driveVehicle=car-one', entries)
-  assert.match(viewer, /<button[^>]*disabled=""[^>]*>申请模拟控制权/)
+  assert.match(viewer, /<button[^>]*disabled=""[^>]*>申请控制权/)
   assert.match(viewer, /当前角色无驾驶权限/)
   for (const [scope, ids] of [['none', []], ['selected', ['car-new']]]) {
     const html = api.render(member('remote_operator', scope, ids), '/?page=drive&driveVehicle=car-one', entries)
     assert.match(html, /无此车辆的驾驶权限/)
-    assert.match(html, /<button[^>]*disabled=""[^>]*>申请模拟控制权/)
+    assert.match(html, /<button[^>]*disabled=""[^>]*>申请控制权/)
   }
 })
 
@@ -218,7 +222,7 @@ test('authorized monitor restores realtime, health and profile detail without st
     const html = api.render(member, '/?page=monitor&vehicle=car-one&view=detail', [entry], tab, profile)
     assert.match(html, /data-testid="vehicle-monitor-detail"/)
     assert.match(html, /实时|健康状态|车辆信息/)
-    assert.doesNotMatch(html, /live-driving-workbench|申请模拟控制权|释放控制权|pub-cdn|TeleopWorkbench/)
+    assert.doesNotMatch(html, /live-driving-workbench|申请控制权|释放控制权|pub-cdn|TeleopWorkbench/)
     assert.equal(globalThis.__CAMERA_STARTS__, 0)
     if (tab === 'realtime') {
       assert.match(html, /开始监看/)

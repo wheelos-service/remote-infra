@@ -4,7 +4,6 @@ export interface TeleopRuntimeConfig {
   authorizeUrl: string
   tokenUrl: string
   clientId: string
-  simulationControl: boolean
 }
 
 declare global {
@@ -19,7 +18,6 @@ const defaults: TeleopRuntimeConfig = {
   authorizeUrl: 'https://casdoor.wheelos.cn/login/oauth/authorize',
   tokenUrl: 'https://casdoor.wheelos.cn/api/login/oauth/access_token',
   clientId: 'cfeff3105319b0ac309b',
-  simulationControl: false,
 }
 
 const query = new URLSearchParams(window.location.search)
@@ -31,7 +29,6 @@ const localOverrides: Partial<TeleopRuntimeConfig> = isLocalDevelopment
   ? {
       ...(localGateway ? { gatewayUrl: localGateway } : {}),
       ...(localLivekit ? { livekitUrl: localLivekit } : {}),
-      simulationControl: query.get('control') === 'simulation',
     }
   : {}
 

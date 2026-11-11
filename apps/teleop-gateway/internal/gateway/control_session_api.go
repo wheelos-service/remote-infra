@@ -60,7 +60,7 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if claims.managed != nil && request.ProtocolVersion != 2 {
-		http.Error(w, "managed control requires v2 simulation", http.StatusForbidden)
+		http.Error(w, "managed control requires v2", http.StatusForbidden)
 		return
 	}
 
@@ -76,10 +76,6 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		ExpiresAtMS:    now.Add(controlLeases.ttl).UnixMilli(),
 	}
 	if request.ProtocolVersion == 2 {
-		if !simulationControlEnabled(vehicleID) {
-			http.Error(w, "v2 simulation control is not enabled for vehicle", http.StatusForbidden)
-			return
-		}
 		session.ProtocolVersion = 2
 		session.ClientInstanceID = request.ClientInstanceID
 		session.SenderIdentity = "control-" + session.SessionID
@@ -129,8 +125,8 @@ func handleRenewControl(w http.ResponseWriter, r *http.Request) {
 		writeControlSessionError(w, err)
 		return
 	}
-	if claims.managed != nil && (current.ProtocolVersion != 2 || !simulationControlEnabled(current.VehicleID)) {
-		http.Error(w, "managed renewal requires allowlisted v2 simulation", http.StatusForbidden)
+	if claims.managed != nil && current.ProtocolVersion != 2 {
+		http.Error(w, "managed renewal requires v2", http.StatusForbidden)
 		return
 	}
 	session, err := controlLeases.RenewControlSession(r.Context(), r.PathValue("session_id"), claims.Name)

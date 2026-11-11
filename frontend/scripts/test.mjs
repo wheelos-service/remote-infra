@@ -133,14 +133,14 @@ lane {
 }`
 const demoMap = fleetMap.fleetMapSchema.parse(convertMap(mapText, 'fixture-map'))
 
-test('local simulation and preview flags without endpoint overrides preserve default URLs', async () => {
+test('legacy simulation query does not select the vehicle control backend', async () => {
   const search = window.location.search
   try {
     window.location.search = '?preview=1&fleet=1&dev=1&control=simulation'
     const { teleopConfig } = await loadBundle('teleop-config')
     assert.ok(teleopConfig.gatewayUrl.startsWith('https://'))
     assert.ok(teleopConfig.livekitUrl.startsWith('wss://'))
-    assert.equal(teleopConfig.simulationControl, true)
+    assert.equal(teleopConfig.simulationControl, undefined)
   } finally { window.location.search = search }
 })
 
@@ -802,6 +802,54 @@ function controllerFixture(renewAfter = 10000) {
     controller.acceptFeedback(sender, true, new TextEncoder().encode(JSON.stringify(data)))
   return { controller, connection, calls, feedback, accept, request }
 }
+
+test('simulation and Cyber feedback use the same signed control lifecycle', async () => {
+  // Include the deployed Cyber service's APPLIED response as well as ACCEPTED.
+  for (const [simulation, status] of [[true, 'APPLIED'], [false, 'APPLIED'], [false, 'ACCEPTED']]) {
+    const f = controllerFixture()
+    try {
+      await f.controller.acquire()
+      f.accept({ ...f.feedback(), simulation })
+      assert.equal(f.controller.state, 'ready')
+      f.controller.setCommand({ steering: 100, throttle: 100, brake: 0, direction: 1 })
+      await f.controller.tick()
+      assert.ok(f.calls.includes('publish'))
+      f.accept({ ...f.feedback(), simulation, status })
+      assert.equal(f.controller.state, 'ready')
+      assert.equal(f.controller.error, '')
+      f.accept({ ...f.feedback(), simulation, status: 'LOCKED', last_rejection: 'stale_command' })
+      assert.equal(f.controller.state, 'locked')
+      f.accept({ ...f.feedback(), simulation })
+      assert.equal(f.controller.state, 'locked')
+    } finally { await f.controller.release() }
+    assert.equal(f.controller.state, 'closed')
+  }
+})
+
+test('Cyber feedback remains bound, strictly validated, and cannot switch backend mid-session', async () => {
+  for (const invalid of [
+    { simulation: 'false' }, { status: 'UNKNOWN' }, { extra: true },
+    { command: { steering: 0, throttle: 100, brake: 100, direction: 1 } },
+  ]) {
+    const f = controllerFixture()
+    try {
+      await f.controller.acquire()
+      f.accept({ ...f.feedback(), simulation: false }, 'vehicle-other')
+      assert.equal(f.controller.state, 'connecting')
+      f.accept({ ...f.feedback(), simulation: false, ...invalid })
+      assert.equal(f.controller.state, 'locked')
+      assert.equal(f.controller.error, 'Invalid vehicle control feedback')
+    } finally { await f.controller.release() }
+  }
+  const f = controllerFixture()
+  try {
+    await f.controller.acquire()
+    f.accept()
+    f.accept({ ...f.feedback(), simulation: false })
+    assert.equal(f.controller.state, 'locked')
+    assert.match(f.controller.error, /Receiver changed/)
+  } finally { await f.controller.release() }
+})
 
 test('default control HTTP transport does not bind browser fetch to the controller', async context => {
   const f = controllerFixture()
