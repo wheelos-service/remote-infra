@@ -762,7 +762,7 @@ test('v2 canonical signing rejects float and conflicting pedal commands', () => 
   assert.throws(() => controlProtocol.controlSignBytes({ ...payload, command: { ...payload.command, brake: 1 } }))
 })
 
-function controllerFixture() {
+function controllerFixture(renewAfter = 10000) {
   let instanceId
   let sequence = 0
   const calls = []
@@ -783,7 +783,7 @@ function controllerFixture() {
   const request = async (url, options) => {
     if (url.endsWith('/acquire')) {
       instanceId = JSON.parse(options.body).client_instance_id
-      return Response.json({ session: { ...session, client_instance_id: instanceId }, token: 'test-token', renew_after_ms: 10000 })
+      return Response.json({ session: { ...session, client_instance_id: instanceId }, token: 'test-token', renew_after_ms: renewAfter })
     }
     if (url.endsWith('/release')) { calls.push('release'); return Response.json({ state: 'PENDING' }, { status: 202 }) }
     if (url.endsWith('/handover')) {
@@ -815,6 +815,55 @@ test('default control HTTP transport does not bind browser fetch to the controll
     await controller.acquire()
     assert.equal(controller.state, 'connecting')
   } finally { await controller.release() }
+})
+
+test('acquire conflicts explain the fence and allow only an explicit retry without releasing another session', async () => {
+  for (const [reason, detail] of [
+    ['control lease is already held', /控制权已被占用/],
+    ['previous vehicle handover is not confirmed', /上一次车辆交接尚未确认/],
+    ['unexpected proxy response with private data', /^Control API: HTTP 409$/],
+  ]) {
+    const f = controllerFixture()
+    let conflict = true
+    let requests = 0
+    const controller = new ControlSessionClient('car-test', 'http://localhost', 'test', f.connection, () => {},
+      async (...args) => {
+        requests++
+        if (conflict) return new Response(reason, { status: 409 })
+        return f.request(...args)
+      })
+    try {
+      await assert.rejects(controller.acquire(), /HTTP 409/)
+      assert.equal(controller.state, 'idle')
+      assert.match(controller.error, detail)
+      await controller.tick()
+      assert.equal(requests, 1, 'conflicts must not trigger automatic retries')
+      assert.deepEqual(f.calls, [], 'a rejected acquire owns no RTC connection or lease')
+      conflict = false
+      await controller.acquire()
+      assert.equal(controller.state, 'connecting')
+      assert.equal(controller.error, '')
+      assert.deepEqual(f.calls, ['connect'])
+    } finally { await controller.release() }
+  }
+})
+
+test('a late acquire conflict cannot undo a camera safety lock', async () => {
+  const f = controllerFixture()
+  let rejectAcquire
+  const controller = new ControlSessionClient('car-test', 'http://localhost', 'test', f.connection, () => {},
+    () => new Promise(resolve => { rejectAcquire = resolve }))
+  const acquiring = controller.acquire()
+  const rejected = assert.rejects(acquiring, /HTTP 409/)
+  while (!rejectAcquire) await new Promise(resolve => setImmediate(resolve))
+  controller.setMediaReady(false)
+  rejectAcquire(new Response('control lease is already held', { status: 409 }))
+  await rejected
+  assert.equal(controller.state, 'locked')
+  controller.setMediaReady(true)
+  assert.equal(controller.state, 'locked')
+  assert.deepEqual(f.calls, [])
+  await controller.release()
 })
 
 test('camera feed readiness needs three advancing decoded streams and clears on stall and detach', (context) => {
@@ -1029,6 +1078,274 @@ test('repeated identical input samples do not cancel an in-flight signature', as
   await sending
   assert.equal(f.calls.includes('publish'), true)
   await f.controller.release()
+})
+
+test('sign completion enforces the exact send deadline without an intervening tick', async context => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  const sign = crypto.subtle.sign.bind(crypto.subtle)
+  let delay = 0
+  context.mock.method(crypto.subtle, 'sign', async (...args) => {
+    const signature = await sign(...args)
+    now += delay
+    return signature
+  })
+  for (delay of [249, 250, 300]) {
+    const f = controllerFixture()
+    try {
+      await f.controller.acquire()
+      f.accept()
+      await f.controller.tick()
+      assert.equal(f.calls.includes('publish'), delay < 250)
+      assert.equal(f.controller.state, delay < 250 ? 'ready' : 'locked')
+      if (delay >= 250) {
+        assert.match(f.controller.error, /stalled/)
+        assert.ok(f.calls.includes('disconnect'))
+      }
+    } finally { await f.controller.release() }
+  }
+})
+
+test('sign completion checks lease and feedback deadlines before enqueue', async context => {
+  let now = 1000, delay = 0
+  context.mock.method(performance, 'now', () => now)
+  const sign = crypto.subtle.sign.bind(crypto.subtle)
+  context.mock.method(crypto.subtle, 'sign', async (...args) => {
+    const signature = await sign(...args)
+    now += delay
+    return signature
+  })
+  for (const [renewAfter, elapsed] of [[200, 400], [10000, 751]]) {
+    const f = controllerFixture(renewAfter)
+    try {
+      await f.controller.acquire()
+      f.accept()
+      delay = elapsed
+      await f.controller.tick()
+      assert.equal(f.calls.includes('publish'), false)
+      assert.match(f.controller.error, /lease or vehicle feedback timed out/)
+    } finally { await f.controller.release() }
+  }
+})
+
+test('late publication completion locks and disconnects before a timer gets to run', async context => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  const f = controllerFixture()
+  const publish = f.connection.publish
+  f.connection.publish = async body => { await publish(body); now += 250 }
+  try {
+    await f.controller.acquire()
+    f.accept()
+    await f.controller.tick()
+    assert.equal(f.controller.state, 'locked')
+    assert.match(f.controller.error, /stalled/)
+    assert.equal(f.calls.filter(call => call === 'publish').length, 1)
+    assert.ok(f.calls.includes('disconnect'))
+  } finally { await f.controller.release() }
+})
+
+test('superseded signatures leave unique sequence gaps without creating ACK debt', async context => {
+  const f = controllerFixture()
+  const sign = crypto.subtle.sign.bind(crypto.subtle)
+  let supersede = true, throttle = 0
+  context.mock.method(crypto.subtle, 'sign', async (...args) => {
+    const signature = await sign(...args)
+    if (supersede) {
+      throttle = throttle ? 0 : 1
+      f.controller.setCommand({ steering: 0, throttle, brake: 0, direction: 1 })
+    }
+    return signature
+  })
+  try {
+    await f.controller.acquire()
+    f.accept()
+    for (let i = 0; i < 7; i++) await f.controller.tick()
+    assert.equal(f.calls.includes('publish'), false)
+    f.accept()
+    assert.equal(f.controller.state, 'ready')
+    supersede = false
+    await f.controller.tick()
+    assert.equal(f.feedback().accepted_sequence, 8)
+    f.accept()
+    assert.equal(f.controller.state, 'ready')
+    assert.equal(f.controller.diagnostics.filter(event => event.event === 'superseded').length, 7)
+    assert.equal(f.controller.diagnostics.at(-1).pending_commands, 0)
+  } finally { await f.controller.release() }
+})
+
+test('feedback cannot acknowledge a signature that was never dispatched', async context => {
+  const f = controllerFixture()
+  const sign = crypto.subtle.sign.bind(crypto.subtle)
+  context.mock.method(crypto.subtle, 'sign', async (...args) => {
+    const signature = await sign(...args)
+    f.controller.setCommand({ steering: 1, throttle: 0, brake: 0, direction: 0 })
+    return signature
+  })
+  try {
+    await f.controller.acquire()
+    f.accept()
+    await f.controller.tick()
+    f.accept({ ...f.feedback(), accepted_sequence: 1 })
+    assert.equal(f.controller.state, 'locked')
+    assert.equal(f.controller.error, 'Unexpected control acknowledgement')
+  } finally { await f.controller.release() }
+})
+
+test('repeated feedback cannot reset dispatch progress and a late ACK cannot revive it', async context => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  for (const lateAck of [false, true]) {
+    const f = controllerFixture()
+    try {
+      await f.controller.acquire()
+      f.accept()
+      await f.controller.tick()
+      for (let i = 0; i < 4; i++) {
+        now += 100
+        f.accept({ ...f.feedback(), accepted_sequence: 0 })
+        assert.equal(f.controller.state, 'ready')
+      }
+      now += 50
+      if (lateAck) f.accept()
+      else await f.controller.tick()
+      assert.equal(f.controller.state, 'locked')
+      assert.match(f.controller.error, /acknowledgement progress timed out/)
+    } finally { await f.controller.release() }
+  }
+})
+
+test('timely cumulative ACKs retire dispatched commands and record application response time', async context => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  const f = controllerFixture()
+  try {
+    await f.controller.acquire()
+    f.accept()
+    await f.controller.tick()
+    now += 100
+    await f.controller.tick()
+    now += 349
+    f.accept()
+    assert.equal(f.controller.state, 'ready')
+    assert.equal(f.controller.diagnostics.findLast(event => event.event === 'ack').duration_ms, 349)
+    now += 100
+    f.accept()
+    await f.controller.tick()
+    assert.equal(f.controller.state, 'ready')
+  } finally { await f.controller.release() }
+})
+
+test('ACK during publication is recognized before the publish promise resolves', async () => {
+  const f = controllerFixture()
+  const publish = f.connection.publish
+  f.connection.publish = async body => { await publish(body); f.accept() }
+  try {
+    await f.controller.acquire()
+    f.accept()
+    await f.controller.tick()
+    assert.equal(f.controller.state, 'ready')
+    assert.equal(f.controller.feedback.accepted_sequence, 1)
+    assert.equal(f.controller.diagnostics.at(-1).pending_commands, 0)
+  } finally { await f.controller.release() }
+})
+
+test('release while signing discards the command even if the promise later succeeds', async context => {
+  const f = controllerFixture()
+  const sign = crypto.subtle.sign.bind(crypto.subtle)
+  context.mock.method(crypto.subtle, 'sign', async (...args) => {
+    const signature = await sign(...args)
+    await f.controller.release()
+    return signature
+  })
+  await f.controller.acquire()
+  f.accept()
+  await f.controller.tick()
+  assert.equal(f.controller.state, 'closed')
+  assert.equal(f.calls.includes('publish'), false)
+})
+
+test('faults retain the first cause through RTC failure, failed release and successful retry', async () => {
+  const f = controllerFixture()
+  const disconnect = f.connection.disconnect
+  try {
+    await f.controller.acquire()
+    f.accept()
+    f.connection.disconnect = async () => { throw new Error('private transport details') }
+    f.controller.fail('stale_command')
+    f.controller.fail('RTC disconnected')
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(f.controller.error, 'stale_command')
+    assert.match(f.controller.cleanupError, /disconnect failed/)
+    assert.ok(!f.controller.cleanupError.includes('private'))
+    await assert.rejects(f.controller.release(), /Control release failed; vehicle handover is not confirmed/)
+    assert.equal(f.controller.state, 'pending')
+    assert.equal(f.controller.error, 'stale_command')
+    f.connection.disconnect = disconnect
+    await f.controller.release()
+    assert.equal(f.controller.state, 'closed')
+    assert.equal(f.controller.error, 'stale_command')
+    assert.equal(f.controller.cleanupError, '')
+  } finally { f.connection.disconnect = disconnect; await f.controller.release() }
+})
+
+test('timing snapshots are bounded, independent copies without commands or credentials', async context => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  const f = controllerFixture()
+  try {
+    await f.controller.acquire()
+    f.accept()
+    for (let i = 0; i < 70; i++) {
+      await f.controller.tick()
+      now += 1
+      f.accept()
+    }
+    const trace = f.controller.diagnostics
+    assert.equal(trace.length, 128)
+    assert.equal(f.controller.state, 'ready')
+    trace[0].event = 'mutated'
+    assert.notEqual(f.controller.diagnostics[0].event, 'mutated')
+    assert.doesNotMatch(JSON.stringify(trace), /test-bearer|test-token|signature|throttle|private/)
+    assert.ok(trace.some(event => event.event === 'ack' && event.duration_ms === 1))
+  } finally { await f.controller.release() }
+})
+
+test('unacknowledged dispatch storage has a hard count bound even during a rapid burst', async context => {
+  context.mock.method(performance, 'now', () => 1000)
+  const f = controllerFixture()
+  try {
+    await f.controller.acquire()
+    f.accept()
+    for (let i = 0; i < 65; i++) await f.controller.tick()
+    assert.equal(f.calls.filter(call => call === 'publish').length, 64)
+    assert.equal(f.controller.state, 'locked')
+    assert.match(f.controller.error, /Too many unacknowledged/)
+  } finally { await f.controller.release() }
+})
+
+test('local clock steps are diagnostic only and cannot extend a monotonic ACK deadline', async context => {
+  let now = 1000, wall = 1_700_000_000_000
+  context.mock.method(performance, 'now', () => now)
+  context.mock.method(Date, 'now', () => wall)
+  for (const step of [-5000, -250, -100, 100, 250, 5000]) {
+    const f = controllerFixture()
+    try {
+      await f.controller.acquire()
+      f.accept()
+      await f.controller.tick()
+      now += 449
+      wall += 449 + step
+      f.accept({ ...f.feedback(), accepted_sequence: 0 })
+      assert.equal(f.controller.state, 'ready')
+      assert.equal(f.controller.diagnostics.at(-1).wall_elapsed_delta_ms, step)
+      now += 1
+      wall += 1
+      f.accept()
+      assert.equal(f.controller.state, 'locked')
+      assert.equal(f.controller.diagnostics.at(-1).fault_code, 'ack_timeout')
+    } finally { await f.controller.release() }
+  }
 })
 
 const sample = {

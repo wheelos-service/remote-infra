@@ -126,6 +126,20 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
       if (mounted.current) setMessage(error instanceof Error ? error.message : 'Handover pending')
     }
   }
+  const downloadDiagnostics = () => {
+    const active = controller.current
+    if (!active) return
+    const blob = new Blob([JSON.stringify({
+      protocol_version: 2, clock_domain: 'browser-performance', time_origin_ms: performance.timeOrigin,
+      events: active.diagnostics,
+    }, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'control-timing.json'
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
   const state = controller.current?.state ?? 'idle'
   const ready = state === 'ready' && videoReady
   const busy = state !== 'closed' && state !== 'idle'
@@ -206,7 +220,10 @@ export function SimulationControlPanel({ vehicleId, bearer, videoReady, onBusyCh
         模拟设定（非底盘实测）：
         {controller.current?.feedback?.command ? `转向 ${controller.current.feedback.command.steering}‰ · 油门 ${controller.current.feedback.command.throttle}‰ · 制动 ${controller.current.feedback.command.brake}‰ · 方向 ${controller.current.feedback.command.direction}` : '等待反馈'}
       </p>
-      {(message || controller.current?.error) && <p role="alert" className="mt-2 text-red-300">{message || controller.current?.error}</p>}
+      {(message || controller.current?.error) && <p role="alert" className="mt-2 text-red-300">{controller.current?.error || message}</p>}
+      {controller.current?.cleanupError && <p role="alert" className="mt-2 text-red-300">交接清理：{controller.current.cleanupError}</p>}
+      <button type="button" className={`${button} mt-2`} disabled={!controller.current}
+        onClick={downloadDiagnostics}>导出近期控制时序诊断</button>
       <div className="fixed inset-x-0 bottom-0 z-[60] flex flex-wrap items-center justify-end gap-3 border-t border-amber-800 bg-slate-950 p-3 text-xs">
         <span>{vehicleId} · {state} · {inputState.gamepadEnabled ? '手柄' : inputState.keyboardEnabled ? '键盘' : '输入未启用'} · 仅模拟</span>
         <button type="button" disabled={!ready} className={button} onClick={() => input.current?.suspend('已发送停止，请重新启用输入')}>停止并停用输入</button>

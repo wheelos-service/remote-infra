@@ -79,3 +79,13 @@ contract migration tests and a documented release change, not a naming cleanup.
 No automatic v2-to-v1 downgrade, payload-derived sender fallback, merged
 watchdog, or synthesized physical handover is permitted. Camera readiness is
 decoded-frame freshness, not certified end-to-end image age.
+
+The v2 browser checks its 250 ms signing/publication budget and local authority
+deadlines immediately after asynchronous sends as well as on ticks. ACK liveness
+uses actual dispatches with a 450 ms monotonic deadline instead of raw signed
+sequence distance; locally discarded signatures do not count as outstanding
+commands. The first fault disconnects RTC and remains visible through cleanup.
+These checks preserve the reliable v2 wire contract and do not establish
+receiver-side freshness under clock skew. See the
+[latency implementation status](control-latency-review-2026-11-11.md#repository-implementation-follow-up)
+for diagnostics and the remaining coordinated v3 work.
