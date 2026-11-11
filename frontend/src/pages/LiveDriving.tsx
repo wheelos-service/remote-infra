@@ -3,9 +3,8 @@ import { useAuth } from '../app/AuthProvider'
 import { useVehicles } from '../hooks/use-vehicles'
 import { useDrivingCameras } from '../hooks/use-driving-cameras'
 import { threeCamerasReady, type CameraFeedTrack } from '../lib/camera-feed'
-import { teleopConfig } from '../lib/teleop-config'
 import ThreeCameraView, { type FrontCamera } from './ThreeCameraView'
-import { SimulationControlPanel } from './SimulationControlPanel'
+import { DrivingControlPanel } from './DrivingControlPanel'
 import TeleopWorkbench from './TeleopWorkbench'
 import { FleetOverviewContent } from './FleetOverview'
 import { VehicleMonitorDetail, VehicleMonitorList } from './VehicleMonitor'
@@ -50,15 +49,15 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
       runModeLabel={row.modeLabel} locationLabel={row.locationReason} authenticated busy={busy} observeOnly={observeOnly}
       onBack={onClose} onMonitor={onMonitor} videoStatus={`${cameras.connected ? '已连接' : '未连接 / 正在连接'} · 三路：${videoReady ? '正在出帧' : '未就绪'}`}
       cameraView={<ThreeCameraView vehicleId={vehicleId} tracks={cameras.tracks} onFrame={onFrame} />}
-      controlPanel={!observeOnly && teleopConfig.simulationControl
-      ? <SimulationControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={videoReady} onBusyChange={onBusy} onIntent={onIntent} />
+      controlPanel={!observeOnly
+      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={videoReady} onBusyChange={onBusy} onIntent={onIntent} />
       : <div className="space-y-2 text-xs text-amber-200">
           <button type="button" disabled aria-describedby="control-denied-reason"
-            className="rounded border border-slate-700 px-3 py-2 opacity-40">申请模拟控制权</button>
+            className="rounded border border-slate-700 px-3 py-2 opacity-40">申请控制权</button>
           <p id="control-denied-reason">{controlDenied ? '无此车辆的驾驶权限'
-            : observeOnly ? '当前角色无驾驶权限' : '模拟控制暂不可用'}</p>
+            : observeOnly ? '当前角色无驾驶权限' : '控制暂不可用'}</p>
         </div>} />
-    {busy && <p className="text-xs text-amber-200">释放并确认模拟交接前，禁止切换车辆或退出工作台。</p>}
+    {busy && <p className="text-xs text-amber-200">释放并确认车辆交接前，禁止切换车辆或退出工作台。</p>}
   </div>
 }
 

@@ -841,9 +841,9 @@ func TestManagedRuntimePostgresTokenHorizonAndDrainSurviveRestart(t *testing.T) 
 		`{"name":"new","subject":"new"}`, 503)
 }
 
-func TestManagedRuntimePostgresViewingAndSimulationTokens(t *testing.T) {
+func TestManagedRuntimePostgresViewingAndV2ControlTokens(t *testing.T) {
 	f := newManagedFixture(t)
-	t.Setenv("SIMULATED_CONTROL_VEHICLES_JSON", `["car-one"]`)
+	t.Setenv("SIMULATED_CONTROL_VEHICLES_JSON", `[]`)
 	viewingRequest, _ := json.Marshal(map[string]string{
 		"request_id": uuid.NewString(), "client_instance_id": uuid.NewString(),
 	})

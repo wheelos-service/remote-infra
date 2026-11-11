@@ -43,7 +43,6 @@ func TestDeviceControlContextAndSimulationFence(t *testing.T) {
 	f := newControlContextFixture(t)
 	body := `{"protocol_version":2,"client_instance_id":"browser-test","public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`
 	path := "/api/vehicles/car-2/control"
-	f.request(t, "POST", path+"/acquire", "controller", body, 403)
 	t.Setenv("SIMULATED_CONTROL_VEHICLES_JSON", `["car-2"]`)
 	f.request(t, "POST", path+"/acquire", "controller", strings.Replace(body, "browser-test", "bad|instance", 1), 400)
 	response := f.request(t, "POST", path+"/acquire", "controller", body, 200)
@@ -130,6 +129,31 @@ func TestSimulationRenewalAndPendingHandover(t *testing.T) {
 		f.request(t, "POST", "/api/vehicles/car-2/control/simulation-ack", "device2", ack, 204)
 	}
 	f.request(t, "POST", "/api/vehicles/car-1/control/acquire", "controller", body, 200)
+}
+
+func TestV2ControlDoesNotRequireSimulationAllowlist(t *testing.T) {
+	f := newControlContextFixture(t)
+	t.Setenv("SIMULATED_CONTROL_VEHICLES_JSON", "[]")
+	body := `{"protocol_version":2,"client_instance_id":"browser-test","public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`
+	path := "/api/vehicles/car-2/control"
+	f.request(t, "POST", path+"/acquire", "device2", body, 403)
+	response := f.request(t, "POST", path+"/acquire", "controller", body, 200)
+	var acquired controlSessionResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &acquired); err != nil {
+		t.Fatal(err)
+	}
+	f.request(t, "POST", "/api/control/"+acquired.Session.SessionID+"/renew", "controller", "{}", 200)
+	result := f.request(t, "GET", path+"/context", "device2", "", 200)
+	var state DeviceControlContext
+	if json.Unmarshal(result.Body.Bytes(), &state) != nil || state.Simulation || state.State != "ACTIVE" || state.Session == nil || state.Session.ProtocolVersion != 2 {
+		t.Fatal("non-simulation v2 context unavailable", result.Body.String())
+	}
+	f.request(t, "POST", "/api/control/"+acquired.Session.SessionID+"/release", "controller", "{}", 202)
+	ack := fmt.Sprintf(`{"session_id":%q,"revision":%d}`, acquired.Session.SessionID, state.Revision)
+	f.request(t, "POST", path+"/simulation-ack", "device2", ack, 403)
+	f.request(t, "POST", path+"/handover/ack", "device2", "{}", 503)
+	// Allowing Cyber sessions must not synthesize a physical handover.
+	f.request(t, "POST", path+"/acquire", "controller", body, 409)
 }
 
 func newControlChainFixture(t *testing.T) *telemetryFixture {

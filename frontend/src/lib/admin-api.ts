@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { teleopConfig } from './teleop-config'
+import { vehicleSetupDefaultsSchema, type VehicleSetupDefaults } from './vehicle-bootstrap'
 
 export const managedRole = z.enum(['org_admin', 'viewer', 'remote_operator'])
 export const managedScope = z.enum(['none', 'all', 'selected'])
@@ -31,7 +32,7 @@ export type Assignment = z.infer<typeof assignmentSchema>
 const onboardingName = z.string().trim().min(1, '请输入名称').max(200)
 export const onboardingInputSchema = z.discriminatedUnion('kind', [
   z.object({
-    kind: z.literal('person'), name: onboardingName, email: z.string().trim().email('请输入有效邮箱'),
+    kind: z.literal('person'), name: onboardingName, email: z.string().trim().email('请输入有效邮箱').optional(),
     role: managedRole, scope: managedScope, vehicle_ids: z.array(z.string().min(1)),
   }),
   z.object({
@@ -43,6 +44,9 @@ export const onboardingInputSchema = z.discriminatedUnion('kind', [
   if (value.kind === 'vehicle') {
     if (Boolean(value.vehicle_id) === Boolean(value.vehicle_number)) ctx.addIssue({ code: 'custom', message: '请填写车辆编号，不要同时指定完整 ID' })
     return
+  }
+  if (!value.email && (value.name.length < 2 || value.name.length > 64 || !/^[A-Za-z][A-Za-z0-9]*([-_][A-Za-z0-9]+)*$/.test(value.name))) {
+    ctx.addIssue({ code: 'custom', message: '用户名须为 2–64 位，以字母开头，可包含字母、数字及单个横线或下划线' })
   }
   if (value.scope === 'selected' && !value.vehicle_ids.length) ctx.addIssue({ code: 'custom', message: '请选择至少一辆车辆' })
   if (value.scope === 'none' && value.vehicle_ids.length) ctx.addIssue({ code: 'custom', message: '无操作权限范围不能包含车辆' })
@@ -60,17 +64,18 @@ export const installationTicketSchema = z.object({ token: z.string().min(1), exp
 export type InstallationTicket = z.infer<typeof installationTicketSchema>
 
 export const enrollmentUserCodeSchema = z.string().trim().transform(value => value.replace(/-/g, '').toUpperCase())
-  .pipe(z.string().regex(/^[A-HJ-NP-Z2-9]{8}$/, '请输入 8 位申请码（不含 I、O、0、1，可带横线）'))
+  .pipe(z.string().regex(/^[A-HJ-NP-Z2-9]{8}$/, '请输入 8 位机器码（不含 I、O、0、1，可带横线）'))
 export const deviceEnrollmentSchema = z.object({
-  id: z.string().min(1), name: z.string(), serial: z.string(), platform: z.string(),
+  id: z.string().min(1),
   fingerprint: z.string().min(1), status: z.string().min(1), created_at: z.string(), expires_at: z.string(),
   recovery: z.boolean(), vehicle_id: z.string().optional(),
   error_code: z.string().nullable().optional(), operation_id: z.string().optional(),
 }).refine(value => !value.recovery || Boolean(value.vehicle_id), '恢复申请缺少已有车辆绑定')
 export type DeviceEnrollment = z.infer<typeof deviceEnrollmentSchema>
 export const deviceEnrollmentApprovalSchema = z.object({
-  name: onboardingName,
-  vehicle_number: z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9_.-]{0,23}$/, '车辆编号须为 1–24 位字母、数字、点、横线或下划线'),
+  name: onboardingName.refine(value => !/[\x00-\x1f\x7f]/.test(value) && new TextEncoder().encode(value).length <= 200,
+    '车辆名称包含控制字符或过长'),
+  vehicle_number: z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9_.-]{0,23}$/, '车辆编号须为 1–24 位字母、数字、点、横线或下划线').optional(),
 })
 export type DeviceEnrollmentApproval = z.infer<typeof deviceEnrollmentApprovalSchema>
 
@@ -78,10 +83,16 @@ export function onboardingNeedsPolling(operation: OnboardingOperation): boolean 
   return !['completed', 'failed'].includes(operation.status)
 }
 
+export function registrationLinkAvailable(operation: OnboardingOperation): boolean {
+  return operation.kind === 'person' && !operation.email && operation.stage === 'registration'
+    && ['awaiting_registration', 'running', 'pending'].includes(operation.status)
+}
+
 export function onboardingStatusLabel(status: string): string {
   return ({
     pending: '等待处理（尚未完成）', processing: '正在处理（尚未完成）', running: '正在处理（尚未完成）',
     awaiting_install: '等待车辆安装（尚未接入）', completed: '接入流程已完成',
+    awaiting_registration: '等待用户完成注册',
     failed: '接入失败，可手动重试',
   } as Record<string, string>)[status] ?? '等待后端确认（未知状态，尚未完成）'
 }
@@ -119,7 +130,7 @@ async function request(path: string, token: string, body?: unknown, signal?: Abo
       const detail = z.object({ error: z.string().optional(), code: z.string().optional(), request_id: z.string().optional() }).safeParse(data)
       const code = detail.success ? detail.data.code : undefined
       const message = code === 'MANAGED_DRAIN_REQUIRED'
-        ? '未保存：仍有活动视频/驾驶会话，或已签发令牌的 TTL 尚未到期。请安全结束会话并等待令牌过期后，手动重试；不会自动生效。'
+        ? '未保存：当前部署要求管理维护模式，且视频/驾驶会话与已签发令牌的 TTL 必须排空。请联系运维完成维护准备后手动重试；不会自动生效。'
         : response.status === 401 ? '登录已失效，请退出后重新登录。'
           : response.status === 403 ? '当前账号没有此组织的管理权限。'
             : (detail.success ? detail.data.error : text.trim()) || `管理请求失败 (${response.status})`
@@ -145,9 +156,12 @@ function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.output<S> {
 }
 const orgPath = (orgId: string) => `/organizations/${encodeURIComponent(orgId)}`
 const enrollmentPath = (orgId: string) => `${orgPath(orgId)}/device-enrollments`
+export async function fetchVehicleSetupDefaults(orgId: string, token: string, signal?: AbortSignal): Promise<VehicleSetupDefaults> {
+  return parse(vehicleSetupDefaultsSchema, await request(`${enrollmentPath(orgId)}/setup`, token, undefined, signal))
+}
 export async function lookupDeviceEnrollment(orgId: string, token: string, userCode: string, signal?: AbortSignal): Promise<DeviceEnrollment> {
   const code = enrollmentUserCodeSchema.safeParse(userCode)
-  if (!code.success) throw new AdminApiError(code.error.issues[0]?.message || '请检查申请码。')
+  if (!code.success) throw new AdminApiError(code.error.issues[0]?.message || '请检查机器码。')
   return parse(deviceEnrollmentSchema, await request(`${enrollmentPath(orgId)}/lookup`, token, { user_code: code.data }, signal))
 }
 export async function approveDeviceEnrollment(orgId: string, token: string, enrollment: DeviceEnrollment, input?: DeviceEnrollmentApproval, signal?: AbortSignal): Promise<DeviceEnrollment> {
@@ -188,6 +202,11 @@ export async function saveAdminAssignment(orgId: string, token: string, input: A
   await request(`${orgPath(orgId)}/assignments`, token, { ...body, vehicle_ids: body.scope === 'all' ? [] : body.vehicle_ids })
 }
 const onboardingPath = (orgId: string) => `${orgPath(orgId)}/onboarding`
+export const registrationLinkSchema = z.object({ url: z.string().url(), expires_at: z.string().datetime() })
+export type RegistrationLink = z.infer<typeof registrationLinkSchema>
+export async function fetchRegistrationLink(orgId: string, token: string, operationId: string, signal?: AbortSignal): Promise<RegistrationLink> {
+  return parse(registrationLinkSchema, await request(`${onboardingPath(orgId)}/${encodeURIComponent(operationId)}/registration-link`, token, {}, signal))
+}
 export async function createOnboarding(orgId: string, token: string, input: OnboardingInput, idempotencyKey: string, signal?: AbortSignal): Promise<OnboardingOperation> {
   const parsed = onboardingInputSchema.safeParse(input)
   if (!parsed.success) throw new AdminApiError(parsed.error.issues[0]?.message || '请检查接入信息。')

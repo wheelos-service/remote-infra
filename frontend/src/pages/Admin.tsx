@@ -1,16 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
-import { Car, Users, ShieldCheck, Plus, Search, RefreshCw, ArrowLeft, LogOut } from 'lucide-react'
+import { Car, Users, ShieldCheck, Plus, Search, RefreshCw, ArrowLeft, LogOut, Copy } from 'lucide-react'
 import { useAuth } from '../app/AuthProvider'
 import {
   adminErrorMessage, createAdminPerson, createAdminVehicle, fetchAdminContext, fetchAdminPeople,
   fetchAdminVehicles, saveAdminAssignment, type AdminContext, type Assignment, type ManagedPerson, type ManagedVehicle,
   createOnboarding, fetchOnboardingOperations, retryOnboarding, createInstallationTicket,
-  onboardingInputSchema, onboardingNeedsPolling, onboardingStatusLabel,
+  onboardingInputSchema, onboardingNeedsPolling, onboardingStatusLabel, registrationLinkAvailable,
   type OnboardingInput, type OnboardingOperation, type InstallationTicket,
   addExistingMember,
-  lookupDeviceEnrollment, approveDeviceEnrollment, denyDeviceEnrollment, enrollmentUserCodeSchema,
+  lookupDeviceEnrollment, approveDeviceEnrollment, denyDeviceEnrollment, enrollmentUserCodeSchema, deviceEnrollmentApprovalSchema,
   type DeviceEnrollment,
+  fetchRegistrationLink, type RegistrationLink,
 } from '../lib/admin-api'
 
 const fieldClass = 'w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20'
@@ -57,7 +58,7 @@ export function AdminDirectory({ tab, people, vehicles, query, onEdit }: {
   const count = tab === 'vehicles' ? filteredVehicles.length : filteredPeople.length
   if (!count) return <div className="rounded-xl border border-dashed border-slate-700 px-6 py-12 text-center">
     <p className="font-medium">{search ? '没有匹配的记录' : tab === 'vehicles' ? '还没有登记车辆' : '还没有组织人员'}</p>
-    <p className="mt-2 text-sm text-slate-400">{search ? '尝试其他名称或编号，或清空搜索。' : tab === 'vehicles' ? '从“添加车辆”开始，登记后获取单次安装令牌。' : '从“添加人员”发送邀请，车辆权限可稍后分配。'}</p>
+    <p className="mt-2 text-sm text-slate-400">{search ? '尝试其他名称或编号，或清空搜索。' : tab === 'vehicles' ? '填写车辆名称和车端生成的机器码，完成注册。' : '填写用户名和角色，复制注册链接发送给用户。'}</p>
   </div>
   return <div className="overflow-x-auto rounded-xl border border-slate-800">
     <table className="w-full min-w-[700px] text-left text-sm">
@@ -108,7 +109,7 @@ export function RoleRangeFields({ role, scope, vehicleIds, vehicles, onRole, onS
     }}>
       {platformAdmin && <option value="org_admin">管理员</option>}
       <option value="viewer">查看者</option>
-      <option value="remote_operator">操作员（仅模拟控制）</option>
+      <option value="remote_operator">操作员（远程驾驶）</option>
     </select></label>
     <label>操作车辆范围 <select className={fieldClass} disabled={role === 'org_admin'} value={scope} onChange={event => {
       const nextScope = event.target.value as Assignment['scope']
@@ -200,14 +201,13 @@ export function AdminForms({ platformAdmin, people, vehicles, disabled, onPerson
   </div>
 }
 
-export function OnboardingForms({ platformAdmin, vehicles, disabled, onSubmit, kind }: {
+export function OnboardingForms({ platformAdmin, disabled, onSubmit, kind }: {
   platformAdmin: boolean; vehicles: ManagedVehicle[]; disabled: boolean
   onSubmit: (input: OnboardingInput, idempotencyKey: string) => Promise<boolean>
   kind?: OnboardingInput['kind']
 }) {
   const [role, setRole] = useState<Assignment['role']>('viewer')
-  const [scope, setScope] = useState<Assignment['scope']>('none')
-  const [vehicleIds, setVehicleIds] = useState<string[]>([])
+  const scope = role === 'org_admin' ? 'all' : 'none'
   const [error, setError] = useState('')
   const submissions = useRef(new Map<string, { fingerprint: string; key: string }>())
   const submitting = useRef(false)
@@ -230,24 +230,25 @@ export function OnboardingForms({ platformAdmin, vehicles, disabled, onSubmit, k
   }
   return <section className="space-y-3">
     {error && <AdminNotice error={error} />}
-    {kind !== 'vehicle' && <p className="text-sm text-slate-400">邀请邮件包含账号设置链接，不发送密码。默认可监看本组织车辆，无操作权限；可在权限管理中显式分配。</p>}
+    {kind !== 'vehicle' && <p className="text-sm text-slate-400">用户通过链接在 Casdoor 设置密码并完成注册。</p>}
     <div className={kind ? 'max-w-xl' : 'grid gap-6 md:grid-cols-2'}>
       {kind !== 'vehicle' && <form className="space-y-3" onSubmit={event => {
         event.preventDefault()
         const data = new FormData(event.currentTarget)
-        void submit({ kind: 'person', name: String(data.get('name') ?? ''), email: String(data.get('email') ?? ''),
-          role, scope, vehicle_ids: scope === 'all' ? [] : vehicleIds })
+        void submit({ kind: 'person', name: String(data.get('name') ?? ''), role, scope, vehicle_ids: [] })
       }}>
         <h2>添加人员</h2>
         <fieldset disabled={disabled} className="flex flex-col gap-3">
-          <label>人员名称 <input className={fieldClass} name="name" required maxLength={200} /></label>
-          <label>邮箱 <input className={fieldClass} name="email" type="email" required autoComplete="email" /></label>
-          <details className="rounded-lg border border-slate-700 p-3">
-            <summary className="cursor-pointer text-sm text-sky-200">初始权限 · {roleLabels[role]} / {scopeLabels[scope]}（可稍后分配）</summary>
-            <div className="mt-4 flex flex-col gap-3"><RoleRangeFields role={role} scope={scope} vehicleIds={vehicleIds} vehicles={vehicles} platformAdmin={platformAdmin}
-              onRole={setRole} onScope={setScope} onVehicles={setVehicleIds} /></div>
-          </details>
-          <button type="submit" className={primaryButtonClass} disabled={scope === 'selected' && !vehicleIds.length}>添加人员并发送邀请</button>
+          <label>用户名 <input className={fieldClass} name="name" required minLength={2} maxLength={64} autoComplete="off"
+            pattern={'[A-Za-z][A-Za-z0-9]*([_\\-][A-Za-z0-9]+)*'} placeholder="例如 operator-01" /></label>
+          <label>角色 <select className={fieldClass} value={role} onChange={event => setRole(event.target.value as Assignment['role'])}>
+            <option value="org_admin" disabled={!platformAdmin}>管理员</option>
+            <option value="remote_operator">操作员</option>
+            <option value="viewer">查看者</option>
+          </select></label>
+          {!platformAdmin && <p className="text-xs text-slate-400">管理员角色由平台管理员分配。</p>}
+          {role === 'remote_operator' && <p className="text-xs text-slate-400">注册后可在权限管理中分配操作车辆。</p>}
+          <button type="submit" className={primaryButtonClass}>生成注册链接</button>
         </fieldset>
       </form>}
       {kind !== 'person' && <form className="space-y-3" onSubmit={event => {
@@ -267,23 +268,25 @@ export function OnboardingForms({ platformAdmin, vehicles, disabled, onSubmit, k
   </section>
 }
 
-export function OnboardingOperations({ operations, busy, onRetry, onTicket }: {
+export function OnboardingOperations({ operations, busy, onRetry, onTicket, onRegistrationLink }: {
   operations: OnboardingOperation[]; busy: boolean
   onRetry: (id: string) => void; onTicket: (id: string) => void
+  onRegistrationLink?: (id: string) => void
 }) {
   return <section className="space-y-3">
     <h2>自动接入进度</h2>
     {!operations.length && <p>暂无接入任务。</p>}
     {operations.map(operation => <article key={operation.id} className="space-y-2 break-words rounded border border-slate-700 p-3 text-sm">
-      <p>{operation.name} · {operation.kind === 'person' ? '人员' : '车辆'} · {onboardingStatusLabel(operation.status)}</p>
+      <p>{operation.name} · {operation.kind === 'person' ? '人员' : '车辆'} · {onboardingStatusLabel(registrationLinkAvailable(operation) ? 'awaiting_registration' : operation.status)}</p>
       <details className="text-xs text-slate-400"><summary className="cursor-pointer">诊断详情</summary><p className="mt-2">operation_id: {operation.id} · stage: {operation.stage} · {operation.created_at}</p></details>
       {operation.email && <p>{operation.email}</p>}
       {operation.vehicle_id && <p>车辆 ID: {operation.vehicle_id}</p>}
       {operation.error_code && <p>诊断代码: {operation.error_code}</p>}
-      {operation.kind === 'person' && operation.status !== 'completed' && <p>邮件邀请尚未确认完成，请勿视为已送达。</p>}
-      {operation.kind === 'person' && operation.status === 'completed' && <p>账号与权限已配置；请通过 Casdoor 邮件完成账号设置。此状态不代表已完成首次登录。</p>}
+      {operation.error_code === 'REGISTRATION_EXPIRED' && <p>链接已过期，请重新添加此用户名以生成新链接。</p>}
+      {registrationLinkAvailable(operation) && <button className={primaryButtonClass} disabled={busy} onClick={() => onRegistrationLink?.(operation.id)}><Copy size={14} aria-hidden="true" />复制注册链接</button>}
+      {operation.kind === 'person' && operation.status === 'completed' && <p>{operation.email ? '账号设置邀请已处理。' : '用户已在 Casdoor 完成注册。'}</p>}
       {operation.kind === 'vehicle' && operation.status === 'completed' && <p>车辆认证安装已完成；不代表车辆在线、摄像头或视频已就绪，请前往授权车辆监看确认运行状态。</p>}
-      {operation.status === 'failed' && <button className={buttonClass} disabled={busy} onClick={() => onRetry(operation.id)}>重试失败任务</button>}
+      {operation.status === 'failed' && <button className={buttonClass} disabled={busy || operation.error_code === 'REGISTRATION_EXPIRED'} onClick={() => onRetry(operation.id)}>重试失败任务</button>}
       {operation.kind === 'vehicle' && operation.status === 'awaiting_install' && (operation.device_enrollment
         ? <p>由车端自动领取凭据；请在车辆终端完成接入，本页面不显示安装令牌或设备密钥。</p> : <>
         <p>车辆尚未安装接入。仅在受保护的车辆终端中使用短期单次安装令牌，不提供永久客户端密钥。</p>
@@ -308,25 +311,50 @@ export function InstallationInstructions({ ticket, vehicleId, onClear }: {
   </section>
 }
 
+export function CopyText({ value, label }: { value: string; label: string }) {
+  const [message, setMessage] = useState('')
+  useEffect(() => setMessage(''), [value])
+  return <div className="space-y-2">
+    <textarea aria-label={label} className={`${fieldClass} font-mono text-xs`} rows={value.includes('\n') ? 13 : 3}
+      readOnly autoComplete="off" spellCheck={false} value={value} onFocus={event => event.target.select()} />
+    <div className="flex flex-wrap items-center gap-3">
+      <button type="button" className={buttonClass} onClick={async () => {
+        try { await navigator.clipboard.writeText(value); setMessage('已复制') }
+        catch { setMessage('请选中上方内容并手动复制。') }
+      }}><Copy size={14} aria-hidden="true" />{label}</button>
+      {message && <span role="status" className="text-sm text-slate-300">{message}</span>}
+    </div>
+  </div>
+}
+
+export function VehicleRegistration(props: {
+  orgId: string; token: string; disabled: boolean; onDirectoryChange: () => void; onOperationFound?: (id: string) => void
+}) {
+  return <section className="space-y-5 rounded-xl border border-slate-700 bg-slate-900/60 p-5">
+    <h2 className="font-medium text-sky-200">注册车辆</h2>
+    <p className="text-sm text-slate-400">先在车端完成配置并运行注册程序，再填写车辆名称和生成的机器码。</p>
+    <DeviceEnrollmentPanel {...props} />
+  </section>
+}
+
 export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChange, onOperationFound }: {
   orgId: string; token: string; disabled: boolean; onDirectoryChange: () => void; onOperationFound?: (id: string) => void
 }) {
   const [userCode, setUserCode] = useState('')
-  const [result, setResult] = useState<{ orgId: string; token: string; code: string; record: DeviceEnrollment }>()
+  const [result, setResult] = useState<{ orgId: string; token: string; code: string; name: string; record: DeviceEnrollment }>()
   const [name, setName] = useState('')
-  const [vehicleNumber, setVehicleNumber] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [, setClock] = useState(0)
   const request = useRef<AbortController | undefined>(undefined)
-  const scope = useRef({ orgId, token, code: userCode, disabled })
-  scope.current = { orgId, token, code: userCode, disabled }
+  const scope = useRef({ orgId, token, code: userCode, name, disabled })
+  scope.current = { orgId, token, code: userCode, name, disabled }
   useEffect(() => {
     request.current?.abort(); request.current = undefined
-    setUserCode(''); setResult(undefined); setName(''); setVehicleNumber(''); setBusy(false); setError('')
+    setUserCode(''); setResult(undefined); setName(''); setBusy(false); setError('')
     return () => { request.current?.abort(); request.current = undefined }
   }, [orgId, token])
-  const record = result?.orgId === orgId && result.token === token && result.code === userCode ? result.record : undefined
+  const record = result?.orgId === orgId && result.token === token && result.code === userCode && result.name === name ? result.record : undefined
   const expiresAt = record ? Date.parse(record.expires_at) : NaN
   const pending = record?.status === 'pending' && Number.isFinite(expiresAt) && expiresAt > Date.now()
   useEffect(() => {
@@ -336,16 +364,16 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
   }, [record, expiresAt])
   const run = async (code: string, operation: (signal: AbortSignal) => Promise<DeviceEnrollment>, refresh = false) => {
     if (disabled || scope.current.disabled || request.current || scope.current.orgId !== orgId
-      || scope.current.token !== token || scope.current.code !== code) return
+      || scope.current.token !== token || scope.current.code !== code || scope.current.name !== name) return
     const controller = new AbortController()
     request.current = controller
     setBusy(true); setError('')
     const current = () => !controller.signal.aborted && request.current === controller
-      && scope.current.orgId === orgId && scope.current.token === token && scope.current.code === code
+      && scope.current.orgId === orgId && scope.current.token === token && scope.current.code === code && scope.current.name === name
     try {
       const next = await operation(controller.signal)
       if (!current()) return
-      setResult({ orgId, token, code, record: next }); setName(next.name)
+      setResult({ orgId, token, code, name, record: next })
       if (next.operation_id) onOperationFound?.(next.operation_id)
       if (refresh) onDirectoryChange()
     } catch (cause) {
@@ -354,48 +382,53 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
       if (current()) { request.current = undefined; setBusy(false) }
     }
   }
+  const changeDetails = (nextName: string, nextCode: string) => {
+    request.current?.abort(); request.current = undefined
+    scope.current.name = nextName; scope.current.code = nextCode
+    setName(nextName); setUserCode(nextCode); setResult(undefined); setError(''); setBusy(false)
+  }
   const status = record && ({
     pending: pending ? '等待审批' : '已过期，不能审批', approved: '已批准，等待设备完成接入',
     provisioning: '已批准，正在配置车辆身份', awaiting_install: '已批准，等待设备完成安装',
     failed: '接入配置失败，请查看接入任务并手动重试',
-    denied: '已拒绝', expired: '已过期',
+    denied: '已拒绝', expired: '已过期', active: '注册完成',
   } as Record<string, string>)[record.status]
-  return <section className="space-y-3 rounded-xl border border-slate-700 bg-slate-900/60 p-5">
-    <h2 className="font-medium text-sky-200">设备码注册</h2>
-    <p className="text-sm text-slate-400">输入车辆终端显示的申请码，在当前组织核对后显式批准或拒绝。审批不授予驾驶或控制权限，也不代表车辆在线。</p>
+  return <section className="space-y-3">
     <form onSubmit={event => {
       event.preventDefault()
+      const vehicle = deviceEnrollmentApprovalSchema.safeParse({ name })
+      if (!vehicle.success) { setError(vehicle.error.issues[0]?.message || '请检查车辆名称。'); return }
       const parsed = enrollmentUserCodeSchema.safeParse(userCode)
-      if (!parsed.success) { setError(parsed.error.issues[0]?.message || '请检查申请码。'); return }
-      setResult(undefined); setVehicleNumber('')
+      if (!parsed.success) { setError(parsed.error.issues[0]?.message || '请检查机器码。'); return }
+      setResult(undefined)
       void run(userCode, signal => lookupDeviceEnrollment(orgId, token, parsed.data, signal))
     }}>
       <fieldset disabled={disabled || busy} className="flex flex-wrap items-end gap-3">
-        <label className="max-w-xs flex-1 text-sm">8 位申请码 <input className={`${fieldClass} font-mono`} name="user_code"
+        <label className="min-w-48 max-w-sm flex-1 text-sm">车辆名称 <input className={fieldClass} name="vehicle_name"
+          required maxLength={200} value={name} placeholder="CTZY001"
+          onChange={event => changeDetails(event.target.value, userCode)} /></label>
+        <label className="min-w-48 max-w-xs flex-1 text-sm">机器码 <input className={`${fieldClass} font-mono`} name="user_code"
           autoComplete="off" spellCheck={false} required maxLength={9} value={userCode} placeholder="ABCD-EFGH"
           onChange={event => {
-            request.current?.abort(); request.current = undefined
             const code = event.target.value.trim().replace(/-/g, '').toUpperCase()
-            scope.current.code = code
-            setUserCode(code); setResult(undefined); setName(''); setVehicleNumber(''); setError(''); setBusy(false)
+            changeDetails(name, code)
           }} /></label>
-        <button type="submit" className={buttonClass}>查询申请</button>
+        <button type="submit" className={buttonClass}>核对车辆</button>
       </fieldset>
     </form>
     {busy && <p role="status" className="text-sm">正在处理，请勿重复操作…</p>}
     {error && <AdminNotice error={error} />}
     {record && <div className="space-y-3 text-sm">
-      <p className="text-amber-200">以下名称、序列号与平台由设备自行报告，未经核实；请通过可信渠道核对设备和公钥指纹。</p>
-      <dl className="grid gap-2 break-all sm:grid-cols-2">
-        <div><dt className="text-slate-400">设备名称（未核实）</dt><dd>{record.name || '未提供'}</dd></div>
-        <div><dt className="text-slate-400">序列号（未核实）</dt><dd>{record.serial || '未提供'}</dd></div>
-        <div><dt className="text-slate-400">平台（未核实）</dt><dd>{record.platform || '未提供'}</dd></div>
+      <details className="text-xs text-slate-400"><summary className="cursor-pointer">核对设备详情</summary>
+      <p className="mt-2">请与车端核对机器码和公钥指纹。</p>
+      <dl className="mt-2 grid gap-2 break-all sm:grid-cols-2">
         <div><dt className="text-slate-400">公钥 SHA256 指纹</dt><dd className="font-mono">{record.fingerprint}</dd></div>
         <div><dt className="text-slate-400">申请时间</dt><dd>{record.created_at}</dd></div>
         <div><dt className="text-slate-400">到期时间</dt><dd>{record.expires_at}</dd></div>
       </dl>
+      </details>
       <p role="status">{status || '未知状态，不能审批'}</p>
-      <p>{record.recovery ? '恢复申请：是；仅恢复服务端已有绑定，不能更改组织或车辆。' : '恢复申请：否；批准后创建当前组织的新车辆。'}</p>
+      {record.recovery && <p>恢复已有车辆凭据，保留原车辆和组织绑定。</p>}
       {record.vehicle_id && <p>已绑定车辆 ID：<span className="break-all font-mono">{record.vehicle_id}</span></p>}
       {record.error_code && <p>诊断代码：{record.error_code}</p>}
       {record.operation_id && <div className="space-y-1">
@@ -406,16 +439,11 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
         event.preventDefault()
         if (!pending || Date.parse(record.expires_at) <= Date.now()) return
         void run(userCode, signal => approveDeviceEnrollment(orgId, token, record,
-          record.recovery ? undefined : { name, vehicle_number: vehicleNumber }, signal), true)
+          record.recovery ? undefined : { name }, signal), true)
       }}>
         <fieldset disabled={disabled || busy || !pending} className="flex flex-col gap-3">
-          {!record.recovery && <div className="grid gap-3 sm:grid-cols-2">
-            <label>批准后的车辆名称 <input className={fieldClass} name="name" required maxLength={200} value={name} onChange={event => setName(event.target.value)} /></label>
-            <label>客户内部车辆编号 <input className={fieldClass} name="vehicle_number" required maxLength={24}
-              pattern="[A-Za-z0-9][A-Za-z0-9_.-]{0,23}" value={vehicleNumber} onChange={event => setVehicleNumber(event.target.value)} /></label>
-          </div>}
           <div className="flex gap-3">
-            <button type="submit" className={primaryButtonClass}>{record.recovery ? '批准恢复已有车辆' : '批准接入新车辆'}</button>
+            <button type="submit" className={primaryButtonClass}>{record.recovery ? '确认恢复车辆' : '确认注册车辆'}</button>
             <button type="button" className={buttonClass} onClick={() => {
               if (!pending || Date.parse(record.expires_at) <= Date.now()) return
               void run(userCode, signal => denyDeviceEnrollment(orgId, token, record.id, signal))
@@ -437,6 +465,7 @@ export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disab
   const [notice, setNotice] = useState('')
   const [revision, setRevision] = useState(0)
   const [ticket, setTicket] = useState<{ value: InstallationTicket; vehicleId: string; operationId: string }>()
+  const [registrationLink, setRegistrationLink] = useState<{ value: RegistrationLink; operationId: string }>()
   const previous = useRef(new Map<string, string>())
   const lifetime = useRef<AbortController | undefined>(undefined)
   const inFlight = useRef(false)
@@ -448,7 +477,7 @@ export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disab
   useEffect(() => {
     const controller = new AbortController()
     lifetime.current = controller
-    setTicket(undefined); setOperations([]); setBusy(false); inFlight.current = false; previous.current.clear()
+    setTicket(undefined); setRegistrationLink(undefined); setOperations([]); setBusy(false); inFlight.current = false; previous.current.clear()
     return () => { controller.abort(); lifetime.current = undefined }
   }, [orgId, token])
   useEffect(() => {
@@ -487,6 +516,16 @@ export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disab
     if (ticket && operations.some(operation => operation.id === ticket.operationId && operation.status === 'completed')) setTicket(undefined)
   }, [ticket, operations])
   useEffect(() => { setTicket(undefined) }, [tab])
+  useEffect(() => { setRegistrationLink(undefined) }, [tab])
+  useEffect(() => {
+    if (!registrationLink) return
+    const expiresIn = Date.parse(registrationLink.value.expires_at) - Date.now()
+    if (expiresIn <= 0 || operations.some(op => op.id === registrationLink.operationId && !registrationLinkAvailable(op))) {
+      setRegistrationLink(undefined); return
+    }
+    const timer = setTimeout(() => setRegistrationLink(undefined), Math.min(expiresIn, 2_147_483_647))
+    return () => clearTimeout(timer)
+  }, [registrationLink, operations])
   const run = async (operation: (signal: AbortSignal) => Promise<void>): Promise<boolean> => {
     const controller = lifetime.current
     if (!controller || inFlight.current) return false
@@ -513,21 +552,21 @@ export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disab
     {error && <AdminNotice error={error} />}
     {notice && <p role="status">{notice}</p>}
     {busy && <p role="status">正在提交接入请求，请勿重复操作…</p>}
-    <details className="rounded-xl border border-slate-700 bg-slate-900/60 p-5">
-      <summary className="flex cursor-pointer items-center gap-2 font-medium text-sky-200"><Plus size={18} aria-hidden="true" />{kind === 'vehicle' ? '添加车辆' : kind === 'person' ? '添加人员' : '添加人员或车辆'}</summary>
+    {kind !== 'vehicle' && <details open className="rounded-xl border border-slate-700 bg-slate-900/60 p-5">
+      <summary className="flex cursor-pointer items-center gap-2 font-medium text-sky-200"><Plus size={18} aria-hidden="true" />添加人员</summary>
       <div className="mt-5">
     <OnboardingForms platformAdmin={platformAdmin} vehicles={vehicles} disabled={disabled || busy} kind={kind} onSubmit={(input, key) =>
       run(async signal => {
         const operation = await createOnboarding(orgId, token, input, key, signal)
         if (signal.aborted) return
         remember(operation)
-        setNotice(`已登记接入任务，${onboardingStatusLabel(operation.status)}。请查看任务进度。`)
+        setNotice('正在生成注册链接，请在下方查看。')
         if (progress.current) progress.current.open = true
       })} />
       </div>
-    </details>
+    </details>}
     {children}
-    <details ref={progress} className="rounded-xl border border-slate-800 p-5">
+    <details ref={progress} open={kind === 'person'} className="rounded-xl border border-slate-800 p-5">
       <summary className="cursor-pointer text-sm font-medium">接入与邀请进度 · {visibleOperations.length}
         {pendingCount > 0 && <span className="ml-3 rounded-full bg-amber-500/10 px-2 py-1 text-xs text-amber-200">{pendingCount} 项待处理</span>}
       </summary>
@@ -541,7 +580,18 @@ export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disab
       setTicket(undefined)
       const value = await createInstallationTicket(orgId, token, id, signal)
       if (!signal.aborted && currentTab.current === tab) setTicket({ value, vehicleId: operations.find(item => item.id === id)?.vehicle_id ?? '', operationId: id })
+    })} onRegistrationLink={id => void run(async signal => {
+      setRegistrationLink(undefined)
+      const value = await fetchRegistrationLink(orgId, token, id, signal)
+      if (signal.aborted || currentTab.current !== tab) return
+      setRegistrationLink({ value, operationId: id })
+      try { await navigator.clipboard.writeText(value.url); if (!signal.aborted) setNotice('注册链接已复制，可发送给用户。') }
+      catch { if (!signal.aborted) setNotice('链接已生成，可在下方手动复制。') }
     })} />
+    {registrationLink && <div className="space-y-3 rounded-lg border border-sky-800 p-4">
+      <p className="text-sm">发送此链接给用户，在 Casdoor 完成注册。链接仅可使用一次，有效期至 {new Date(registrationLink.value.expires_at).toLocaleString()}。</p>
+      <CopyText value={registrationLink.value.url} label="复制注册链接" />
+    </div>}
       </div>
     </details>
     {ticket && <InstallationInstructions ticket={ticket.value} vehicleId={ticket.vehicleId} onClear={() => setTicket(undefined)} />}
@@ -649,31 +699,33 @@ export default function Admin() {
       {orgId && context.organizations.some(org => org.org_id === orgId) && <>
         <AdminTabs value={tab} onChange={changeTab} peopleCount={people.length} vehicleCount={vehicles.length} />
         <section id={`admin-panel-${tab}`} role="tabpanel" aria-labelledby={`admin-tab-${tab}`} tabIndex={0} className="space-y-6 outline-none">
-          {tab === 'people' && <form className="space-y-3 rounded-xl border border-slate-800 p-5" onSubmit={event => {
+          {tab === 'people' && <details className="rounded-xl border border-slate-800 p-4 text-sm">
+            <summary className="cursor-pointer text-slate-400">添加已有账号</summary>
+            <form className="mt-4 space-y-3" onSubmit={event => {
             event.preventDefault()
             const subject = String(new FormData(event.currentTarget).get('subject') ?? '').trim()
             void mutate(() => addExistingMember(orgId, token, subject))
           }}>
             <h2>添加已有账号到当前组织</h2>
-            <p className="text-sm text-slate-400">仅接受已在网关核实绑定的可信 Casdoor subject；不按邮箱合并、不创建或重绑身份。加入后默认可监看本组织全部车辆，无操作权限。此操作仍受后端维护排空保护。</p>
+            <p className="text-sm text-slate-400">使用已有账号的身份标识，将其加入当前组织。</p>
             <fieldset disabled={loading || saving || !ready} className="flex flex-wrap gap-3">
               <label className="flex-1">已核实的 subject <input className={fieldClass} name="subject" required maxLength={512} autoComplete="off" /></label>
               <button className={buttonClass} type="submit">添加已有成员</button>
             </fieldset>
-          </form>}
+          </form></details>}
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div><h2 className="text-lg font-semibold">{adminTabs.find(item => item.id === tab)?.label}</h2>
-              <p className="mt-1 max-w-2xl text-sm text-slate-400">{tab === 'vehicles' ? '登记车辆、完成认证安装。登记状态不代表在线或视频就绪，运行状态请到授权车辆监看查看。'
-                : tab === 'people' ? '邀请人员加入组织。邮件设置密码后使用邮箱登录，默认可监看本组织全部车辆，无操作权限。'
+              <p className="mt-1 max-w-2xl text-sm text-slate-400">{tab === 'vehicles' ? '填写车辆名称和车端生成的机器码，核对后完成注册。'
+                : tab === 'people' ? '填写用户名和角色，发送链接，由用户完成注册。'
                   : '选择人员、设置角色和操作车辆范围。认证由 Casdoor 负责，业务权限由 Gateway 统一执行。'}</p>
             </div>
             <button className={buttonClass} disabled={loading || saving} onClick={() => { setError(''); setRevision(value => value + 1) }}><RefreshCw size={15} aria-hidden="true" />刷新列表</button>
           </div>
-          {tab === 'permissions' && <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-200">
-            修改已有权限前，需由运维启用管理维护模式，并排空视频/控制会话、等待已签发令牌过期。修改被拒绝后不会自动生效。{context.onboarding_enabled && '新增人员和车辆不需要中断已有会话。'}
+          {tab === 'permissions' && <div className="rounded-xl border border-slate-700 bg-slate-900/40 p-4 text-sm text-slate-300">
+            请以保存成功后的权限列表为准。若保存时提示需要维护排空，请联系运维处理后手动重试；被拒绝的修改不会自动生效。{context.onboarding_enabled && '新增人员和车辆不需要中断已有会话。'}
           </div>}
           {!context.onboarding_enabled && <p className="rounded-lg border border-amber-500/30 p-4 text-sm text-amber-200">手工预配试点：请先由平台运维在 Casdoor 创建身份，并核实可信 issuer 下的 subject，再创建绑定。本界面不是邀请流程，不生成账号密码、车辆凭据或密钥。保存前需维护排空。</p>}
-          {context.onboarding_enabled && tab === 'vehicles' && <DeviceEnrollmentPanel key={orgId + ':' + token}
+          {context.onboarding_enabled && tab === 'vehicles' && <VehicleRegistration key={orgId + ':' + token}
             orgId={orgId} token={token} disabled={loading || saving || !ready}
             onOperationFound={() => setEnrollmentRevision(value => value + 1)}
             onDirectoryChange={() => setRevision(value => value + 1)} />}
@@ -702,7 +754,7 @@ export default function Admin() {
             <summary className="cursor-pointer">角色说明与授权规则</summary>
             <dl className="mt-4 grid gap-4 sm:grid-cols-3">
               <div><dt className="font-medium text-slate-200">查看者</dt><dd className="mt-1">监看本组织全部有效车辆，不具备控制能力。</dd></div>
-              <div><dt className="font-medium text-slate-200">操作员</dt><dd className="mt-1">监看并申请授权车辆的模拟控制权；仍需有效控制租约，不开放实车驾驶。</dd></div>
+              <div><dt className="font-medium text-slate-200">操作员</dt><dd className="mt-1">监看并申请授权车辆的控制权；需有效控制租约及车端就绪。</dd></div>
               <div><dt className="font-medium text-slate-200">管理员</dt><dd className="mt-1">管理组织人员与权限，可监看本组织车辆，不获得驾驶或控制能力。</dd></div>
             </dl>
             <p className="mt-4">默认可监看本组织全部有效车辆及新增车辆，无操作权限；操作车辆范围仅限定显式操作授权。禁止修改自身权限。</p>

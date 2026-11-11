@@ -35,7 +35,7 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({
         <button type="button" disabled={busy} onClick={onBack} className="rounded border border-slate-700 px-3 py-2 text-xs disabled:opacity-40">返回远程驾驶列表</button>
         <h1 className="text-sm font-semibold text-slate-100">{vehicleId} · 远程驾驶工作台</h1>
         <span className="text-xs text-slate-300">{row.online ? '在线' : '离线'} · {row.control} · 监看模式</span>
-        <span className="text-xs text-amber-200">{authenticated ? '模拟控制 · 不连接实车执行器' : 'Mock 数据 · 视频未接入 · 不可控制'}</span>
+        <span className="text-xs text-amber-200">{authenticated ? '远程驾驶' : 'Mock 数据 · 视频未接入 · 不可控制'}</span>
       </div>
       <button type="button" disabled={busy} onClick={onMonitor} className="text-xs text-sky-200 disabled:opacity-40">查看车辆监控</button>
     </header>
@@ -44,12 +44,12 @@ const TeleopWorkbench: React.FC<TeleopWorkbenchProps> = ({
       {[
         ['遥测', row.online ? authenticated ? '已连接' : 'Mock 正在更新' : '离线 / 未知'], ['视频', videoStatus ?? '未接入'],
         ['网络', '网络质量未知 · 未测量'], ['控制权限', authenticated ? observeOnly ? '仅监看' : '可申请' : '未接入授权检查'],
-        ['控制', authenticated ? busy ? '模拟会话进行中' : '未申请 · 仅模拟' : '不可用'],
+        ['控制', authenticated ? busy ? '控制会话进行中' : '未申请' : '不可用'],
       ].map(([label, value]) => <div key={label} className="flex gap-2"><dt className="text-slate-500">{label}</dt><dd className="text-slate-300">{value}</dd></div>)}
     </dl>
     {cameraView ?? <ThreeCameraView vehicleId={vehicleId} />}
     {controlPanel}
-    <p className="text-xs text-amber-200">{authenticated ? '仅模拟；' : 'Mock 监看 · 不可控制；'}倒挡不改变前三相机方位，不提供后视驾驶。</p>
+    <p className="text-xs text-amber-200">{authenticated ? '' : 'Mock 监看 · 不可控制；'}倒挡不改变前三相机方位，不提供后视驾驶。</p>
     <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_280px]">
       <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-xs text-slate-300">
         <p>{vehicleId} · 挡位 {gear} · {runModeLabel}</p>

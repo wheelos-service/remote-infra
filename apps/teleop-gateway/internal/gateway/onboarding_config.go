@@ -25,6 +25,7 @@ type onboardingConfig struct {
 	BrowserApplication     string `json:"browser_application"`
 	Certificate            string `json:"certificate"`
 	GatewayURL             string `json:"gateway_url"`
+	ConsoleURL             string `json:"console_url,omitempty"`
 	EncryptionKeyFile      string `json:"encryption_key_file"`
 }
 
@@ -75,7 +76,10 @@ func loadOnboardingConfig(path string) (onboardingConfig, cipher.AEAD, error) {
 	if err := decoder.Decode(&config); err != nil || decoder.Decode(new(any)) != io.EOF {
 		return config, nil, errOnboardingConfig
 	}
-	for _, raw := range []string{config.CasdoorURL, config.JWKSURL, config.GatewayURL} {
+	if config.ConsoleURL == "" {
+		config.ConsoleURL = config.GatewayURL
+	}
+	for _, raw := range []string{config.CasdoorURL, config.JWKSURL, config.GatewayURL, config.ConsoleURL} {
 		if !onboardingSafeURL(raw) || len(raw) > 2048 {
 			return config, nil, errOnboardingConfig
 		}

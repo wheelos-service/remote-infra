@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Launch an isolated, simulation-only LAN authentication acceptance deployment.
+"""Launch an isolated, simulation-only authentication acceptance deployment.
 
 Run with --state pointing to an existing owner-only directory outside Git.
 The directory holds generated Compose configuration, secrets and the local CA.
-Trust root.crt on the testing workstation before using the three HTTPS URLs.
+Use --local for loopback HTTP, or --lan-ip for a private LAN IPv4 address.
+For LAN HTTPS, trust root.crt on each testing workstation. Use --no-email
+to omit the legacy test mailbox and email provider.
 Existing projects, ports 443/8000, real vehicles and external SMTP are untouched.
 """
 
 import argparse
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -29,6 +32,25 @@ IP = "10.0.39.103"
 APP = f"https://{IP}:8443"
 AUTH = f"https://{IP}:8444"
 MAIL = f"https://{IP}:8445"
+LOCAL = False
+NO_EMAIL = False
+MEDIA = False
+DASHBOARD_SESSION_HOURS = 7 * 24
+
+
+def email_enabled():
+    return not LOCAL and not NO_EMAIL
+
+
+def lan_address(value):
+    try:
+        address = ipaddress.IPv4Address(value)
+        if any(address in ipaddress.IPv4Network(network)
+               for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")):
+            return str(address)
+    except ipaddress.AddressValueError:
+        pass
+    raise argparse.ArgumentTypeError("use a private LAN IPv4 address assigned to this computer")
 
 
 def run(args, **kwargs):
@@ -50,6 +72,9 @@ def compose(state, *args, **kwargs):
 
 
 def prepare(state):
+    previous = state / "onboarding.json"
+    if previous.exists() and json.loads(previous.read_text()).get("gateway_url") != APP:
+        raise RuntimeError("deployment address changed; use a separate state directory")
     secrets_file = state / "secrets.json"
     if not secrets_file.exists():
         write(secrets_file, {
@@ -68,11 +93,12 @@ def prepare(state):
           "Gateway platform administrator (not Casdoor built-in system administrator)\n"
           "Username: test-admin\nEmail: admin@example.test\n"
           f"Temporary password: {values['admin_password']}\n"
-          f"Login: {APP}/#/admin\nClick 管理员登录, then enter the email and password.\n"
+          f"Login: {APP}/#/admin\nClick 管理员登录, then enter the username and password.\n"
           "Tenant: authentication-test\nApplication: authentication-test-browser\n"
           "Do not use the Casdoor built-in administrator/system console login.\n")
-    write(state / "mail-credentials.txt",
-          f"URL: {MAIL}\nUsername: mailbox\nPassword: {values['mail_password']}\n")
+    if email_enabled():
+        write(state / "mail-credentials.txt",
+              f"URL: {MAIL}\nUsername: mailbox\nPassword: {values['mail_password']}\n")
     write(state / "onboarding.key", values["encryption"])
     write(state / "onboarding.json", {
         "supported_version": "4.25.0", "casdoor_url": AUTH,
@@ -81,7 +107,7 @@ def prepare(state):
         "management_client_secret": values["management_secret"],
         "casdoor_organization": "authentication-test",
         "browser_application": "authentication-test-browser",
-        "certificate": "cert-built-in", "gateway_url": APP,
+        "certificate": "cert-built-in", "gateway_url": APP, "console_url": APP,
         "encryption_key_file": "/run/auth/onboarding.key",
     })
     write(state / "casdoor.conf",
@@ -105,42 +131,42 @@ def prepare(state):
           "redis:\n  address: redis:6379\nkeys:\n"
           f"  authentication_test: {values['livekit']}\n")
     write(state / "runtime-config.js", "window.__LIVEKIT_INFRA_CONFIG__ = " + json.dumps({
-        "gatewayUrl": APP, "livekitUrl": APP.replace("https:", "wss:"),
+        "gatewayUrl": APP, "livekitUrl": APP.replace("https:", "wss:").replace("http:", "ws:"),
         "authorizeUrl": AUTH + "/login/oauth/authorize",
         "tokenUrl": AUTH + "/api/login/oauth/access_token",
-        "clientId": values["browser_id"], "simulationControl": False,
+        "clientId": values["browser_id"],
     }) + ";\n")
     # This file is public browser configuration; Nginx's worker must read it.
     (state / "runtime-config.js").chmod(0o644)
-    write(state / "Caddyfile", f"""{{
-  admin off
-  auto_https disable_redirects
-  default_sni {IP}
-}}
-{APP} {{
-  tls internal
-  @gateway path /api/* /rtc /rtc/* /healthz /readyz
-  handle /test-root-ca.crt {{
+    tls = "" if LOCAL else "  tls internal\n"
+    ca_route = "" if LOCAL else """  handle /test-root-ca.crt {
     rewrite * /root.crt
     root * /data/caddy/pki/authorities/local
     file_server
-  }}
-  handle @gateway {{
-    reverse_proxy gateway:8080
+  }
+"""
+    global_options = "  auto_https off" if LOCAL else f"  auto_https disable_redirects\n  default_sni {IP}"
+    write(state / "Caddyfile", f"""{{
+  admin off
+{global_options}
+}}
+{APP} {{
+{tls}  @gateway path /api/* /rtc /rtc/* /healthz /readyz
+{ca_route}  handle @gateway {{
+    reverse_proxy {'127.0.0.1' if LOCAL else 'gateway'}:8080
   }}
   handle {{
     reverse_proxy frontend:80
   }}
 }}
 {AUTH} {{
-  tls internal
-  reverse_proxy casdoor:8000
+{tls}  reverse_proxy {'127.0.0.1' if LOCAL else 'casdoor'}:8000
 }}
-{MAIL} {{
+""" + (f"""{MAIL} {{
   tls internal
   reverse_proxy mailpit:8025
 }}
-""")
+""" if email_enabled() else ""))
     volume = lambda name, target: f"{state / name}:{target}:ro"
     env = {
         "LIVEKIT_API_KEY": "authentication_test", "LIVEKIT_API_SECRET": values["livekit"],
@@ -155,8 +181,9 @@ def prepare(state):
         "AUTHORIZATION_ONBOARDING_CONFIG_FILE": "/run/auth/onboarding.json",
         "CONTROL_HANDOVER_ACK_ENABLED": "false", "SIMULATED_CONTROL_VEHICLES_JSON": "[]",
         "ALLOWED_ORIGINS": APP, "OPERATIONS_DB_PATH": "/var/lib/teleop/operations.db",
-        "SSL_CERT_FILE": "/run/auth/root.crt",
     }
+    if not LOCAL:
+        env["SSL_CERT_FILE"] = "/run/auth/root.crt"
     services = {
         "postgres": {
             "image": "postgres:16-alpine",
@@ -194,7 +221,8 @@ def prepare(state):
             "image": "authentication-test-gateway:local", "environment": env,
             "user": f"{os.getuid()}:{os.getgid()}",
             "volumes": [volume(name, "/run/auth/" + name)
-                        for name in ("onboarding.json", "onboarding.key", "root.crt")]
+                        for name in (("onboarding.json", "onboarding.key") if LOCAL else
+                                     ("onboarding.json", "onboarding.key", "root.crt"))]
                        + ["operations:/var/lib/teleop"],
             "depends_on": {"postgres": {"condition": "service_healthy"},
                            "redis": {"condition": "service_started"},
@@ -208,17 +236,36 @@ def prepare(state):
             "image": "caddy:2-alpine",
             "user": f"{os.getuid()}:{os.getgid()}",
             "environment": {"XDG_CONFIG_HOME": "/data/config"},
-            "ports": [f"{IP}:{port}:{port}" for port in (8443, 8444, 8445)],
+            "ports": [f"{IP}:{port}:{port}" for port in
+                      ((8443, 8444, 8445) if email_enabled() else (8443, 8444))],
             "volumes": [volume("Caddyfile", "/etc/caddy/Caddyfile"),
                         f"{state / 'caddy-data'}:/data", "caddy-config:/config"],
         },
     }
+    if not email_enabled():
+        del services["mailpit"]
+    if MEDIA:
+        if LOCAL:
+            raise RuntimeError("LAN media requires --lan-ip")
+        services["livekit"]["command"] += ["--node-ip", IP]
+        services["livekit"]["ports"] = [
+            f"{IP}:7881:7881/tcp", f"{IP}:51000-51010:51000-51010/udp",
+        ]
+    if LOCAL:
+        # Share loopback so the same public issuer and token URL work inside the
+        # containers and on the host without sending credentials over plain LAN HTTP.
+        services["gateway"]["network_mode"] = "service:caddy"
+        services["gateway"]["depends_on"]["casdoor"] = {"condition": "service_started"}
+        services["gateway"]["depends_on"]["caddy"] = {"condition": "service_started"}
+        services["casdoor"]["network_mode"] = "service:caddy"
+        services["casdoor"]["depends_on"] = ["caddy"]
     for service in services.values():
         service["restart"] = "unless-stopped"
     write(state / "compose.json", {
         "services": services,
         "volumes": {name: {} for name in
-                    ("postgres", "redis", "mailpit", "operations", "caddy-config")},
+                    ("postgres", "redis", "operations", "caddy-config")
+                    + (("mailpit",) if email_enabled() else ())},
     })
     for name in ("casdoor-data", "casdoor-logs", "caddy-data"):
         (state / name).mkdir(mode=0o700, exist_ok=True)
@@ -257,7 +304,8 @@ def build(state):
          str(context)], cwd=ROOT)
 
 
-def request(state, path, body=None, admin=True, origin=AUTH, form=False, bearer=None):
+def request(state, path, body=None, admin=True, origin=None, form=False, bearer=None):
+    origin = origin or AUTH
     values = json.loads((state / "secrets.json").read_text())
     headers = {}
     if admin:
@@ -270,7 +318,7 @@ def request(state, path, body=None, admin=True, origin=AUTH, form=False, bearer=
         payload = (urllib.parse.urlencode(body) if form else json.dumps(body)).encode()
         headers["Content-Type"] = (
             "application/x-www-form-urlencoded" if form else "application/json")
-    context = ssl.create_default_context(cafile=str(state / "root.crt"))
+    context = ssl.create_default_context(cafile=str(state / "root.crt")) if not LOCAL else None
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
     try:
@@ -291,15 +339,17 @@ def success(value, stage):
 
 
 def start(state, values):
-    compose(state, "up", "-d", "postgres", "redis", "casdoor", "mailpit", "livekit", "caddy")
-    root = state / "caddy-data/caddy/pki/authorities/local/root.crt"
-    for _ in range(120):
-        if root.exists():
-            write(state / "root.crt", root.read_text())
-            break
-        time.sleep(0.5)
-    else:
-        raise RuntimeError("local CA did not initialize")
+    compose(state, "up", "-d", "postgres", "redis", "casdoor", "livekit", "caddy",
+            *(["mailpit"] if email_enabled() else []))
+    if not LOCAL:
+        root = state / "caddy-data/caddy/pki/authorities/local/root.crt"
+        for _ in range(120):
+            if root.exists():
+                write(state / "root.crt", root.read_text())
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("local CA did not initialize")
     for _ in range(120):
         try:
             request(state, "/api/health", admin=False)
@@ -311,6 +361,7 @@ def start(state, values):
     if not (state / "configured").exists():
         configure(state, values)
         write(state / "configured", "Casdoor tenant initialized\n")
+    configure_dashboard_session(state, values)
     if not (state / "bootstrapped").exists():
         write(state / "bootstrap.json", {
             "org_id": values["org_id"], "org_name": "Authentication test fleet",
@@ -341,16 +392,24 @@ def configure(state, values):
         "content": "<p>Verification code: %s</p><reset-link>"
                    '<p><a href="%link">Set your password</a></p></reset-link>',
     }
-    success(request(state, "/api/add-provider", provider), "private Email provider creation")
+    if email_enabled():
+        success(request(state, "/api/add-provider", provider), "private Email provider creation")
     browser = {
         "owner": "admin", "name": "authentication-test-browser",
         "displayName": "Authentication test", "organization": organization["name"],
         "cert": "cert-built-in", "clientId": values["browser_id"],
-        "grantTypes": ["authorization_code"], "tokenFormat": "JWT", "expireInHours": 0.1,
-        "enablePassword": True, "enableSignUp": False,
+        "grantTypes": ["authorization_code"], "tokenFormat": "JWT",
+        "expireInHours": DASHBOARD_SESSION_HOURS,
+        "cookieExpireInHours": DASHBOARD_SESSION_HOURS,
+        "enablePassword": True, "enableSignUp": True, "disableSelfSignup": True,
+        "signupItems": [
+            {"name": name, "visible": True, "required": True}
+            for name in ("Username", "Password", "Confirm password", "Invitation code")
+        ],
         "signinMethods": [{"name": "Password", "displayName": "Password", "rule": "All"}],
-        "providers": [{"name": provider["name"], "rule": "forget"}],
+        "providers": [{"name": provider["name"], "rule": "forget"}] if email_enabled() else [],
         "redirectUris": [APP + "/"],
+        "homepageUrl": APP + "/",
         "scopes": [{"name": name, "displayName": name}
                    for name in ("openid", "profile", "teleop:observe")],
     }
@@ -364,6 +423,33 @@ def configure(state, values):
         "email": "admin@example.test", "id": values["admin_id"],
         "type": "normal-user", "isAdmin": False, "signupApplication": browser["name"],
     }), "administrator identity creation")
+
+
+def configure_dashboard_session(state, values):
+    """Reconcile existing deployments without replacing users or app settings."""
+    identity = {
+        "owner": "admin", "name": "authentication-test-browser",
+        "organization": "authentication-test", "clientId": values["browser_id"],
+    }
+    query = urllib.parse.urlencode({"id": "admin/authentication-test-browser"})
+    application = success(request(state, "/api/get-application?" + query),
+                          "dashboard session policy inspection")
+    if not isinstance(application, dict) or any(application.get(k) != v for k, v in identity.items()):
+        raise RuntimeError("dashboard application identity mismatch; session policy unchanged")
+    desired = {"expireInHours": DASHBOARD_SESSION_HOURS,
+               "cookieExpireInHours": DASHBOARD_SESSION_HOURS}
+    if all(application.get(k) == v for k, v in desired.items()):
+        return
+    backup = state / "dashboard-session-before.json"
+    if not backup.exists():
+        write(backup, {"application": identity["name"],
+                       **{k: application.get(k) for k in desired}})
+    success(request(state, "/api/update-application?" + query,
+                    {**application, **desired}), "dashboard session policy update")
+    saved = success(request(state, "/api/get-application?" + query),
+                    "dashboard session policy verification")
+    if not isinstance(saved, dict) or any(saved.get(k) != v for k, v in {**identity, **desired}.items()):
+        raise RuntimeError("dashboard session policy did not persist")
 
 
 def verify(state, values):
@@ -401,22 +487,52 @@ def verify(state, values):
     claims = json.loads(base64.urlsafe_b64decode(claims_raw + "=" * (-len(claims_raw) % 4)))
     if claims.get("iss") != AUTH or claims.get("sub") != values["admin_id"]:
         raise RuntimeError("actual administrator issuer/subject differs from bootstrap")
+    if (type(claims.get("iat")) is not int or type(claims.get("exp")) is not int
+            or claims["exp"] - claims["iat"] != DASHBOARD_SESSION_HOURS * 3600):
+        raise RuntimeError("dashboard access token does not have the configured one-week lifetime")
     context = request(state, "/api/admin/context", admin=False, origin=APP,
                       bearer=token["access_token"])
     if not context.get("platform_admin"):
         raise RuntimeError("real administrator does not have platform administration")
-    print("PASS: verified TLS, discovery, health/readiness, real S256 PKCE/admin context.")
-    print(f"Admin: {APP}/#/admin\nCasdoor: {AUTH}\nProtected mailbox: {MAIL}")
-    print(f"Credentials: {state / 'administrator.txt'} and {state / 'mail-credentials.txt'}")
-    print(f"Trust CA: {state / 'root.crt'}")
-    print("No vehicle/media ports published; simulation control disabled.")
+    print("PASS: verified discovery, health/readiness, real S256 PKCE/admin context, "
+          "and one-week dashboard token lifetime.")
+    print(f"Admin: {APP}/#/admin\nCasdoor: {AUTH}")
+    print(f"Credentials: {state / 'administrator.txt'}")
+    if email_enabled():
+        print(f"Protected mailbox: {MAIL}\nCredentials: {state / 'mail-credentials.txt'}")
+    if not LOCAL:
+        print(f"Verified TLS. Trust CA: {state / 'root.crt'}")
+    if MEDIA:
+        print("LAN WebRTC media: TCP 7881 and UDP 51000-51010; simulation control disabled.")
+    else:
+        print("No vehicle/media ports published; simulation control disabled.")
 
 
 def main():
+    global LOCAL, NO_EMAIL, MEDIA, IP, APP, AUTH, MAIL
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", required=True, type=Path)
-    parser.add_argument("action", choices=("prepare", "build", "start", "verify", "all"))
+    address = parser.add_mutually_exclusive_group()
+    address.add_argument("--local", action="store_true",
+                         help="bind to loopback HTTP with no email service or CA installation")
+    address.add_argument("--lan-ip", type=lan_address,
+                         help="bind HTTPS to this computer's private LAN IPv4 address")
+    parser.add_argument("--no-email", action="store_true", help="omit the legacy email provider and mailbox")
+    parser.add_argument("--media", action="store_true",
+                        help="publish WebRTC media ports on --lan-ip for camera testing")
+    parser.add_argument("action", choices=("prepare", "build", "start", "verify", "all", "configure-session"))
     args = parser.parse_args()
+    LOCAL = args.local
+    NO_EMAIL = args.no_email
+    MEDIA = args.media
+    if MEDIA and not args.lan_ip:
+        parser.error("--media requires --lan-ip")
+    if LOCAL:
+        IP = "127.0.0.1"
+    elif args.lan_ip:
+        IP = args.lan_ip
+    scheme = "http" if LOCAL else "https"
+    APP, AUTH, MAIL = (f"{scheme}://{IP}:{port}" for port in (8443, 8444, 8445))
     state = args.state.resolve(strict=True)
     if ROOT == state or ROOT in state.parents:
         parser.error("--state must be outside the repository")
@@ -429,7 +545,9 @@ def main():
         build(state)
     if args.action in ("start", "all"):
         start(state, values)
-    if args.action in ("verify", "all"):
+    if args.action == "configure-session":
+        configure_dashboard_session(state, values)
+    if args.action in ("verify", "all", "configure-session"):
         verify(state, values)
 
 

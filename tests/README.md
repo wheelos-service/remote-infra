@@ -44,14 +44,17 @@ The real Apollo C++ bootstrap can also exercise the Gateway wire contract:
 
 ```bash
 cd apps/teleop-gateway
+TZ=UTC \
 AUTHZ_POSTGRES_TEST_DSN='<disposable PostgreSQL DSN>' \
 VEHICLE_BOOTSTRAP_TEST_BINARY='/absolute/path/to/vehicle_bootstrap' \
 go test ./internal/gateway -run 'TestPostgresVehicleBootstrap(Client|DenialAndExpiry)$' -count=1 -v
 ```
 
 Run this in an isolated root test container with Go 1.24, a compatible bootstrap
-binary and disposable PostgreSQL. It creates protected temporary configuration
-and state directories, approves registration, verifies credential persistence
+binary and disposable PostgreSQL. Keep the test Gateway on UTC, matching the
+deployed Gateway's UTC expiry timestamps. It creates protected temporary configuration
+and state directories without a name, serial, or platform, approves registration
+with an administrator-entered name, verifies credential persistence
 and installation acknowledgment, then checks OAuth outages, wrong vehicle mapping,
 same-identity `invalid_client` recovery, denied restarts, server-simulated expiry
 and graceful cancellation without readiness. OAuth responses are synthetic here.

@@ -25,7 +25,9 @@ The shared library no longer depends on either legacy runtime.
 The opt-in [managed authorization pilot](auth-management.md) is a new,
 single-Gateway deployment mode, not a transparent import of legacy JWT roles
 or static ACLs. Its `/#/admin` UI supports opt-in automatic Casdoor onboarding,
-with manually verified identity bindings as the fallback, fixed business roles
+using Casdoor signup invitation links without email and vehicle-name/machine-code
+approval after [vehicle-side bootstrap setup](add-vehicle.md), with manually verified
+identity bindings as the fallback, fixed business roles
 and vehicle ranges. Fresh automatic onboarding may run online; existing rights
 changes retain the maintenance/drain boundary. Default static mode remains
 compatible. Managed mode is limited to monitoring and explicitly allowlisted
@@ -39,6 +41,15 @@ Opt-in managed onboarding also exposes proof-authenticated
 organization approval endpoints. These do not replace machine OAuth,
 vehicle-ID matching, control leases or the legacy manual installer; see
 [device-code registration](auth-management.md#vehicle-initiated-device-code-registration-no-client-certificate).
+The machine code is the existing enrollment `user_code`. Bootstrap configuration
+and new vehicle requests omit `name`, `serial`, and `platform`; the administrator
+names the vehicle at approval. The v1 signature retains three empty metadata
+slots, and legacy signed creation requests remain accepted for pending-request
+retries. Existing keys, credentials, and database history are preserved.
+Lookup responses now contain identity/status details without retired metadata,
+and the manager-only setup endpoint returns only Gateway/console URLs. Deploy
+the updated frontend and Gateway before the SDK; older Gateways reject creation
+without a name/platform. Existing bootstrap files remain readable by the new SDK.
 
 | Surface | Use | Compatibility rule |
 | --- | --- | --- |
@@ -68,3 +79,13 @@ contract migration tests and a documented release change, not a naming cleanup.
 No automatic v2-to-v1 downgrade, payload-derived sender fallback, merged
 watchdog, or synthesized physical handover is permitted. Camera readiness is
 decoded-frame freshness, not certified end-to-end image age.
+
+The v2 browser checks its 250 ms signing/publication budget and local authority
+deadlines immediately after asynchronous sends as well as on ticks. ACK liveness
+uses actual dispatches with a 450 ms monotonic deadline instead of raw signed
+sequence distance; locally discarded signatures do not count as outstanding
+commands. The first fault disconnects RTC and remains visible through cleanup.
+These checks preserve the reliable v2 wire contract and do not establish
+receiver-side freshness under clock skew. See the
+[latency implementation status](control-latency-review-2026-11-11.md#repository-implementation-follow-up)
+for diagnostics and the remaining coordinated v3 work.

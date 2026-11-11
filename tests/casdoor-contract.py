@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Verify pinned, disposable Casdoor API contracts without production secrets."""
 
+import argparse
 import base64
+import datetime
 import hashlib
 import json
 import os
@@ -22,7 +24,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--provider-only", action="store_true",
+                        help="test Casdoor through a published loopback port, without the Gateway/PostgreSQL chain")
+    args = parser.parse_args()
     bootstrap = os.environ.get("VEHICLE_BOOTSTRAP_TEST_BINARY")
+    if args.provider_only and bootstrap:
+        parser.error("--provider-only cannot exercise VEHICLE_BOOTSTRAP_TEST_BINARY")
     if bootstrap:
         bootstrap = pathlib.Path(bootstrap).resolve(strict=True)
         if not bootstrap.is_file() or not os.access(bootstrap, os.X_OK):
@@ -39,7 +47,8 @@ def main():
         work = pathlib.Path(directory)
         config = work / "app.conf"
         config.write_text(
-            f"appname = casdoor\nhttpaddr = 127.0.0.1\nhttpport = {casdoor_port}\nrunmode = prod\n"
+            f"appname = casdoor\nhttpaddr = {'0.0.0.0' if args.provider_only else '127.0.0.1'}\n"
+            f"httpport = {casdoor_port}\nrunmode = prod\n"
             f"origin = http://127.0.0.1:{casdoor_port}\noriginFrontend = http://127.0.0.1:{casdoor_port}\n"
             "copyrequestbody = true\ndriverName = sqlite\n"
             "dataSourceName = file:/tmp/contract.db?cache=shared\n"
@@ -65,15 +74,20 @@ def main():
         try:
             subprocess.run([
                 "docker", "run", "--rm", "-d", "--name", name,
-                "--user", "0:0", "--network", "host",
+                "--user", "0:0",
+                *(["-p", f"127.0.0.1:{casdoor_port}:{casdoor_port}"] if args.provider_only
+                  else ["--network", "host"]),
                 "-v", f"{config}:/conf/app.conf:ro",
                 "-v", f"{data_file}:/conf/init_data.json:ro", IMAGE,
             ], check=True, stdout=subprocess.DEVNULL)
             started.append(name)
             origin = f"http://127.0.0.1:{casdoor_port}"
+            # This fixture is loopback-only; workstation proxies must never
+            # intercept health checks or disposable provider credentials.
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             for _ in range(300):
                 try:
-                    with urllib.request.urlopen(origin + "/api/health", timeout=1):
+                    with opener.open(origin + "/api/health", timeout=1):
                         break
                 except OSError:
                     time.sleep(0.2)
@@ -93,7 +107,7 @@ def main():
                     )
                 req = urllib.request.Request(origin + path, data=payload, headers=headers)
                 try:
-                    with urllib.request.urlopen(req, timeout=10) as response:
+                    with opener.open(req, timeout=10) as response:
                         return json.load(response)
                 except urllib.error.HTTPError as error:
                     # Parse only in memory. Never print provider bodies or tokens.
@@ -120,7 +134,11 @@ def main():
                 "organization": "contract-fleet", "cert": "cert-built-in",
                 "clientId": "browser-" + uuid.uuid4().hex,
                 "grantTypes": ["authorization_code"], "tokenFormat": "JWT",
-                "expireInHours": credential_hours, "enablePassword": True, "enableSignUp": False,
+                "expireInHours": 168, "cookieExpireInHours": 168,
+                "enablePassword": True, "enableSignUp": True,
+                "disableSelfSignup": True,
+                "signupItems": [{"name": name, "visible": True, "required": True}
+                                for name in ("Username", "Password", "Confirm password", "Invitation code")],
                 "signinMethods": [{"name": "Password", "displayName": "Password", "rule": "All"}],
                 "redirectUris": ["http://127.0.0.1:8000/"],
                 "scopes": [
@@ -130,6 +148,40 @@ def main():
                 ],
             }
             success(request("/api/add-application", browser), "browser application creation")
+            invitation = {
+                "owner": org["name"], "name": "contract-invitation",
+                "displayName": "Invited operator", "username": "invited-operator",
+                "application": browser["name"], "code": secrets.token_hex(32),
+                "quota": 1, "usedCount": 0, "state": "Active",
+                "expireTime": (datetime.datetime.now(datetime.timezone.utc)
+                               + datetime.timedelta(days=7)).isoformat(timespec="seconds"),
+            }
+            invitation["defaultCode"] = invitation["code"]
+            success(request("/api/add-invitation", invitation), "native signup invitation creation")
+            signup = {
+                "organization": org["name"], "application": browser["name"],
+                "username": invitation["username"], "password": secrets.token_urlsafe(32),
+                "invitationCode": invitation["code"],
+            }
+            for invalid in ({**signup, "invitationCode": ""},
+                            {**signup, "username": "uninvited-operator"}):
+                if request("/api/signup", invalid, admin=False).get("status") == "ok":
+                    raise RuntimeError("native signup accepted missing code or a different username")
+            success(request("/api/signup", signup, admin=False), "native signup without email")
+            invited = success(request("/api/get-user?id=" + urllib.parse.quote(
+                org["name"] + "/" + invitation["username"], safe="")), "native signup provenance")
+            if (not invited.get("id") or invited.get("isAdmin") or invited.get("email")
+                    or invited.get("invitation") != invitation["name"]
+                    or invited.get("invitationCode") != invitation["code"]
+                    or invited.get("signupApplication") != browser["name"]
+                    or not invited.get("createdTime")):
+                raise RuntimeError("native signup omitted the identity or invitation provenance")
+            used = success(request("/api/get-invitation?id=" + urllib.parse.quote(
+                org["name"] + "/" + invitation["name"], safe="")), "single-use invitation consumption")
+            if used.get("usedCount") != 1:
+                raise RuntimeError("native signup did not consume the invitation quota")
+            if request("/api/signup", signup, admin=False).get("status") == "ok":
+                raise RuntimeError("native signup accepted an invitation replay")
             user = {
                 "owner": "contract-fleet", "name": "contract-person",
                 "displayName": "Disposable person", "password": secrets.token_urlsafe(32),
@@ -170,6 +222,14 @@ def main():
             human = request("/api/login/oauth/access_token", exchange, admin=False, form=True)
             if not human.get("access_token") or not human.get("id_token"):
                 raise RuntimeError("public PKCE token exchange failed")
+            payload = human["access_token"].split(".")[1]
+            human_claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+            if human_claims.get("exp", 0) - human_claims.get("iat", 0) != 7 * 24 * 3600:
+                raise RuntimeError("dashboard PKCE token lifetime is not one week")
+            browser_policy = success(request("/api/get-application?id=admin/contract-browser"),
+                                     "dashboard login cookie policy")
+            if browser_policy.get("cookieExpireInHours") != 168:
+                raise RuntimeError("dashboard login cookie policy is not one week")
             if request("/api/login/oauth/access_token", exchange, admin=False,
                        form=True).get("access_token"):
                 raise RuntimeError("authorization code replay accepted")
@@ -230,6 +290,11 @@ def main():
             discovery = request("/.well-known/openid-configuration", admin=False)
             if not discovery.get("jwks_uri") or discovery.get("issuer") != actual.get("iss"):
                 raise RuntimeError("discovery and actual issuer disagree")
+            if args.provider_only:
+                print("PASS Casdoor v4.25.0 provider contract: one-week personnel PKCE token and "
+                      "login-cookie policy, signup invitation, PKCE rejection/replay, "
+                      "device identity/scope and credential rotation. Gateway chain not run.")
+                return
             subprocess.run([
                 "docker", "run", "--rm", "-d", "--name", database,
                 "-e", "POSTGRES_PASSWORD=disposable-loopback-only",
@@ -313,7 +378,7 @@ def main():
             subprocess.run(command, cwd=ROOT / "apps/teleop-gateway", env=env,
                            check=True, timeout=1080 if bootstrap else 300)
             print("PASS Casdoor v4.25.0: Basic-header management, create/reconcile person and vehicle, "
-                  "actual personnel PKCE and client_credentials subject/audience/scope, "
+                  "one-week personnel PKCE/login-cookie policy and client_credentials subject/audience/scope, "
                   "negative scope/secret, rotation; native invitation/recovery/first login, "
                   "Gateway onboarding and actual protected Python installation.")
             print("Rotation rejects future grants with the old secret; already issued JWTs remain "
