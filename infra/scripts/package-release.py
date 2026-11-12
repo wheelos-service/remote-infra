@@ -29,7 +29,7 @@ def inspect(image):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--version', default='1.0.0-rc1')
+    parser.add_argument('--version', default='1.1.0')
     args = parser.parse_args()
     if not re.fullmatch(r'[0-9][a-z0-9.-]{0,50}', args.version):
         parser.error('use a numeric release version with lowercase letters, dots or hyphens')

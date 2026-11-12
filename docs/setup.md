@@ -6,7 +6,7 @@ source checkout, compilation, or registry access is needed after downloading it.
 
 ## 1. Deploy
 
-Extract `teleop-1.0.0-rc1-linux-amd64.tar.gz`. From the extracted directory,
+Extract `teleop-1.1.0-linux-amd64.tar.gz`. From the extracted directory,
 replace the example IP with the machine's LAN IPv4 address (`hostname -I` lists
 its addresses). Reserve that IP in your router or configure a static address.
 

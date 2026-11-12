@@ -1,7 +1,7 @@
 # Deploy from source
 
 Use this instead of the prebuilt package in [LAN setup](setup.md). You need a
-checkout of `release/v1.0`, Git, Python 3, Docker Engine, and Docker Compose v2.
+checkout of tag `1.1.0`, Git, Python 3, Docker Engine, and Docker Compose v2.
 Your OS user must be able to run Docker. Docker compiles the applications;
 host Go and Node.js installations are unnecessary. Builds require internet access.
 
