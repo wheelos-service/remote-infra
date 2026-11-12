@@ -32,29 +32,41 @@ go build -o teleop-backend ./cmd/teleop-gateway
 The Docker Compose service and `infra/scripts/build-backend.sh` use the same
 `./cmd/teleop-gateway` entrypoint.
 
-## Managed authorization pilot
+## Managed authorization
 
-Static mode remains the default. The opt-in single-Gateway pilot uses
+The generated release deployment enables managed authorization. Standalone
+Gateway configuration defaults to static mode; managed mode uses
 `AUTHORIZATION_MODE=managed`, `AUTHORIZATION_DATABASE_URL`, `AUTH_MODE=oidc`
 and the configured trusted issuer. It rejects mixed static policy settings.
-`AUTHORIZATION_MANAGED_MAINTENANCE=true` is required for management writes;
-the runtime also checks persisted token expiry, Redis session/handover state
-and LiveKit room drain. A rejection is not an asynchronously queued change.
+The release enables `AUTHORIZATION_ONLINE_MUTATIONS=true`. Without online or
+multi-instance mutation support, existing-rights changes require
+`AUTHORIZATION_MANAGED_MAINTENANCE=true` and verification of persisted token
+expiry, Redis session/handover state, and LiveKit room drain. A rejection is
+not an asynchronously queued change.
 
 The image includes `auth-admin` (`go build ./cmd/auth-admin`) for explicit,
 operator-only bootstrap using protected files. It does not create IdP users
 or credentials. `/#/admin` provides people/vehicle bindings and the three fixed
-roles; basic org_admin vehicle status visibility does not grant live video or
-control. The pilot allows simulation only and does not authorize business task
-dispatch. See [the complete pilot procedure](../../docs/auth-management.md)
-and [optional Compose overlay](../../docker-compose.authorization.yml).
+roles. Active organization membership grants observation of its active vehicles,
+including live video; administrator status does not grant control. Managed v2
+control requires the remote-operator role and vehicle scope, and is limited to
+allowlisted simulators in this release. Managed mode does not authorize business
+task dispatch. See [administration](../../docs/auth-management.md) and
+[release capabilities](../../docs/compatibility.md). The
+[optional Compose overlay](../../docker-compose.authorization.yml) is retained
+for manually configured deployments.
 
-## Opt-in v2 simulation control
+## V2 vehicle control
 
 Legacy acquire remains compatible. V2 acquire additionally requires
-`protocol_version: 2` and a valid `client_instance_id`, and only accepts vehicle
-IDs explicitly listed in `SIMULATED_CONTROL_VEHICLES_JSON` (default `[]`).
-Use disposable simulator IDs only. The returned RTC token is bound to
+`protocol_version: 2` and a valid `client_instance_id`, with the same role and
+vehicle ACL checks for either backend. The vehicle selects `simulation` or
+`cyber` in its local configuration; the platform does not select a backend.
+Managed acquisition additionally requires the vehicle ID in
+`SIMULATED_CONTROL_VEHICLES_JSON` (default `[]`). Use disposable simulators only;
+native acquisition returns HTTP 503 until managed handover support is complete.
+Setting `CONTROL_HANDOVER_ACK_ENABLED` does not bypass this gate.
+The returned RTC token is bound to
 `control-<session_id>`, not a reusable operator-wide identity.
 
 `GET /api/vehicles/{id}/control/context` is restricted to that registered device.
@@ -66,9 +78,8 @@ physical-control sessions. This separate simulated ACK never enables
 `CONTROL_HANDOVER_ACK_ENABLED`, which remains false by default.
 The existing per-vehicle/per-tenant-operator singleton fences still apply.
 
-See [`tests/control-chain.py`](../../tests/control-chain.py) for the disposable
-cross-end acceptance runner and the
-[SDK protocol/testing guide](../vehicle-edge-cpp/README.md#testable-v2-control-loop).
+See the [test guide](../../tests/README.md) for available validation commands.
+Vehicle SDK installation and physical handover validation are handled separately.
 
 ## Registered vehicle snapshots
 
