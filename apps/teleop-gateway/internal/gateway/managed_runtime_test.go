@@ -874,6 +874,7 @@ func TestManagedRuntimePostgresViewingAndV2ControlTokens(t *testing.T) {
 		}
 	}
 	assertTrackedToken(viewing.Token, "observer-"+viewing.ViewingSessionID, false)
+	t.Setenv("SIMULATED_CONTROL_VEHICLES_JSON", `["car-one"]`)
 	w = f.request(t, "POST", "/api/vehicles/car-one/control/acquire", "operator", "",
 		`{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","protocol_version":2,"client_instance_id":"browser-one"}`, 200)
 	var control controlSessionResponse
@@ -1162,5 +1163,52 @@ func TestManagedRoomDrainQueriesLiveKitWithoutTerminatingParticipants(t *testing
 	server.Close()
 	if err := check(context.Background()); err == nil {
 		t.Fatal("unavailable LiveKit query allowed policy mutation")
+	}
+}
+
+func TestManagedNativeAcquisitionRejectsBeforeReservingAuthority(t *testing.T) {
+	for _, nativeACK := range []string{"false", "true"} {
+		t.Run("native_ack_"+nativeACK, func(t *testing.T) {
+			f := newManagedFixture(t)
+			ctx := context.Background()
+			t.Setenv("CONTROL_HANDOVER_ACK_ENABLED", nativeACK)
+			t.Setenv("SIMULATED_CONTROL_VEHICLES_JSON", `["car-two"]`)
+			if _, err := f.store.AssignManagedRole(ctx, authorization.Assignment{
+				ActorUserID: f.adminID, UserID: f.operatorID, OrganizationID: f.orgID,
+				Role: authorization.RoleRemoteOperator, Scope: authorization.ScopeSelected,
+				VehicleIDs: []string{"car-one", "car-two"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			body := `{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","protocol_version":2,"client_instance_id":"browser-one"}`
+			before, err := f.store.TokenExpiry(ctx, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.request(t, "POST", "/api/vehicles/car-one/control/acquire", "operator", "", body, 503)
+			after, err := f.store.TokenExpiry(ctx, "")
+			if err != nil || !before.Equal(after) {
+				t.Fatalf("rejected acquisition reserved a token horizon: %v", err)
+			}
+			keys := []string{controlLeaseKey("car-one"), controlHandoverKey("car-one"), operatorControlKey(f.orgID, f.operatorID)}
+			if count, err := f.client.Exists(ctx, keys...).Result(); err != nil || count != 0 {
+				t.Fatalf("rejected acquisition created control state: %d, %v", count, err)
+			}
+			// A rejected native request must not block this operator's supported
+			// simulator session, including release, confirmation and reacquisition.
+			response := f.request(t, "POST", "/api/vehicles/car-two/control/acquire", "operator", "", body, 200)
+			var acquired controlSessionResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &acquired); err != nil {
+				t.Fatal(err)
+			}
+			f.request(t, "POST", "/api/control/"+acquired.Session.SessionID+"/release", "operator", "", "", 202)
+			handover, err := controlLeases.GetHandover(ctx, "car-two")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ack, _ := json.Marshal(map[string]any{"session_id": acquired.Session.SessionID, "revision": handover.Revision})
+			f.request(t, "POST", "/api/vehicles/car-two/control/simulation-ack", "device-two", "", string(ack), 204)
+			f.request(t, "POST", "/api/vehicles/car-two/control/acquire", "operator", "", body, 200)
+		})
 	}
 }

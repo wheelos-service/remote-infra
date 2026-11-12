@@ -7,7 +7,7 @@ import { convertMap, parseMapText } from './prepare-maps.mjs'
 globalThis.crypto ??= webcrypto
 
 globalThis.window = {
-  location: { hostname: 'localhost', search: '' },
+  location: { hostname: 'localhost', origin: 'https://localhost', search: '' },
   __LIVEKIT_INFRA_CONFIG__: undefined,
 }
 

@@ -133,3 +133,18 @@ test('AuthProvider accepts only explicit server contexts, clears static organiza
     }
   } finally { Object.assign(globalThis, previous) }
 })
+
+test('unconfigured login stays on this deployment and makes no network or redirect request', async () => {
+  const previous = { fetch: globalThis.fetch, window: globalThis.window }
+  const provider = providerHarness()
+  try {
+    globalThis.window = { location: { hostname: 'new-host.example', search: '',
+      assign: () => assert.fail('unconfigured login redirected') } }
+    globalThis.fetch = () => assert.fail('unconfigured login made a request')
+    await provider.render().signIn()
+    assert.match(provider.render().error, /尚未配置登录服务/)
+  } finally {
+    provider.unmount()
+    Object.assign(globalThis, previous)
+  }
+})

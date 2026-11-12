@@ -38,7 +38,7 @@ services:
       retries: 20
 
   casdoor:
-    image: casbin/casdoor:latest
+    image: casbin/casdoor:v4.25.0
     restart: unless-stopped
     environment:
       TZ: UTC
@@ -51,39 +51,31 @@ services:
         condition: service_completed_successfully
 
   casdoor-config-init:
-    image: alpine:3.20
+    image: python:3.12-alpine
     restart: "no"
     environment:
-      CASDOOR_DB_ROOT_PASSWORD: "${CASDOOR_DB_ROOT_PASSWORD}"
-    command:
-      - /bin/sh
-      - -c
-      - >-
-        sed "s|__CASDOOR_DB_ROOT_PASSWORD__|$${CASDOOR_DB_ROOT_PASSWORD}|g"
-        /template/app.conf > /generated/app.conf
+      CASDOOR_DB_ROOT_PASSWORD: "${CASDOOR_DB_ROOT_PASSWORD:?set a Casdoor database password}"
+      CASDOOR_DOMAIN: "${CASDOOR_DOMAIN:-casdoor.example.com}"
+    command: ["python3", "/render-config.py", "casdoor", "/template/app.conf", "/generated/app.conf"]
     volumes:
+      - ./infra/scripts/render-config.py:/render-config.py:ro
       - ./infra/local-dev/casdoor/app.conf:/template/app.conf:ro
       - casdoor-config:/generated
 
   livekit-config:
-    image: alpine:3.20
+    image: python:3.12-alpine
     restart: "no"
     environment:
-      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY}"
-      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET}"
-    command:
-      - /bin/sh
-      - -c
-      - >-
-        sed -e "s|__LIVEKIT_API_KEY__|$${LIVEKIT_API_KEY}|g"
-        -e "s|__LIVEKIT_API_SECRET__|$${LIVEKIT_API_SECRET}|g"
-        /template/livekit.yaml > /generated/livekit.yaml
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY:?set a LiveKit API key}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET:?set a LiveKit API secret}"
+    command: ["python3", "/render-config.py", "livekit", "/template/livekit.yaml", "/generated/livekit.yaml"]
     volumes:
+      - ./infra/scripts/render-config.py:/render-config.py:ro
       - ./infra/local-dev/livekit.template.yaml:/template/livekit.yaml:ro
       - livekit-config:/generated
 
   livekit:
-    image: livekit/livekit-server:latest
+    image: livekit/livekit-server:v1.13.11
     restart: unless-stopped
     command: ["--config", "/etc/livekit.yaml"]
     ports:

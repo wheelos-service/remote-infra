@@ -37,6 +37,26 @@ jobs:
           path: frontend/dist
   gateway:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: disposable-ci-tests
+          POSTGRES_DB: gateway_tests
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d gateway_tests"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      AUTHZ_POSTGRES_TEST_DSN: postgres://postgres:disposable-ci-tests@127.0.0.1:5432/gateway_tests?sslmode=disable
+      REDIS_URL: redis://127.0.0.1:6379
+      VIEWING_TEST_REDIS_ADDR: 127.0.0.1:6379
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -45,5 +65,30 @@ jobs:
           cache-dependency-path: apps/teleop-gateway/go.sum
       - working-directory: apps/teleop-gateway
         run: |
-          go test ./...
+          # PostgreSQL advisory locks are database-wide across package tests.
+          go test -p 1 ./...
+          go vet ./...
           go build -mod=readonly ./cmd/teleop-gateway
+  deployment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests -p 'test*deployment.py'
+      - name: Fresh deployment and real administrator login
+        run: |
+          python3 infra/scripts/deploy.py --state "$RUNNER_TEMP/teleop-release" --local --project release-ci all
+          python3 infra/scripts/deploy.py --state "$RUNNER_TEMP/teleop-release" start
+          python3 infra/scripts/deploy.py --state "$RUNNER_TEMP/teleop-release" --login-check verify
+      - name: Validate public HTTPS topology
+        run: |
+          python3 infra/scripts/deploy.py --state "$RUNNER_TEMP/teleop-public" --project public-ci \
+            --domain console.example.com --auth-domain auth.example.com prepare
+      - name: LAN HTTPS access from another client
+        run: python3 tests/lan-deployment.py
+      - name: Clean up isolated deployment
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/teleop-release/compose.json" ]; then
+            docker compose -p release-ci -f "$RUNNER_TEMP/teleop-release/compose.json" down --volumes
+          fi

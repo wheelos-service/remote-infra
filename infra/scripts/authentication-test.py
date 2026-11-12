@@ -28,7 +28,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT = "authentication-test"
-IP = "10.0.39.103"
+IP = "127.0.0.1"
 APP = f"https://{IP}:8443"
 AUTH = f"https://{IP}:8444"
 MAIL = f"https://{IP}:8445"
@@ -280,7 +280,7 @@ def build(state):
     run([str(ROOT / "infra/scripts/build-frontend.sh")], cwd=ROOT)
     run(["docker", "run", "--rm", "-v", f"{ROOT / 'apps/teleop-gateway'}:/app",
          "-v", f"{state}:/output", "-w", "/app",
-         "-e", "GOPROXY=https://goproxy.cn,direct", "golang:1.24",
+         "-e", "GOPROXY=" + os.environ.get("GOPROXY", "https://proxy.golang.org,direct"), "golang:1.24",
          "go", "build", "-mod=readonly", "-o", "/output/auth-admin", "./cmd/auth-admin"])
     write(state / "Gateway.Dockerfile",
           "FROM golang:1.24\nCOPY apps/teleop-gateway/teleop-backend /usr/local/bin/\n"
@@ -296,7 +296,7 @@ def build(state):
     shutil.copytree(ROOT / "frontend/dist", context / "dist", dirs_exist_ok=True)
     write(context / "nginx.conf", (ROOT / "infra/frontend/nginx.conf").read_text())
     write(context / "Dockerfile",
-          "FROM docker.m.daocloud.io/library/nginx:stable-alpine\n"
+          "FROM nginx:stable-alpine\n"
           "COPY nginx.conf /etc/nginx/conf.d/default.conf\n"
           "COPY dist/ /usr/share/nginx/html/\n"
           "RUN chmod -R a+rX /usr/share/nginx/html\n")
@@ -512,7 +512,7 @@ def main():
     global LOCAL, NO_EMAIL, MEDIA, IP, APP, AUTH, MAIL
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", required=True, type=Path)
-    address = parser.add_mutually_exclusive_group()
+    address = parser.add_mutually_exclusive_group(required=True)
     address.add_argument("--local", action="store_true",
                          help="bind to loopback HTTP with no email service or CA installation")
     address.add_argument("--lan-ip", type=lan_address,

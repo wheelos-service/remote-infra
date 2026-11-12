@@ -10,3 +10,4 @@ __pycache__/
 tests/__pycache__/
 *.pyc
 apps/teleop-gateway/data/
+apps/teleop-gateway/teleop-backend

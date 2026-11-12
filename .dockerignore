@@ -1,5 +1,10 @@
 .git
 .env
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/teleop-backend
 **/node_modules
 **/dist
 **/build

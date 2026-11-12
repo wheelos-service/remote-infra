@@ -13,11 +13,11 @@ declare global {
 }
 
 const defaults: TeleopRuntimeConfig = {
-  gatewayUrl: 'https://gateway.wheelos.cn',
-  livekitUrl: 'wss://rtc.wheelos.cn',
-  authorizeUrl: 'https://casdoor.wheelos.cn/login/oauth/authorize',
-  tokenUrl: 'https://casdoor.wheelos.cn/api/login/oauth/access_token',
-  clientId: 'cfeff3105319b0ac309b',
+  gatewayUrl: window.location.origin ?? '',
+  livekitUrl: (window.location.origin ?? '').replace(/^http/, 'ws'),
+  authorizeUrl: '',
+  tokenUrl: '',
+  clientId: '',
 }
 
 const query = new URLSearchParams(window.location.search)

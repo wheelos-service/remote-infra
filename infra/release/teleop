@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+bundle_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+setup_image="__SETUP_IMAGE__"
+state_dir="${TELEOP_STATE_DIR:-$HOME/.local/state/teleop}"
+socket_path="${DOCKER_SOCKET:-/var/run/docker.sock}"
+if [[ "${1:-}" == "load" ]]; then
+  exec docker load --input "$bundle_dir/images.tar.gz"
+fi
+if ! docker image inspect "$setup_image" >/dev/null 2>&1; then
+  docker load --input "$bundle_dir/images.tar.gz"
+fi
+if [[ "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" != "linux/amd64" ]]; then
+  echo 'This release requires an x86_64 Linux Docker host.' >&2
+  exit 1
+fi
+args=()
+while (($#)); do
+  case "$1" in
+    --state)
+      [[ $# -ge 2 ]] || { echo '--state requires a directory' >&2; exit 1; }
+      state_dir="$2"; shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+mkdir -p -m 700 -- "$state_dir"
+state_dir="$(cd -- "$state_dir" && pwd -P)"
+[[ "$state_dir" != *:* && "$state_dir" != *$'\n'* ]] || { echo 'State path cannot contain colon or newline.' >&2; exit 1; }
+[[ -S "$socket_path" ]] || { echo "Docker socket not found: $socket_path" >&2; exit 1; }
+# The same absolute state path is used by the setup container and Docker daemon.
+# Setup uses host networking only to verify the host's LAN/loopback endpoints.
+exec docker run --rm --network host \
+  --user "$(id -u):$(id -g)" --group-add "$(stat -c %g "$socket_path")" \
+  -v "$socket_path:/var/run/docker.sock" -v "$state_dir:$state_dir" \
+  "$setup_image" --state "$state_dir" "${args[@]}"

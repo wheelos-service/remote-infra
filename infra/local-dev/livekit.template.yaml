@@ -4,7 +4,7 @@ bind_addresses:
   - ""
 
 keys:
-  __LIVEKIT_API_KEY__: "__LIVEKIT_API_SECRET__"
+  __LIVEKIT_API_KEY__: __LIVEKIT_API_SECRET__
 
 rtc:
   use_external_ip: true

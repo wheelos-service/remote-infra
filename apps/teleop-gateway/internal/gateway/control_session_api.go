@@ -63,6 +63,13 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "managed control requires v2", http.StatusForbidden)
 		return
 	}
+	// Managed native handover ACKs are not implemented. Acquiring such a
+	// session would leave a permanent vehicle fence and operator lock on
+	// release or expiry. Reject before reserving a token or writing any lease.
+	if claims.managed != nil && !simulationControlEnabled(vehicleID) {
+		http.Error(w, "managed native control unavailable: handover support required", http.StatusServiceUnavailable)
+		return
+	}
 
 	now := time.Now()
 	session := ControlSession{

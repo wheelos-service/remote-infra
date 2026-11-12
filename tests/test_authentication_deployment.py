@@ -117,7 +117,7 @@ class AuthenticationDeploymentTest(unittest.TestCase):
                 self.assertFalse(any(":7880" in port for port in service.get("ports", [])))
             self.assertEqual(services["gateway"]["environment"]["LIVEKIT_URL"], "http://livekit:7880")
             self.assertIn("reverse_proxy gateway:8080", (state / "Caddyfile").read_text())
-            self.assertIn('"simulationControl": false', (state / "runtime-config.js").read_text())
+            self.assertNotIn('simulationControl', (state / "runtime-config.js").read_text())
 
     def test_local_signup_policy_requires_invitation_without_email_provider(self):
         def response(state, path, body=None):

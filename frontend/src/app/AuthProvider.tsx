@@ -153,6 +153,9 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
 
         const code = callback.get('code')
         if (!code) return
+        if (!teleopConfig.tokenUrl || !teleopConfig.clientId) {
+          throw new Error('此站点尚未配置登录服务，请联系管理员')
+        }
 
         const expectedState = sessionStorage.getItem('teleop.oidc.state')
         const verifier = sessionStorage.getItem('teleop.oidc.verifier')
@@ -201,6 +204,9 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
     if (new URLSearchParams(window.location.search).get('preview') === '1') return
     setError(undefined)
     try {
+      if (!teleopConfig.authorizeUrl || !teleopConfig.tokenUrl || !teleopConfig.clientId) {
+        throw new Error('此站点尚未配置登录服务，请联系管理员')
+      }
       const verifier = randomBase64Url(32)
       const state = randomBase64Url(24)
       sessionStorage.setItem('teleop.oidc.verifier', verifier)
