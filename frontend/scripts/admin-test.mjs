@@ -453,10 +453,10 @@ test('operation rendering distinguishes pending delivery and installation, and r
   assert.match(html, /MAIL_UNAVAILABLE/)
   assert.match(html, /未知状态，尚未完成/)
   assert.equal((html.match(/重试失败任务/g) ?? []).length, 1)
-  assert.equal((html.match(/签发单次安装令牌/g) ?? []).length, 1)
+  assert.equal((html.match(/签发单次安装令牌/g) ?? []).length, 0)
 })
 
-test('device-code operations hide manual installation tickets while legacy operations retain them and failures retain retry', () => {
+test('all vehicle operations hide unsupported manual installation tickets and failures retain retry', () => {
   const { device_enrollment: _ignored, ...legacy } = { ...operation, kind: 'vehicle', status: 'awaiting_install' }
   const enrolled = api.onboardingOperationSchema.parse({ ...legacy, device_enrollment: true })
   const parsedLegacy = api.onboardingOperationSchema.parse(legacy)
@@ -465,7 +465,9 @@ test('device-code operations hide manual installation tickets while legacy opera
   const enrolledHtml = renderOperations({ ...props, operations: [enrolled] })
   assert.match(enrolledHtml, /由车端自动领取凭据/)
   assert.doesNotMatch(enrolledHtml, /轮换并签发单次安装令牌|<button|<textarea/)
-  assert.match(renderOperations({ ...props, operations: [parsedLegacy] }), /轮换并签发单次安装令牌/)
+  const legacyHtml = renderOperations({ ...props, operations: [parsedLegacy] })
+  assert.match(legacyHtml, /旧的手工安装入口不再支持/)
+  assert.doesNotMatch(legacyHtml, /轮换并签发单次安装令牌|<button|<textarea/)
   assert.match(renderOperations({ ...props, operations: [{ ...enrolled, status: 'failed' }] }), /重试失败任务/)
 })
 
@@ -473,7 +475,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve))
 
 const enrollment = {
   id: 'enrollment /1',
-  fingerprint: 'SHA256:public-key-fingerprint', status: 'pending',
+  fingerprint: 'SHA256:' + 'a'.repeat(64), status: 'pending',
   created_at: '2026-11-07T01:00:00Z', expires_at: '2099-01-01T00:00:00Z', recovery: false,
 }
 const enrollmentProps = { orgId: 'org /1', token: 'admin-bearer', disabled: false, onDirectoryChange() {} }
@@ -488,6 +490,10 @@ function enterEnrollmentCode(harness, code = 'abcd-efgh', name = ' Verified Vehi
 }
 function lookupEnrollment(harness) {
   elements(harness.render(), 'form')[0].props.onSubmit({ preventDefault() {} })
+}
+function confirmEnrollmentFingerprint(harness) {
+  elements(harness.render(), 'input').find(input => input.props.type === 'checkbox')
+    .props.onChange({ target: { checked: true } })
 }
 
 test('device enrollment needs no vehicle metadata and approval uses the administrator name', async () => {
@@ -524,8 +530,14 @@ test('device enrollment needs no vehicle metadata and approval uses the administ
     assert.equal(elements(tree, 'input').find(input => input.props.name === 'vehicle_name').props.value, ' Verified Vehicle ',
       'lookup must preserve the administrator name')
     tree = harness.render()
+    assert.equal(elements(tree, 'button').find(button => button.props.type === 'submit' &&
+      button.props.children === '确认注册车辆').props.disabled, true)
     elements(tree, 'form')[1].props.onSubmit({ preventDefault() {} }); await settle()
-    assert.deepEqual(requests[1].body, { name: 'Verified Vehicle' })
+    assert.equal(requests.length, 1, 'approval requires explicit fingerprint confirmation')
+    confirmEnrollmentFingerprint(harness)
+    tree = harness.render()
+    elements(tree, 'form')[1].props.onSubmit({ preventDefault() {} }); await settle()
+    assert.deepEqual(requests[1].body, { name: 'Verified Vehicle', expected_fingerprint: enrollment.fingerprint })
     assert.match(requests[1].url, /\/enrollment%20%2F1\/approve$/)
     assert.equal(refreshes, 1)
     tree = harness.render()
@@ -559,13 +571,14 @@ test('recovery enrollment cannot override its bound vehicle, rejection and appro
     assert.match(requests[1].url, /\/deny$/)
     assert.match(renderTree(harness.render()), /已拒绝/)
     lookupEnrollment(harness); await settle()
+    confirmEnrollmentFingerprint(harness)
     tree = harness.render()
     elements(tree, 'form')[1].props.onSubmit({ preventDefault() {} }); await settle()
-    assert.deepEqual(requests[3].body, {})
+    assert.deepEqual(requests[3].body, { expected_fingerprint: enrollment.fingerprint })
     assert.match(requests[3].url, /\/approve$/)
     // API also strips attempted caller binding overrides for a recovery.
     await api.approveDeviceEnrollment('org', 'admin-bearer', recovery, { name: 'Override', vehicle_number: 'wrong-car', vehicle_id: 'wrong-car' })
-    assert.deepEqual(requests[4].body, {})
+    assert.deepEqual(requests[4].body, { expected_fingerprint: enrollment.fingerprint })
   } finally { harness.unmount(); globalThis.fetch = original }
 })
 
@@ -585,14 +598,14 @@ test('enrollment requests abort on organization switch, code change and unmount 
     assert.equal(requests[0].options.signal.aborted, true)
     requests[0].resolve(new Response(JSON.stringify(enrollment))); await settle()
     tree = harness.render()
-    assert.doesNotMatch(renderTree(tree), /SHA256:public-key-fingerprint|批准接入新车辆/)
+    assert.ok(!renderTree(tree).includes(enrollment.fingerprint))
     enterEnrollmentCode(harness); lookupEnrollment(harness)
     requests[1].resolve(new Response(JSON.stringify(enrollment))); await settle()
     tree = harness.render(); harness.flushEffects()
     const oldApproval = elements(tree, 'form')[1].props.onSubmit
     // Even before organization effects flush, old details and callbacks are invalid.
     tree = harness.render({ ...enrollmentProps, orgId: 'third-org' })
-    assert.doesNotMatch(renderTree(tree), /SHA256:public-key-fingerprint/)
+    assert.ok(!renderTree(tree).includes(enrollment.fingerprint))
     oldApproval({ preventDefault() {} }); await settle()
     assert.equal(requests.length, 2)
     harness.flushEffects()
@@ -600,7 +613,7 @@ test('enrollment requests abort on organization switch, code change and unmount 
     enterEnrollmentCode(harness, 'JKLM-NPQR')
     assert.equal(requests[2].options.signal.aborted, true)
     requests[2].resolve(new Response(JSON.stringify(enrollment))); await settle()
-    assert.doesNotMatch(renderTree(harness.render()), /SHA256:public-key-fingerprint/)
+    assert.ok(!renderTree(harness.render()).includes(enrollment.fingerprint))
     lookupEnrollment(harness)
     assert.deepEqual(JSON.parse(requests[3].options.body), { user_code: 'JKLMNPQR' })
     harness.unmount()
@@ -629,6 +642,7 @@ test('expired device applications cannot be approved and an uncertain approval i
     assert.equal(calls, 1)
     expired = false
     lookupEnrollment(harness); await settle()
+    confirmEnrollmentFingerprint(harness)
     tree = harness.render()
     elements(harness.render(), 'form')[1].props.onSubmit({ preventDefault() {} }); await settle()
     assert.equal(calls, 3)
@@ -683,7 +697,7 @@ test('approved enrollment discovers a failed provisioning task after an empty pr
   } finally { manager.unmount(); panel.unmount(); globalThis.fetch = original }
 })
 
-test('switching tabs filters onboarding operations and discards an installation ticket still being issued', async () => {
+test('switching tabs filters onboarding operations and never issues unsupported vehicle tickets', async () => {
   const originalFetch = globalThis.fetch
   const installOperation = { ...operation, kind: 'vehicle', vehicle_id: 'car-1', status: 'awaiting_install' }
   let issueTicket
@@ -700,7 +714,7 @@ test('switching tabs filters onboarding operations and discards an installation 
     assert.deepEqual(panel.props.operations.map(item => item.kind), ['vehicle'])
     panel.props.onTicket('vehicle-op')
     tree = harness.render({ ...props, tab: 'people' }); harness.flushEffects()
-    issueTicket(new Response(JSON.stringify({ token: 'must-not-display', expires_at: new Date(Date.now() + 60_000).toISOString() })))
+    assert.equal(issueTicket, undefined)
     await settle()
     tree = harness.render({ ...props, tab: 'people' })
     assert.equal(elements(tree, OnboardingForms)[0].props.kind, 'person')
@@ -759,7 +773,7 @@ test('pending operation polling refreshes directory transitions, stops when comp
   } finally { harness.unmount(); globalThis.fetch = original; context.mock.timers.reset() }
 })
 
-test('installation tickets are explicit, transient, expire, and never reach persistent storage or URLs', async context => {
+test('unsupported installation tickets cannot be issued or displayed through the manager', async context => {
   const originalFetch = globalThis.fetch
   const originalStorage = globalThis.localStorage
   const originalSessionStorage = globalThis.sessionStorage
@@ -791,21 +805,21 @@ test('installation tickets are explicit, transient, expire, and never reach pers
       if (node.props?.ticket) return node
       return instructions(node.props?.children)
     }
-    assert.equal(instructions(tree).props.ticket.token, token)
-    const html = renderInstallation(instructions(tree).props)
+    assert.equal(instructions(tree), undefined)
+    assert.equal(requests.filter(request => request.url.endsWith('/installation-ticket')).length, 0)
+    const html = renderInstallation({ ticket, vehicleId: 'car-1', onClear() {} })
     assert.match(html, /autocomplete="off"/i)
     assert.match(html, /readOnly=""/i)
-    assert.match(html, /--gateway.*--vehicle-id/)
+    assert.match(html, /vehicle_bootstrap --gateway-url HTTPS_URL/)
+    assert.doesNotMatch(html, /python3 infra\/scripts|--verify-existing/)
     assert.doesNotMatch(html, /client_secret|href=|<script/)
     assert.ok(!html.slice(html.indexOf('<pre'), html.indexOf('</pre>')).includes(token))
     assert.ok(requests.every(request => !request.url.includes(token) && !String(request.body).includes(token)))
-    instructions(tree).props.onClear()
-    assert.equal(instructions(harness.render()), undefined)
     panel.props.onTicket('op-1'); await settle()
     tree = harness.render(); harness.flushEffects()
     context.mock.timers.tick(60_000); await settle()
     assert.equal(instructions(harness.render()), undefined)
-    assert.equal(requests.filter(request => request.url.endsWith('/installation-ticket')).length, 2)
+    assert.equal(requests.filter(request => request.url.endsWith('/installation-ticket')).length, 0)
     panel.props.onTicket('op-1'); await settle()
     harness.render({ ...props, orgId: 'other-org' }); harness.flushEffects()
     assert.equal(instructions(harness.render({ ...props, orgId: 'other-org' })), undefined)
@@ -816,15 +830,18 @@ test('installation tickets are explicit, transient, expire, and never reach pers
   }
 })
 
-test('bootstrap JSON contains only endpoints, protected paths and safety flags', () => {
-  const settings = { gateway_url: 'https://api.example.test', console_url: 'https://console.example.test' }
-  assert.deepEqual(JSON.parse(vehicleBootstrapJSON(settings)), {
-    ...settings, state_directory: '/var/lib/teleop/bootstrap',
-    device_template: '/etc/teleop/device.template.json', device_config: '/etc/teleop/device.json',
-    allow_insecure_localhost: false, allow_legacy_complete_404: false,
+test('bootstrap JSON contains only gateway_url and an explicit local-test flag when required', () => {
+  const settings = { gateway_url: 'https://api.example.test' }
+  assert.deepEqual(JSON.parse(vehicleBootstrapJSON(settings)), settings)
+  assert.deepEqual(JSON.parse(vehicleBootstrapJSON({
+    gateway_url: 'http://127.0.0.1:8080',
+  })), {
+    gateway_url: 'http://127.0.0.1:8080', allow_insecure_localhost: true,
   })
-  for (const change of [{ name: 'Vehicle' }, { serial: 'SN' }, { platform: 'apollo' }, { client_secret: 'must-not-copy' },
-    { gateway_url: 'http://remote.example' }, { console_url: 'https://u:p@example.test' }]) {
+  for (const change of [{ console_url: 'https://console.example.test' }, { name: 'Vehicle' }, { serial: 'SN' },
+    { platform: 'apollo' }, { client_secret: 'must-not-copy' },
+    { device_template: '/etc/teleop/device.template.json' }, { allow_legacy_complete_404: false },
+    { gateway_url: 'http://remote.example' }, { gateway_url: 'https://example.test?token=1' }]) {
     assert.throws(() => vehicleBootstrapJSON({ ...settings, ...change }))
   }
 })
@@ -885,7 +902,7 @@ test('editing the vehicle name cancels stale lookup and requires a fresh confirm
     enterEnrollmentName(harness, 'Changed name')
     assert.equal(requests[0].options.signal.aborted, true)
     requests[0].resolve(new Response(JSON.stringify(enrollment))); await settle()
-    assert.doesNotMatch(renderTree(harness.render()), /SHA256:public-key-fingerprint/)
+    assert.ok(!renderTree(harness.render()).includes(enrollment.fingerprint))
     lookupEnrollment(harness)
     requests[1].resolve(new Response(JSON.stringify(enrollment))); await settle()
     const oldApproval = elements(harness.render(), 'form')[1].props.onSubmit
@@ -896,7 +913,10 @@ test('editing the vehicle name cancels stale lookup and requires a fresh confirm
     lookupEnrollment(harness)
     requests[2].resolve(new Response(JSON.stringify(enrollment))); await settle()
     elements(harness.render(), 'form')[1].props.onSubmit({ preventDefault() {} })
-    assert.deepEqual(JSON.parse(requests[3].options.body), { name: 'Final name' })
+    assert.equal(requests.length, 3, 'fresh lookup needs explicit fingerprint confirmation')
+    confirmEnrollmentFingerprint(harness)
+    elements(harness.render(), 'form')[1].props.onSubmit({ preventDefault() {} })
+    assert.deepEqual(JSON.parse(requests[3].options.body), { name: 'Final name', expected_fingerprint: enrollment.fingerprint })
     requests[3].resolve(new Response(JSON.stringify({ ...enrollment, status: 'approved' }))); await settle()
   } finally { harness.unmount(); globalThis.fetch = original }
 })

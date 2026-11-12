@@ -48,7 +48,7 @@ def main():
     setup_image = f'teleop-setup:{args.version}-amd64'
     go_proxy = ['--build-arg', 'GOPROXY'] if os.environ.get('GOPROXY') else []
     run(['docker', 'build', '--platform', platform, *go_proxy, '-t', images['gateway'],
-         str(ROOT / 'apps/teleop-gateway')])
+         str(ROOT / 'teleop-gateway')])
     run(['docker', 'build', '--platform', platform, '-t', images['frontend'],
          '-f', str(ROOT / 'frontend/Dockerfile'), str(ROOT)])
     for key, upstream in DEPENDENCIES.items():
@@ -73,13 +73,15 @@ def main():
             raise RuntimeError('setup image has the wrong architecture')
         bundle = temp / name
         bundle.mkdir()
-        launcher = (ROOT / 'infra/release/teleop').read_text().replace('__SETUP_IMAGE__', setup_image)
+        setup_image_id = inspect(setup_image)['Id']
+        launcher = (ROOT / 'infra/release/teleop').read_text().replace(
+            '__SETUP_IMAGE__', setup_image).replace('__SETUP_IMAGE_ID__', setup_image_id)
         (bundle / 'teleop').write_text(launcher)
         (bundle / 'teleop').chmod(0o755)
         shutil.copyfile(ROOT / 'infra/release/README.txt', bundle / 'README.txt')
         shutil.copyfile(context / 'release-images.json', bundle / 'release-images.json')
         manifest['setup_image'] = setup_image
-        manifest['setup_image_id'] = inspect(setup_image)['Id']
+        manifest['setup_image_id'] = setup_image_id
         (bundle / 'release-images.json').write_text(json.dumps(manifest, indent=2) + '\n')
         print('Exporting compiled services, setup image and all runtime dependencies...', flush=True)
         with (bundle / 'images.tar.gz').open('wb') as target:
@@ -91,14 +93,19 @@ def main():
                 save.stdout.close()
             if save.wait() != 0:
                 raise RuntimeError('Docker image export failed')
-        digest = hashlib.sha256()
-        with (bundle / 'images.tar.gz').open('rb') as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b''):
-                digest.update(block)
-        (bundle / 'SHA256SUMS').write_text(digest.hexdigest() + '  images.tar.gz\n')
+        checksums = []
+        for filename in ('images.tar.gz', 'teleop', 'release-images.json', 'README.txt'):
+            digest = hashlib.sha256()
+            with (bundle / filename).open('rb') as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(block)
+            checksums.append(digest.hexdigest() + '  ' + filename + '\n')
+        (bundle / 'SHA256SUMS').write_text(''.join(checksums))
         # Images are already compressed; keep the outer archive inexpensive.
-        with tarfile.open(archive, 'w:gz', compresslevel=1) as tar:
+        staged_archive = temp / archive.name
+        with tarfile.open(staged_archive, 'w:gz', compresslevel=1) as tar:
             tar.add(bundle, arcname=name)
+        staged_archive.rename(archive)
     digest = hashlib.sha256()
     with archive.open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):

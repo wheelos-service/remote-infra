@@ -1,7 +1,7 @@
 # Agent Guide
 
 ## Commands
-- Gateway tests: `cd apps/teleop-gateway && go test ./...`
+- Gateway tests: `cd teleop-gateway && go test ./...`
 - Apollo Teleop/Guardian/Canbus & SDK-Kit Bazel tests: `docker exec -u wfh -w /apollo apollo_dev_wfh_29599a1b bazel test --lockfile_mode=off @sdk_kit//tests/... //modules/teleop/... //modules/guardian/... //modules/canbus:canbus_test --test_output=errors`
 - Apollo LiveKit media worker smoke check: `docker exec -u wfh -w /apollo apollo_dev_wfh_29599a1b bazel run --lockfile_mode=off //modules/teleop:vehicle_media_worker -- --sdk-smoke`
 - Frontend build: `cd frontend && npm run build`
@@ -9,7 +9,7 @@
 - Shared state-machine tests: `npm --prefix packages/teleop-shared test`
 - Backend build: `infra/scripts/build-backend.sh`
 - Frontend static build: `infra/scripts/build-frontend.sh`
-- Integration services: `docker compose up -d --build`
+- Integration services: `python3 infra/scripts/deploy.py --local all`
 - Install shared/frontend dependencies: `npm ci --prefix packages/teleop-shared && npm ci --prefix frontend`
 
 ## Principles & Anti-Patterns
@@ -23,9 +23,11 @@
 ## Knowledge (what the project is)
 - `architecture.md` — Module breakdown, multi-tenant entity model (`Organization`, `Person`, `Vehicle`, `Role`/`Scope`), registration & binding flows, and 4-layer runtime authentication
 - `conventions.md` — Code style, naming, and security constraints
+- `frontend-optimization-roadmap.md` — Remaining alert-response and remote-driving readiness work that depends on backend capabilities
 - Release capabilities and limits: `docs/compatibility.md`; API payload contracts: `api/schemas/`
 - `vehicle-cyber.md` — Cyber/LiveKit module ownership, wire contract, and control safety invariants
 - `troubleshooting.md` — Common startup, test, and deployment problems
+- `.agents/knowledge/k3s-deployment-roadmap.md` — Future public-domain k3s plan; not a supported or executable release workflow
 
 ## Skills (how to work)
 - `testing/SKILL.md` — Writing, fixing, and validating tests

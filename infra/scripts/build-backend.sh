@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "Building backend (dockerized Go)..."
-cd "$(dirname "$0")/../../apps/teleop-gateway"
+cd "$(dirname "$0")/../../teleop-gateway"
 output_dir="${BACKEND_OUTPUT_DIR:-$PWD}"
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"

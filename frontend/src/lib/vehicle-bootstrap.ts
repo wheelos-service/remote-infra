@@ -13,17 +13,14 @@ export const vehicleSetupDefaultsSchema = z.object({
 })
 export type VehicleSetupDefaults = z.infer<typeof vehicleSetupDefaultsSchema>
 export const vehicleBootstrapInputSchema = z.object({
-  gateway_url: endpoint, console_url: endpoint,
+  gateway_url: endpoint,
 }).strict()
 
 export function vehicleBootstrapJSON(input: unknown): string {
   const value = vehicleBootstrapInputSchema.parse(input)
+  const localTest = value.gateway_url.startsWith('http:')
   return JSON.stringify({
     ...value,
-    state_directory: '/var/lib/teleop/bootstrap',
-    device_template: '/etc/teleop/device.template.json',
-    device_config: '/etc/teleop/device.json',
-    allow_insecure_localhost: value.gateway_url.startsWith('http:') || value.console_url.startsWith('http:'),
-    allow_legacy_complete_404: false,
+    ...(localTest ? { allow_insecure_localhost: true } : {}),
   }, null, 2)
 }

@@ -6,7 +6,7 @@ fixtures="$(mktemp -d)"
 trap 'rm -f "$fixtures/corpus.json" "$fixtures/validated.json"; rmdir "$fixtures"' EXIT
 
 if command -v go >/dev/null 2>&1; then
-  (cd "$root/apps/teleop-gateway" &&
+  (cd "$root/teleop-gateway" &&
     PLATFORM_CONTRACT_FIXTURE="$fixtures/corpus.json" go test ./internal/gateway \
       -run '^TestPlatformMockContracts$' -count=1)
 else
@@ -20,7 +20,7 @@ else
     "${cache_args[@]}" -e GOPROXY=https://goproxy.cn,direct \
     -e PLATFORM_CONTRACT_FIXTURE=/fixtures/corpus.json \
     -v "$root:/workspace:ro" -v "$fixtures:/fixtures" \
-    -w /workspace/apps/teleop-gateway golang:1.24 \
+    -w /workspace/teleop-gateway golang:1.24 \
     go test ./internal/gateway -run '^TestPlatformMockContracts$' -count=1
 fi
 

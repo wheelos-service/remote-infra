@@ -9,6 +9,6 @@ COPY frontend/ frontend/
 RUN npm --prefix frontend run build
 
 FROM nginx:stable-alpine
-COPY infra/frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /repo/frontend/dist/ /usr/share/nginx/html/
 EXPOSE 80

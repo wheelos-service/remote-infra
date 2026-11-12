@@ -6,6 +6,9 @@ Node, Compose installation, domain, or build step is needed on the user machine.
 1. Extract the archive and run from its directory (substitute your LAN IP):
      ./teleop --lan-ip 192.168.1.50 all
    The launcher loads the bundled images and generates private instance config.
+   Verify the outer archive against its trusted .sha256 before extraction.
+   Bundle checksums are checked before image loading. Setup and service image
+   IDs are checked before deployment; use ./teleop load if local tags changed.
 
 2. Copy ~/.local/state/teleop/root.crt to each client and trust it in the OS/browser.
    Check the printed SHA-256 fingerprint. On Ubuntu clients:
@@ -30,3 +33,10 @@ Later commands, from this directory and the same OS user:
 Use --state /absolute/private/path for a different persistent directory.
 "./teleop load" imports images without starting services. No public registry
 access is needed after this archive has been transferred.
+
+Public domains can use the same launcher:
+  ./teleop --domain console.example.com --auth-domain login.example.com \
+    --acme-email ops@example.com all
+Use DNS-only records pointing to this host, public TCP 80/443, and outbound
+DNS/HTTPS. Caddy obtains/renews Let's Encrypt certificates; do not install the
+LAN root certificate in this mode. Public issuance still requires network access.

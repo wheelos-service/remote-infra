@@ -19,13 +19,13 @@ def load(name, path):
 
 
 deploy = load('deploy', 'infra/scripts/deploy.py')
-renderer = load('render_config', 'infra/scripts/render-config.py')
 
 
 class DeploymentTest(unittest.TestCase):
     def settings(self, **kwargs):
         return argparse.Namespace(**dict(dict(local=None, lan_ip=None, domain=None,
-                                             auth_domain=None, project=None, media_ip=None), **kwargs))
+                                             auth_domain=None, project=None, media_ip=None,
+                                             acme_email=None, acme_staging=None), **kwargs))
 
     def test_prebuilt_release_never_builds_or_pulls_and_preserves_local_secrets(self):
         images = {name: f'teleop-{name}:1.0.0-rc1-amd64' for name in
@@ -53,14 +53,61 @@ class DeploymentTest(unittest.TestCase):
                   ('gateway', 'frontend', 'postgres', 'redis', 'casdoor', 'livekit', 'caddy', 'storage-init')}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'release-images.json'
-            path.write_text(json.dumps(dict(platform='linux/amd64', images=images)))
-            self.assertEqual(deploy.load_release_images(path), images)
+            ids = {name: 'sha256:' + 'a' * 64 for name in images}
+            path.write_text(json.dumps(dict(platform='linux/amd64', images=images, image_ids=ids)))
+            info = json.dumps([dict(Os='linux', Architecture='amd64', Id='sha256:' + 'a' * 64)])
+            with patch.object(deploy, 'run', return_value=argparse.Namespace(stdout=info)) as run:
+                self.assertEqual(deploy.load_release_images(path), images)
+                self.assertEqual(run.call_count, len(images))
             for manifest in (dict(platform='linux/arm64', images=images),
                              dict(platform='linux/amd64', images={'gateway': 'teleop:test'}),
                              dict(platform='linux/amd64', images={**images, 'gateway': '${HOST_IMAGE}'})):
                 path.write_text(json.dumps(manifest))
                 with self.assertRaisesRegex(RuntimeError, 'invalid prebuilt'):
                     deploy.load_release_images(path)
+
+    def test_release_refuses_missing_ids_retagged_images_and_wrong_platform(self):
+        images = {name: f'teleop-{name}:test' for name in
+                  ('gateway', 'frontend', 'postgres', 'redis', 'casdoor', 'livekit', 'caddy', 'storage-init')}
+        ids = {name: 'sha256:' + 'a' * 64 for name in images}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'release-images.json'
+            path.write_text(json.dumps(dict(platform='linux/amd64', images=images)))
+            with self.assertRaisesRegex(RuntimeError, 'exact image ID'):
+                deploy.load_release_images(path)
+            path.write_text(json.dumps(dict(platform='linux/amd64', images=images, image_ids=ids)))
+            for info in (dict(Os='linux', Architecture='amd64', Id='sha256:' + 'b' * 64),
+                         dict(Os='linux', Architecture='arm64', Id=ids['gateway'])):
+                with patch.object(deploy, 'run', return_value=argparse.Namespace(stdout=json.dumps([info]))):
+                    with self.assertRaisesRegex(RuntimeError, 'release image mismatch'):
+                        deploy.load_release_images(path)
+
+    def test_source_build_only_builds_applications_with_generated_compose(self):
+        with patch.object(deploy, 'compose') as compose, patch.object(deploy, 'RELEASE_IMAGES', None):
+            deploy.build(Path('/private/state'))
+            compose.assert_called_once_with(Path('/private/state'), 'build', 'gateway', 'frontend')
+
+    def test_source_and_release_share_prepare_start_verify_without_release_build(self):
+        for prebuilt in (False, True):
+            with self.subTest(prebuilt=prebuilt), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                state.chmod(0o700)
+                argv = ['deploy.py', '--state', directory, '--local', 'all']
+                if prebuilt:
+                    argv += ['--images', str(state / 'release-images.json')]
+                events = []
+                with patch('sys.argv', argv), patch.object(deploy, 'check_project'), \
+                        patch.object(deploy, 'load_release_images', return_value={'gateway': 'release'}), \
+                        patch.object(deploy, 'prepare', side_effect=lambda _: events.append('prepare') or {}), \
+                        patch.object(deploy, 'build', side_effect=lambda _: events.append('build')), \
+                        patch.object(deploy, 'start', side_effect=lambda *_: events.append('start')), \
+                        patch.object(deploy, 'verify', side_effect=lambda *a, **kw: events.append('verify')), \
+                        patch.object(deploy, 'connection_info'), patch('sys.stdout', io.StringIO()), \
+                        patch.multiple(deploy, RELEASE_IMAGES=None, LOCAL=False, PUBLIC_TLS=False,
+                                       PROJECT='teleop', MEDIA_IP='', ACME_EMAIL='', ACME_STAGING=False):
+                    deploy.main()
+                self.assertEqual(events, ['prepare', 'start', 'verify'] if prebuilt else
+                                 ['prepare', 'build', 'start', 'verify'])
 
     def test_public_deployment_is_self_contained_and_secrets_stay_private(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(deploy, 'compose'), \
@@ -89,6 +136,8 @@ class DeploymentTest(unittest.TestCase):
             self.assertNotIn('network_mode', gateway)
             self.assertFalse(any('root.crt' in volume for volume in gateway['volumes']))
             self.assertNotIn('tls internal', (state / 'Caddyfile').read_text())
+            self.assertEqual((state / 'Caddyfile').read_text().count(
+                'dir https://acme-v02.api.letsencrypt.org/directory'), 2)
             self.assertIn('reverse_proxy gateway:8080', (state / 'Caddyfile').read_text())
             self.assertIn('use_external_ip: true', (state / 'livekit.yaml').read_text())
             self.assertIn('/api/webhook/livekit', (state / 'livekit.yaml').read_text())
@@ -101,6 +150,74 @@ class DeploymentTest(unittest.TestCase):
             self.assertEqual((state / 'runtime-config.js').stat().st_mode & 0o777, 0o644)
             self.assertEqual(deploy.prepare(state), values)
             self.assertNotIn('vehicles', json.loads((state / 'casdoor-seed.json').read_text()))
+
+    def test_acme_staging_email_and_certificate_storage_are_explicit_and_persistent(self):
+        for staging in (False, True):
+            with self.subTest(staging=staging), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(deploy, 'compose'), \
+                    patch.multiple(deploy, PUBLIC_TLS=True, LOCAL=False, MEDIA=False,
+                                   ACME_EMAIL='ops@example.com', ACME_STAGING=staging,
+                                   APP='https://console.example.com', AUTH='https://auth.example.com'):
+                state = Path(directory)
+                deploy.prepare(state)
+                caddyfile = (state / 'Caddyfile').read_text()
+                ca = deploy.ACME_STAGING_URL if staging else deploy.ACME_PRODUCTION_URL
+                self.assertEqual(caddyfile.count(f'dir {ca}'), 2)
+                self.assertEqual(caddyfile.count('email ops@example.com'), 2)
+                self.assertNotIn('tls internal', caddyfile)
+                services = json.loads((state / 'compose.json').read_text())['services']
+                self.assertIn(f"{state / 'caddy-data'}:/data", services['caddy']['volumes'])
+                marker = state / 'caddy-data' / 'existing-account'
+                marker.write_text('preserved')
+                deploy.prepare(state)
+                self.assertEqual(marker.read_text(), 'preserved')
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    deploy.connection_info(state)
+                self.assertIn('not publicly trusted' if staging else 'renews certificates automatically',
+                              output.getvalue())
+
+    def test_acme_settings_are_pinned_and_lan_does_not_use_acme(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            saved = deploy.deployment_settings(state, self.settings(
+                domain='console.example.com', auth_domain='auth.example.com',
+                acme_email='ops@example.com', acme_staging=True))
+            self.assertEqual(saved, deploy.deployment_settings(state, self.settings()))
+            for changed in (self.settings(acme_staging=False), self.settings(acme_email='other@example.com')):
+                with self.assertRaisesRegex(RuntimeError, 'settings changed'):
+                    deploy.deployment_settings(state, changed)
+        for args in (self.settings(local=True, acme_email='ops@example.com'),
+                     self.settings(lan_ip='192.168.1.50', acme_staging=True)):
+            with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(RuntimeError, 'ACME options'):
+                deploy.deployment_settings(Path(directory), args)
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / 'deployment.json').write_text(json.dumps(dict(
+                local=False, lan_ip=None, domain='console.example.com',
+                auth_domain='auth.example.com', project='teleop', media_ip=None)))
+            self.assertNotIn('acme_email', deploy.deployment_settings(state, self.settings()))
+
+    def test_staging_cannot_start_authentication_services(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch('sys.argv', ['deploy.py', '--state', directory, '--domain', 'console.example.com',
+                                   '--auth-domain', 'auth.example.com', '--acme-staging', 'start']), \
+                patch.object(deploy, 'compose') as compose, patch.object(deploy, 'check_project') as check, \
+                patch.multiple(deploy, ACME_EMAIL='', ACME_STAGING=False), \
+                patch('sys.stderr', io.StringIO()):
+            Path(directory).chmod(0o700)
+            with self.assertRaises(SystemExit) as error:
+                deploy.main()
+            self.assertEqual(error.exception.code, 2)
+            compose.assert_not_called()
+            check.assert_not_called()
+
+    def test_acme_email_rejects_configuration_injection(self):
+        self.assertEqual(deploy.acme_email('Ops+tls@EXAMPLE.COM'), 'Ops+tls@example.com')
+        for email in ('ops@example.com\n}', 'ops@example.com {', '{$TOKEN}@example.com',
+                      'ops@example.com;foo', 'ops@localhost', 'ops@127.0.0.1'):
+            with self.subTest(email=email), self.assertRaises(argparse.ArgumentTypeError):
+                deploy.acme_email(email)
 
     def test_state_pins_project_and_issuer_and_requires_explicit_first_address(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -199,23 +316,6 @@ class DeploymentTest(unittest.TestCase):
             self.assertIn("each client's OS/browser", message)
             self.assertIn('TCP 8443/8444', message)
             self.assertNotIn('localhost', message)
-
-    def test_livekit_secrets_are_encoded_without_shell_or_yaml_injection(self):
-        values = dict(LIVEKIT_API_KEY='key: # | $ &', LIVEKIT_API_SECRET='secret"\\\nfoo: bar')
-        template = (ROOT / 'infra/local-dev/livekit.template.yaml').read_text()
-        result = renderer.render('livekit', template, values)
-        for value in values.values():
-            self.assertIn(json.dumps(value), result)
-        self.assertNotIn('__LIVEKIT_', result)
-
-    def test_casdoor_origin_comes_from_deployment_and_rejects_config_injection(self):
-        template = (ROOT / 'infra/local-dev/casdoor/app.conf').read_text()
-        env = dict(CASDOOR_DOMAIN='auth.new-host.test', CASDOOR_DB_ROOT_PASSWORD='random-password')
-        result = renderer.render('casdoor', template, env)
-        self.assertNotIn('wheelos', result)
-        self.assertIn('origin = "https://auth.new-host.test"', result)
-        with self.assertRaises(ValueError):
-            renderer.render('casdoor', template, {**env, 'CASDOOR_DOMAIN': 'bad\nshowSql = true'})
 
 
 if __name__ == '__main__':

@@ -21,7 +21,7 @@ Read this file when preparing a release, building images, deploying Docker Compo
 
 - Do not use `AUTH_MODE=dev` for production control.
 - Do not deploy this prototype into a real vehicle control path without a security review.
-- Do not infer the current production workflow from the Kubernetes manifests; Docker Compose is the current primary path.
+- Do not infer the current production workflow from the future k3s roadmap; Docker Compose is the only supported deployment path.
 
 ## Sources (SSOT)
 

@@ -11,8 +11,18 @@ replace the example IP with the machine's LAN IPv4 address (`hostname -I` lists
 its addresses). Reserve that IP in your router or configure a static address.
 
 ```bash
+sha256sum --check teleop-1.1.0-linux-amd64.tar.gz.sha256
+tar -xzf teleop-1.1.0-linux-amd64.tar.gz
+cd teleop-1.1.0-linux-amd64
 ./teleop --lan-ip 192.168.1.50 all
 ```
+
+Run the checksum and extraction commands from the download directory, before
+entering the extracted bundle. Obtain the expected checksum through a trusted
+release channel; a checksum supplied with a malicious archive is not a signature.
+The launcher also checks bundle files before loading images and rejects images
+whose IDs/architecture differ from the release manifest. Run `./teleop load` to
+restore bundled images if local tags were replaced.
 
 The launcher loads the images, generates secrets, and creates the first
 administrator. Keep the default state directory `~/.local/state/teleop` private.
@@ -20,6 +30,17 @@ Allow LAN clients through the host firewall on TCP **8443/8444**; media also
 uses TCP **7881** and UDP **51000–51100**.
 
 To build from a source checkout instead, follow [Deploy from source](deploy-from-source.md).
+
+For public domains, use the same launcher instead of the source command:
+
+```bash
+./teleop --domain console.example.com --auth-domain login.example.com \
+  --acme-email ops@example.com all
+```
+
+Follow the [public DNS, ports and ACME requirements](deploy-from-source.md#optional-public-domains).
+Public mode uses the system CA store; skip the private root installation below.
+Offline image delivery does not make public ACME issuance/renewal offline.
 
 ## 2. Trust the certificate
 

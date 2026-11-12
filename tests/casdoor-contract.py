@@ -345,7 +345,7 @@ def main():
                     "--user", "0:0" if bootstrap else f"{os.getuid()}:{os.getgid()}",
                     "-v", f"{ROOT}:/src:ro", "-v", f"{cache}:/cache",
                     "-e", "GOCACHE=/cache/build", "-e", "GOMODCACHE=/cache/mod",
-                    "-w", "/src/apps/teleop-gateway",
+                    "-w", "/src/teleop-gateway",
                 ]
                 if bootstrap:
                     command.extend([
@@ -375,7 +375,7 @@ def main():
                     command.extend(["-e", key])
                 command.extend(["golang:1.24", *test])
                 started.append(runner)
-            subprocess.run(command, cwd=ROOT / "apps/teleop-gateway", env=env,
+            subprocess.run(command, cwd=ROOT / "teleop-gateway", env=env,
                            check=True, timeout=1080 if bootstrap else 300)
             print("PASS Casdoor v4.25.0: Basic-header management, create/reconcile person and vehicle, "
                   "one-week personnel PKCE/login-cookie policy and client_credentials subject/audience/scope, "

@@ -133,7 +133,7 @@ LiveKit transport, the vehicle's Gateway token permissions, or Apollo
   - `/apollo/mission/runtime_status` (`apollo.mission.MissionRuntimeStatus`)
 
 ## Safety and Lifecycle Invariants
-- `control_mode` in `apps/vehicle-edge-cpp` is `disabled | simulation | cyber`
+- Vehicle-side `control_mode` is `disabled | simulation | cyber`
   (default `disabled`). `simulation` never writes to Cyber; `cyber` publishes
   verified commands to `/apollo/teleop/control`.
 - Missing active remote commands for `> 300 ms`, session expiry/revocation, or
@@ -150,7 +150,7 @@ LiveKit transport, the vehicle's Gateway token permissions, or Apollo
   `docker exec -u wfh -w /apollo apollo_dev_wfh_29599a1b bazel test --lockfile_mode=off @sdk_kit//tests/... //modules/teleop/... //modules/guardian/... //modules/canbus:canbus_test --test_output=errors`
 - Apollo LiveKit media worker smoke check:
   `docker exec -u wfh -w /apollo apollo_dev_wfh_29599a1b bazel run --lockfile_mode=off //modules/teleop:vehicle_media_worker -- --sdk-smoke`
-- Gateway tests: `cd apps/teleop-gateway && go test ./...`
+- Gateway tests: `cd teleop-gateway && go test ./...`
 - Frontend tests: `cd frontend && npm test`
 
 ## Sources of truth
@@ -160,4 +160,4 @@ LiveKit transport, the vehicle's Gateway token permissions, or Apollo
 - Apollo Guardian arbiter: `/home/wfh/01code/apollo-base/modules/guardian/`
 - Apollo Canbus & VehicleController: `/home/wfh/01code/apollo-base/modules/canbus/`
 - Cross-component architecture: `.agents/knowledge/architecture.md`
-- Control packet schema: `api/schemas/datachannel-control.schema.json`
+- Control packet schema: `api/schemas/vehicle-control-v2.schema.json`

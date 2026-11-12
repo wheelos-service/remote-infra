@@ -4,13 +4,12 @@
 bin/
 *.log
 node_modules/
-apps/operator-console/dist/
 __pycache__/
 .pytest_cache/
 tests/__pycache__/
 *.pyc
-apps/teleop-gateway/data/
-apps/teleop-gateway/teleop-backend
+teleop-gateway/data/
+teleop-gateway/teleop-backend
 
 # Local development notes, design history, reviews, and vehicle investigations.
 /.local-docs/

@@ -4,13 +4,24 @@ LiveKit remote vehicle supervision server and browser console:
 
 ```text
 frontend/               Unified authenticated React operations platform
-apps/teleop-gateway/    Go Gateway
+teleop-gateway/         Go Gateway
 infra/                  Deployment tools and release packaging
+packages/teleop-shared/  Framework-independent browser input state machines
+api/schemas/            Versioned cross-component JSON Schema contracts
+docs/                    Deployment, administration and operations guides
+tests/                   Unit, contract and deployment acceptance checks
 ```
 
 `packages/teleop-shared/` provides shared input and view state machines.
-`apps/operator-console/` and `apps/vehicle-edge/` are legacy v1 references,
-not dependencies of the primary frontend. See [release capabilities](docs/compatibility.md).
+Vehicle SDK builds and Apollo configuration are managed separately from this
+server repository.
+See [release capabilities](docs/compatibility.md).
+
+The Gateway is a root-level Go module; its `cmd/` executables and `internal/`
+packages follow standard Go application boundaries. `infra/scripts/deploy.py`
+is the sole deployment lifecycle owner: it generates the private Compose
+configuration, initializes, starts and verifies both source and prebuilt
+deployments.
 
 ## Quick start
 
@@ -31,5 +42,4 @@ is disabled until handover support is complete.
 
 The [user documentation index](docs/readme.md) covers source deployment,
 operations, administration, vehicle registration, and release limitations.
-Docker Compose on one host is the supported release deployment; retained
-Kubernetes manifests are outside this release workflow.
+Docker Compose on one host is the only supported release deployment.

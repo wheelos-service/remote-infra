@@ -274,16 +274,16 @@ def prepare(state):
 
 
 def build(state):
-    backend = ROOT / "apps/teleop-gateway/teleop-backend"
+    backend = ROOT / "teleop-gateway/teleop-backend"
     had_backend = backend.exists()
     run([str(ROOT / "infra/scripts/build-backend.sh")], cwd=ROOT)
     run([str(ROOT / "infra/scripts/build-frontend.sh")], cwd=ROOT)
-    run(["docker", "run", "--rm", "-v", f"{ROOT / 'apps/teleop-gateway'}:/app",
+    run(["docker", "run", "--rm", "-v", f"{ROOT / 'teleop-gateway'}:/app",
          "-v", f"{state}:/output", "-w", "/app",
          "-e", "GOPROXY=" + os.environ.get("GOPROXY", "https://proxy.golang.org,direct"), "golang:1.24",
          "go", "build", "-mod=readonly", "-o", "/output/auth-admin", "./cmd/auth-admin"])
     write(state / "Gateway.Dockerfile",
-          "FROM golang:1.24\nCOPY apps/teleop-gateway/teleop-backend /usr/local/bin/\n"
+          "FROM golang:1.24\nCOPY teleop-gateway/teleop-backend /usr/local/bin/\n"
           f"RUN mkdir -p /var/lib/teleop && chown {os.getuid()}:{os.getgid()} /var/lib/teleop\n"
           "ENTRYPOINT [\"/usr/local/bin/teleop-backend\"]\n")
     run(["docker", "build", "--quiet", "-t", "authentication-test-gateway:local",
@@ -294,7 +294,7 @@ def build(state):
     context = state / "frontend-image"
     context.mkdir(mode=0o700, exist_ok=True)
     shutil.copytree(ROOT / "frontend/dist", context / "dist", dirs_exist_ok=True)
-    write(context / "nginx.conf", (ROOT / "infra/frontend/nginx.conf").read_text())
+    write(context / "nginx.conf", (ROOT / "frontend/nginx.conf").read_text())
     write(context / "Dockerfile",
           "FROM nginx:stable-alpine\n"
           "COPY nginx.conf /etc/nginx/conf.d/default.conf\n"

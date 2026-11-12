@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Install a single-use vehicle enrollment without exposing permanent secrets."""
+"""Retired mixed-config installer; use SDK vehicle_bootstrap instead."""
 
-import argparse
-import getpass
 import json
 import os
-import pathlib
 import stat
 import sys
 import urllib.error
@@ -148,39 +145,11 @@ def verify(config):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--gateway", required=True, help="trusted public Gateway HTTPS origin")
-    parser.add_argument("--vehicle-id", required=True)
-    parser.add_argument("--output", default="/etc/teleop/device.json")
-    parser.add_argument("--ticket-file", help="owner-only file; otherwise enrollment token is prompted without echo")
-    parser.add_argument("--verify-existing", action="store_true", help="resume checks without consuming another ticket")
-    parser.add_argument("--allow-insecure-localhost", action="store_true", help="isolated loopback tests only")
-    args = parser.parse_args()
-    gateway = endpoint(args.gateway, args.allow_insecure_localhost)
-    if urllib.parse.urlsplit(gateway).path not in ("", "/"):
-        raise InstallationError("Gateway must be an origin without a path")
-    if args.verify_existing:
-        config = validate_config(json.loads(protected_read(args.output)), args.vehicle_id,
-                                 gateway, args.allow_insecure_localhost)
-    else:
-        if os.path.lexists(args.output):
-            raise InstallationError("configuration exists; use --verify-existing to resume, never overwrite")
-        parent = pathlib.Path(args.output).absolute().parent
-        info = parent.stat()
-        if info.st_mode & 0o022 or not parent.is_dir():
-            raise InstallationError("configuration directory must not be group/world-writable")
-        token = (protected_read(args.ticket_file).decode().strip() if args.ticket_file
-                 else getpass.getpass("Single-use installation token: ").strip())
-        if not token or len(token) > 4096 or any(ord(char) <= 32 or ord(char) > 126 for char in token):
-            raise InstallationError("invalid installation token")
-        value = request(gateway + "/api/vehicle/install", method="POST", token=token, body={})
-        config = validate_config(value, args.vehicle_id, gateway, args.allow_insecure_localhost)
-        protected_write(args.output, config)
-        print("Protected configuration saved. If verification fails, resume with --verify-existing.")
-    verify(config)
-    print("Vehicle authentication installed and verified. Media and driving readiness are not certified.")
-
-
+    raise InstallationError(
+        "This mixed-configuration installer is retired. Use SDK "
+        "vehicle_bootstrap --gateway-url HTTPS_URL and manual fingerprint approval; "
+        "no credentials or runtime files were written."
+    )
 if __name__ == "__main__":
     try:
         main()

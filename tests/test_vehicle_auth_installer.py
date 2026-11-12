@@ -13,6 +13,16 @@ spec.loader.exec_module(installer)
 
 
 class VehicleAuthInstallerTest(unittest.TestCase):
+    def test_retired_entrypoint_never_reads_writes_prompts_or_requests(self):
+        with patch.object(installer, "protected_read") as read, \
+                patch.object(installer, "protected_write") as write, \
+                patch.object(installer, "request") as request, \
+                patch.object(installer, "verify") as verify:
+            with self.assertRaisesRegex(installer.InstallationError, "vehicle_bootstrap"):
+                installer.main()
+            for operation in (read, write, request, verify):
+                operation.assert_not_called()
+
     def test_endpoints_refuse_credentials_redirects_and_insecure_remote(self):
         for value in ("http://remote.example", "https://u:p@remote.example",
                       "https://remote.example/?token=secret", "https://remote.example/#secret"):

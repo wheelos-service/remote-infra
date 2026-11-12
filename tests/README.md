@@ -1,5 +1,20 @@
 # Tests
 
+## Deployment and release contracts
+
+```bash
+python3 -m unittest discover -s tests -p test_deployment.py -v
+python3 -m unittest discover -s tests -p test_release.py -v
+```
+
+These tests exercise configuration generation, shared source/prebuilt launch
+ordering, architecture and image-ID validation, packaging contents, checksums,
+failed-export cleanup and rejection before loading corrupted images.
+Packaging Docker commands are mocked: passing these tests does not prove image
+builds, offline deployment or ACME issuance. On an AMD64 build/test host, also
+build the bundle, load it on a clean disposable host, run `./teleop all` and
+`./teleop verify`, restart and verify again. Test real public domains separately.
+
 ## Managed authentication acceptance
 
 ```bash
@@ -43,7 +58,7 @@ an existing deployment using another version.
 The real Apollo C++ bootstrap can also exercise the Gateway wire contract:
 
 ```bash
-cd apps/teleop-gateway
+cd teleop-gateway
 TZ=UTC \
 AUTHZ_POSTGRES_TEST_DSN='<disposable PostgreSQL DSN>' \
 VEHICLE_BOOTSTRAP_TEST_BINARY='/absolute/path/to/vehicle_bootstrap' \
@@ -96,7 +111,7 @@ camera media, physical control, or an external production proxy topology.
 
 ## Component unit tests
 
-- Gateway unit tests: `cd apps/teleop-gateway && go test ./...`
+- Gateway unit tests: `cd teleop-gateway && go test ./...`
 - Shared state-machine tests: `npm --prefix packages/teleop-shared test`
 - Frontend unit tests: `cd frontend && npm test`
 - Vehicle C++ SDK & Apollo Teleop tests live in `apollo-base`:

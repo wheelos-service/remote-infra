@@ -5,7 +5,7 @@ import { useAuth } from '../app/AuthProvider'
 import {
   adminErrorMessage, createAdminPerson, createAdminVehicle, fetchAdminContext, fetchAdminPeople,
   fetchAdminVehicles, saveAdminAssignment, type AdminContext, type Assignment, type ManagedPerson, type ManagedVehicle,
-  createOnboarding, fetchOnboardingOperations, retryOnboarding, createInstallationTicket,
+  createOnboarding, fetchOnboardingOperations, retryOnboarding,
   onboardingInputSchema, onboardingNeedsPolling, onboardingStatusLabel, registrationLinkAvailable,
   type OnboardingInput, type OnboardingOperation, type InstallationTicket,
   addExistingMember,
@@ -288,10 +288,8 @@ export function OnboardingOperations({ operations, busy, onRetry, onTicket, onRe
       {operation.kind === 'vehicle' && operation.status === 'completed' && <p>车辆认证安装已完成；不代表车辆在线、摄像头或视频已就绪，请前往授权车辆监看确认运行状态。</p>}
       {operation.status === 'failed' && <button className={buttonClass} disabled={busy || operation.error_code === 'REGISTRATION_EXPIRED'} onClick={() => onRetry(operation.id)}>重试失败任务</button>}
       {operation.kind === 'vehicle' && operation.status === 'awaiting_install' && (operation.device_enrollment
-        ? <p>由车端自动领取凭据；请在车辆终端完成接入，本页面不显示安装令牌或设备密钥。</p> : <>
-        <p>车辆尚未安装接入。仅在受保护的车辆终端中使用短期单次安装令牌，不提供永久客户端密钥。</p>
-        <button className={buttonClass} disabled={busy} onClick={() => onTicket(operation.id)}>轮换并签发单次安装令牌</button>
-      </>)}
+        ? <p>由车端自动领取凭据；请在车辆终端完成接入，本页面不显示安装令牌或设备密钥。</p>
+        : <p>旧的手工安装入口不再支持。请在车辆终端使用 SDK vehicle_bootstrap，并通过机器码重新人工审批；不提供兼容迁移。</p>)}
     </article>)}
   </section>
 }
@@ -304,10 +302,8 @@ export function InstallationInstructions({ ticket, vehicleId, onClear }: {
     <p>到期时间：{ticket.expires_at}。仅复制至受保护的本地文件/终端输入；勿放入 URL、命令参数、历史记录、日志或共享文档。</p>
     <label>短期安装令牌 <textarea className={`${fieldClass} block w-full`} readOnly autoComplete="off" spellCheck={false} value={ticket.token} /></label>
     <button className={buttonClass} onClick={onClear}>清除令牌显示</button>
-    <p>在车辆终端从仓库根目录执行以下命令，输入管理员提供的公开 Gateway HTTPS 地址。安装工具将隐藏输入提示，粘贴令牌后回车；令牌不会出现在命令行历史中。</p>
-    <pre className="overflow-auto whitespace-pre-wrap text-sm">{`read -rp 'Gateway HTTPS URL: ' gateway\npython3 infra/scripts/install-vehicle-auth.py --gateway "$gateway" --vehicle-id '${vehicleId}'`}</pre>
-    <p>工具把凭据保存至受保护文件，不会在此页面显示永久凭据。响应丢失、已使用或到期时，请显式轮换并重新签发；不会自动重领。重新签发将使旧安装令牌失效。</p>
-    <p>如果工具已保存凭据但安装确认响应丢失，在同一命令后添加 --verify-existing 验证并恢复确认，无需再次兑换令牌。</p>
+    <p>此令牌属于旧的手工接入入口，不用于当前 SDK。当前车辆只使用 vehicle_bootstrap --gateway-url HTTPS_URL，并通过机器码和公钥指纹人工审批。不要运行 install-vehicle-auth.py 或把凭据合并到 runtime 配置。</p>
+    <p>目标车辆：{vehicleId}。已有设备请保留密钥并使用同一 SDK bootstrap 恢复；旧入口不提供兼容迁移。</p>
   </section>
 }
 
@@ -337,10 +333,18 @@ export function VehicleRegistration(props: {
   </section>
 }
 
+function formatDeviceFingerprint(fingerprint: string): string {
+  const match = /^SHA256:([0-9a-fA-F]{16})[0-9a-fA-F]{48}$/.exec(fingerprint)
+  if (!match) return fingerprint
+  const prefix = match[1].toUpperCase()
+  return `${prefix.slice(0, 4)}-${prefix.slice(4, 8)}-${prefix.slice(8, 12)}-${prefix.slice(12, 16)} (${fingerprint})`
+}
+
 export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChange, onOperationFound }: {
   orgId: string; token: string; disabled: boolean; onDirectoryChange: () => void; onOperationFound?: (id: string) => void
 }) {
   const [userCode, setUserCode] = useState('')
+  const [verifiedFingerprint, setVerifiedFingerprint] = useState('')
   const [result, setResult] = useState<{ orgId: string; token: string; code: string; name: string; record: DeviceEnrollment }>()
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
@@ -351,7 +355,7 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
   scope.current = { orgId, token, code: userCode, name, disabled }
   useEffect(() => {
     request.current?.abort(); request.current = undefined
-    setUserCode(''); setResult(undefined); setName(''); setBusy(false); setError('')
+    setUserCode(''); setResult(undefined); setName(''); setBusy(false); setError(''); setVerifiedFingerprint('')
     return () => { request.current?.abort(); request.current = undefined }
   }, [orgId, token])
   const record = result?.orgId === orgId && result.token === token && result.code === userCode && result.name === name ? result.record : undefined
@@ -373,6 +377,7 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
     try {
       const next = await operation(controller.signal)
       if (!current()) return
+      setVerifiedFingerprint('')
       setResult({ orgId, token, code, name, record: next })
       if (next.operation_id) onOperationFound?.(next.operation_id)
       if (refresh) onDirectoryChange()
@@ -385,7 +390,7 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
   const changeDetails = (nextName: string, nextCode: string) => {
     request.current?.abort(); request.current = undefined
     scope.current.name = nextName; scope.current.code = nextCode
-    setName(nextName); setUserCode(nextCode); setResult(undefined); setError(''); setBusy(false)
+    setName(nextName); setUserCode(nextCode); setResult(undefined); setError(''); setBusy(false); setVerifiedFingerprint('')
   }
   const status = record && ({
     pending: pending ? '等待审批' : '已过期，不能审批', approved: '已批准，等待设备完成接入',
@@ -419,14 +424,14 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
     {busy && <p role="status" className="text-sm">正在处理，请勿重复操作…</p>}
     {error && <AdminNotice error={error} />}
     {record && <div className="space-y-3 text-sm">
-      <details className="text-xs text-slate-400"><summary className="cursor-pointer">核对设备详情</summary>
+      <div className="text-xs text-slate-400">
       <p className="mt-2">请与车端核对机器码和公钥指纹。</p>
       <dl className="mt-2 grid gap-2 break-all sm:grid-cols-2">
-        <div><dt className="text-slate-400">公钥 SHA256 指纹</dt><dd className="font-mono">{record.fingerprint}</dd></div>
+        <div><dt className="text-slate-400">公钥 SHA256 指纹</dt><dd className="font-mono">{formatDeviceFingerprint(record.fingerprint)}</dd></div>
         <div><dt className="text-slate-400">申请时间</dt><dd>{record.created_at}</dd></div>
         <div><dt className="text-slate-400">到期时间</dt><dd>{record.expires_at}</dd></div>
       </dl>
-      </details>
+      </div>
       <p role="status">{status || '未知状态，不能审批'}</p>
       {record.recovery && <p>恢复已有车辆凭据，保留原车辆和组织绑定。</p>}
       {record.vehicle_id && <p>已绑定车辆 ID：<span className="break-all font-mono">{record.vehicle_id}</span></p>}
@@ -437,13 +442,20 @@ export function DeviceEnrollmentPanel({ orgId, token, disabled, onDirectoryChang
       </div>}
       <form onSubmit={event => {
         event.preventDefault()
-        if (!pending || Date.parse(record.expires_at) <= Date.now()) return
+        if (!pending || verifiedFingerprint !== record.id + ':' + record.fingerprint ||
+          Date.parse(record.expires_at) <= Date.now()) return
         void run(userCode, signal => approveDeviceEnrollment(orgId, token, record,
           record.recovery ? undefined : { name }, signal), true)
       }}>
         <fieldset disabled={disabled || busy || !pending} className="flex flex-col gap-3">
+          <label className="flex items-start gap-2">
+            <input type="checkbox" checked={verifiedFingerprint === record.id + ':' + record.fingerprint}
+              onChange={event => setVerifiedFingerprint(event.target.checked ? record.id + ':' + record.fingerprint : '')} />
+            我已通过可信渠道核对车端机器码和完整公钥指纹。批准仅授权接入，不代表安装完成或车辆在线。
+          </label>
           <div className="flex gap-3">
-            <button type="submit" className={primaryButtonClass}>{record.recovery ? '确认恢复车辆' : '确认注册车辆'}</button>
+            <button type="submit" disabled={verifiedFingerprint !== record.id + ':' + record.fingerprint}
+              className={primaryButtonClass}>{record.recovery ? '确认恢复车辆' : '确认注册车辆'}</button>
             <button type="button" className={buttonClass} onClick={() => {
               if (!pending || Date.parse(record.expires_at) <= Date.now()) return
               void run(userCode, signal => denyDeviceEnrollment(orgId, token, record.id, signal))
@@ -575,12 +587,8 @@ export function OnboardingManager({ orgId, token, platformAdmin, vehicles, disab
     <OnboardingOperations operations={visibleOperations} busy={busy} onRetry={id => void run(async signal => {
       const operation = await retryOnboarding(orgId, token, id, signal)
       if (!signal.aborted) remember(operation)
-    })} onTicket={id => void run(async signal => {
-      if (operations.find(operation => operation.id === id)?.device_enrollment) return
-      setTicket(undefined)
-      const value = await createInstallationTicket(orgId, token, id, signal)
-      if (!signal.aborted && currentTab.current === tab) setTicket({ value, vehicleId: operations.find(item => item.id === id)?.vehicle_id ?? '', operationId: id })
-    })} onRegistrationLink={id => void run(async signal => {
+    })} onTicket={() => { setTicket(undefined); setError('旧的手工安装入口不再支持，请使用 SDK vehicle_bootstrap。') }}
+    onRegistrationLink={id => void run(async signal => {
       setRegistrationLink(undefined)
       const value = await fetchRegistrationLink(orgId, token, id, signal)
       if (signal.aborted || currentTab.current !== tab) return

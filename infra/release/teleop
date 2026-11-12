@@ -2,13 +2,23 @@
 set -euo pipefail
 bundle_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 setup_image="__SETUP_IMAGE__"
+setup_image_id="__SETUP_IMAGE_ID__"
 state_dir="${TELEOP_STATE_DIR:-$HOME/.local/state/teleop}"
 socket_path="${DOCKER_SOCKET:-/var/run/docker.sock}"
+verify_bundle() {
+  (cd -- "$bundle_dir" && sha256sum --check --strict SHA256SUMS)
+}
 if [[ "${1:-}" == "load" ]]; then
+  verify_bundle
   exec docker load --input "$bundle_dir/images.tar.gz"
 fi
 if ! docker image inspect "$setup_image" >/dev/null 2>&1; then
+  verify_bundle
   docker load --input "$bundle_dir/images.tar.gz"
+fi
+if [[ "$(docker image inspect --format '{{.Id}}' "$setup_image")" != "$setup_image_id" ]]; then
+  echo 'Setup image does not match this release; run ./teleop load from the verified bundle.' >&2
+  exit 1
 fi
 if [[ "$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')" != "linux/amd64" ]]; then
   echo 'This release requires an x86_64 Linux Docker host.' >&2
