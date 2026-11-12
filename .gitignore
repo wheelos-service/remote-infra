@@ -11,3 +11,6 @@ tests/__pycache__/
 *.pyc
 apps/teleop-gateway/data/
 apps/teleop-gateway/teleop-backend
+
+# Local development notes, design history, reviews, and vehicle investigations.
+/.local-docs/

@@ -19,9 +19,7 @@ administrator. Keep the default state directory `~/.local/state/teleop` private.
 Allow LAN clients through the host firewall on TCP **8443/8444**; media also
 uses TCP **7881** and UDP **51000–51100**.
 
-To build from a source checkout instead, install Python 3 and Compose v2, then
-run `python3 infra/scripts/deploy.py --lan-ip 192.168.1.50 all` from the repository.
-That path needs internet access for build dependencies.
+To build from a source checkout instead, follow [Deploy from source](deploy-from-source.md).
 
 ## 2. Trust the certificate
 
@@ -60,3 +58,5 @@ To restart or check the deployment, use the same OS user:
 
 Back up the state directory and Docker volumes together. `--local` is reserved
 for loopback-only testing; use `--lan-ip` for shared access.
+See [Operations](operations.md) for logs, backups, and troubleshooting, and
+[Administration](auth-management.md) to invite people and assign access.

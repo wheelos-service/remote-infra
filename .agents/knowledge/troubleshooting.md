@@ -16,8 +16,8 @@ Read this file when local startup, browser integration, tests, network connectio
 - Do not claim a deployment succeeded while skipping health checks, relevant tests, or audit logs.
 
 ## Sources (SSOT)
-- Local startup: `docs/local-dev.md`
-- Deployment and ports: `docs/deployment.md`
+- Local startup: `docs/deploy-from-source.md`
+- Deployment and ports: `docs/deploy-from-source.md`
 - Operations guide: `docs/operations.md`
-- Remote validation: `docs/remote-validation.md`
+- Remote validation: `tests/README.md`
 - Integration tests: `tests/`

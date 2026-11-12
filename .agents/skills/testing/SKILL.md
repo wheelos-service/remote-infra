@@ -27,5 +27,5 @@ Read this file when writing, fixing, or extending tests, or when validating a be
 
 - Gateway tests: `apps/teleop-gateway/internal/gateway/*_test.go`
 - Vehicle tests: `apps/vehicle-edge/tests/`
-- Integration test instructions: `docs/remote-validation.md`
+- Integration test instructions: `tests/README.md`
 - Test dependency configuration: `apps/vehicle-edge/pyproject.toml`

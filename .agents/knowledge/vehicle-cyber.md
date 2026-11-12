@@ -159,5 +159,5 @@ LiveKit transport, the vehicle's Gateway token permissions, or Apollo
 - Apollo Teleop module: `/home/wfh/01code/apollo-base/modules/teleop/`
 - Apollo Guardian arbiter: `/home/wfh/01code/apollo-base/modules/guardian/`
 - Apollo Canbus & VehicleController: `/home/wfh/01code/apollo-base/modules/canbus/`
-- Cross-component architecture: `docs/architecture.md`
+- Cross-component architecture: `.agents/knowledge/architecture.md`
 - Control packet schema: `api/schemas/datachannel-control.schema.json`

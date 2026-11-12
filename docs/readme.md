@@ -1,13 +1,18 @@
-# Documentation index
+# User guides
 
-- [`SPEC.md`](./SPEC.md): authoritative implementation specification.
-- [`LOCAL-DEV.md`](./LOCAL-DEV.md): local development workflow.
-- [`DEPLOYMENT.md`](./DEPLOYMENT.md): cloud deployment workflow.
-- [`OPERATIONS.md`](./OPERATIONS.md): runtime operations and secret boundaries.
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md): module boundaries and data flow.
-- [`COMMAND-SECURITY.md`](./COMMAND-SECURITY.md): command signing, replay protection, and watchdog.
-- [`archive/prototype-history.md`](./archive/prototype-history.md): historical prototype notes.
+Start with [LAN setup](setup.md) to deploy the prebuilt release on an Ubuntu
+x86_64 machine. Other computers on the same network can use the webpage and
+backend without a domain name.
 
-The repository is a production-oriented foundation. Real vehicle deployment
-requires a safety review, hardware actuator integration, and target-hardware
-validation before activation.
+| Guide | Use it to |
+| --- | --- |
+| [LAN setup](setup.md) | Load the release, trust HTTPS, and sign in |
+| [Deploy from source](deploy-from-source.md) | Build the same deployment from this repository |
+| [Operations](operations.md) | Restart, inspect, back up, and troubleshoot the server |
+| [Administration](auth-management.md) | Invite people, manage organizations, and assign access |
+| [Register a vehicle](add-vehicle.md) | Approve a prepared vehicle in the dashboard |
+| [Release capabilities](compatibility.md) | Understand supported features and current limits |
+
+Vehicle software installation and physical driving validation are separate
+from this server release. Development plans and historical deployment notes
+are not part of the user documentation.

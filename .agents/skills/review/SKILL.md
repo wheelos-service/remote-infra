@@ -25,7 +25,7 @@ Read this file when performing code review, refactoring, or assessing cross-comp
 
 ## Sources (SSOT)
 
-- Security requirements: `docs/spec.md` and `docs/operations.md`
-- Architecture boundaries: `docs/architecture.md`
-- Deployment configuration: `docker-compose.yml`, `docker-compose.no-domain.yml`, `infra/local-dev/Caddyfile`
+- Security requirements: `docs/compatibility.md`, `docs/operations.md`, and current authorization/control tests
+- Architecture boundaries: `.agents/knowledge/architecture.md`
+- Release deployment configuration: `infra/scripts/deploy.py`, `infra/release/`; retained compatibility configuration: `docker-compose.yml`, `docker-compose.no-domain.yml`, `infra/local-dev/Caddyfile`
 - Existing tests: `apps/teleop-gateway/internal/gateway/*_test.go`, `apps/vehicle-edge/tests/`

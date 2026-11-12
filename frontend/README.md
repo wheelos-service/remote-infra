@@ -15,11 +15,9 @@ C++ 三路视频与 v2 模拟控制。Mock 不会因此连接真实车辆。
 
 ## 部署边界
 
-前端可由当前 Compose Nginx、独立静态服务器或 Cloudflare Pages 托管，
-不要求在每台操作员电脑安装；网页下载后在浏览器中运行，分别连接 Gateway 和 LiveKit。
-静态站点不转发视频，也不管理控制权限。Cloudflare Pages 的发布目录、公开运行时配置、
-缓存、地图发布权限、跨域登录和后端入口调整统一见
-[独立静态托管方案](../docs/deployment.md#cloudflare-pages-and-a-single-backend-host)。
+本次发布由同一台服务器上的 Compose Nginx 与 Caddy 提供网页和 HTTPS 入口。
+操作员只需浏览器，不需要在每台电脑安装前端。部署及证书配置见
+[局域网安装指南](../docs/setup.md)；独立静态托管不属于本次发布流程。
 
 ## 导航与优化计划
 
@@ -230,14 +228,14 @@ Mock 每 500 ms 通过现有 Zod 契约生成八车遥测及 Monitor/事件/任�
 生成的 `public/maps/` 和构建产物不进 Git；生产构建会复制已准备的地图到 `dist/maps/`，
 开发服务会读取已复制到 `dist` 的资源，重新转换后需重启开发服务或重新构建。
 部署前确认地图发布权限，勿将内部地图随普通前端包公开发布。
-功能清单、测试矩阵与三端联调见 [`docs/remote-validation.md`](../docs/remote-validation.md)。
+发布支持范围见 [兼容性与限制](../docs/compatibility.md)，测试入口见 [tests/README.md](../tests/README.md)。
 
 ## C++ 实时三相机模拟
 
 从统一平台 `/#/?page=drive` 完成授权登录并选车，进入工作台自动申请观看。实时工作台仅使用
 前左、前中、前右三路视频和 v2 模拟控制，不提供后视覆盖或实车执行器接入；视频未就绪、失焦、
 断线、停更或反馈异常时会锁定控制输入。运行时配置、C++ 示例配置与生产部署细节见
-[部署文档](../docs/deployment.md) 和 [C++ SDK 指南](../apps/vehicle-edge-cpp/README.md)。
+[部署文档](../docs/deploy-from-source.md)。车辆 SDK 安装由车辆侧单独提供。
 
 跨端模拟控制验收：`python3 tests/control-chain.py`。实际浏览器三路解码、键盘/模拟手柄、
 视频停更锁定及交接验收：`python3 tests/driving-ui.py`。测试只使用隔离的 localhost 服务和
@@ -258,7 +256,7 @@ npm run build
 ## 公开运行配置
 
 `public/runtime-config.js` 在应用代码前加载，并随生产构建复制到 `dist/`。运行时配置字段、
-生产环境注入与 Compose 挂载方式以 [部署文档](../docs/deployment.md) 为准。
+生产环境注入与 Compose 挂载方式以 [部署文档](../docs/deploy-from-source.md) 为准。
 这里只允许配置公开端点、OIDC client ID 和功能开关；不得放置 client secret、LiveKit API
 secret、设备凭据或访问令牌。Access token 只保存在当前页面内存中，刷新后需重新登录。
 
@@ -276,7 +274,7 @@ secret、设备凭据或访问令牌。Access token 只保存在当前页面内�
 
 统一平台使用 hash 查询参数切换总览、监控、驾驶、告警和任务；没有独立
 `/teleop`、`/data`、`/operations` 兼容入口。`VehicleDataPanel` 只由固定预览测试挂载。
-部署配置、容器挂载与运行时配置以 [部署文档](../docs/deployment.md) 为准；本 README 不复制多车、
+部署配置、容器挂载与运行时配置以 [部署文档](../docs/deploy-from-source.md) 为准；本 README 不复制多车、
 多相机或已移除页面的旧运行说明。
 
 ## 本地开发与验证
@@ -304,10 +302,10 @@ http://localhost:8000/?dev=1&control=simulation&backend=http://localhost:8080&li
 首次故障会断开控制 RTC，并在释放过程中保留原始原因；交接清理错误单独显示。
 “导出近期控制时序诊断”下载最近 128 条本地时序事件，包含签名/发布耗时、命令确认 RTT、
 待确认数量和本地时钟变化，不包含令牌、签名包或控制值。这些数据不代表单向命令年龄或画面年龄；
-v2 仍使用可靠传输，完整的新鲜度协议待跨端实现，见[延迟评审进度](../docs/control-latency-review-2026-11-11.md#repository-implementation-follow-up)。
+v2 仍使用可靠传输，完整的新鲜度协议待跨端实现，见[发布限制](../docs/compatibility.md)。历史评审保留在本地开发资料中。
 这两个模块不再保留旧 `simulation-*` 文件或导出别名；模拟语义保留在 UI 和车端执行配置。
-各独立开关及推荐调试组合以 [远程联调指南](../docs/remote-validation.md#独立开关与职责) 为准。
+验证命令见 [测试指南](../tests/README.md)，当前发布限制见 [兼容性说明](../docs/compatibility.md)。
 
 键盘及标准手柄输入状态机由 `packages/teleop-shared` 共享。跨端模拟控制和真实浏览器三路解码
 验收脚本分别见 `python3 tests/control-chain.py` 与 `python3 tests/driving-ui.py`；
-部署配置、运行时注入及生产 Compose 流程见 [部署文档](../docs/deployment.md)。
+部署配置、运行时注入及生产 Compose 流程见 [部署文档](../docs/deploy-from-source.md)。

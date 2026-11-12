@@ -10,7 +10,7 @@ Read this file when you need to understand repository module boundaries, multi-t
 | **`apps/teleop-gateway/`** | Go backend service:<br>- `cmd/teleop-gateway`: Main HTTP/WebSocket gateway server.<br>- `cmd/auth-admin`: Offline bootstrap CLI (`--input bootstrap.json`) that initializes an `Organization`, initial `platform_admin` `User`, Casdoor `(issuer, subject)` binding, and `org_admin` Casbin rule.<br>- `internal/authorization`: Multi-tenant PostgreSQL lifecycle store (`001_authz.sql`–`004_device_enrollments.sql`), embedded Casbin RBAC/ABAC engine (`model.conf`), automated person/vehicle onboarding (`onboarding.go`), Ed25519 device-code enrollment (`device_enrollment.go`), and audit/outbox persistence.<br>- `internal/gateway`: OIDC/JWKS token verification, organization/admin HTTP APIs (`managed_admin.go`, `onboarding.go`, `device_enrollment.go`), fast-path 5 Hz telemetry + SQLite durable operations/tasks (`vehicle_telemetry.go`, `data_api.go`, `operations.go`), demand-gated media & LiveKit room tokens (`viewing_lease.go`, `video_session.go`, `livekit_token.go`), and Redis 12 s single-writer control leases (`control_lease.go`, `control_session.go`). |
 | **`frontend/`** | Unified React + TypeScript SPA:<br>- Operations workbench (`/#/?page=fleet\|monitor\|drive\|alerts\|tasks`): fleet overview, live monitoring, WebRTC remote driving cockpit (in-memory ephemeral Ed25519 command signing), alerts, and tasks.<br>- Organization admin console (`/#/admin`): organization switcher, **车辆管理** (device-code lookup/approval & vehicle onboarding), **人员管理** (automated email invitation & cross-org member addition), and **权限管理** (role & vehicle scope assignment). |
 | **`packages/teleop-shared/`** | Zero-DOM, framework-agnostic TypeScript state machines for remote control session lifecycle, gamepad/keyboard normalization and deadman gating, camera layout, and telemetry schema/freshness validation. |
-| **`api/` & `docs/`** | OpenAPI (`rest.openapi.yaml`), AsyncAPI, control/telemetry JSON schemas (`api/schemas/`), and architecture/security/operations specifications (`docs/`). |
+| **`api/` & `docs/`** | OpenAPI (`rest.openapi.yaml`), AsyncAPI, control/telemetry JSON schemas (`api/schemas/`), and user deployment and operations guides (`docs/`). |
 | **`infra/` & `tests/`** | Docker Compose stack (Gateway, Frontend/Caddy, LiveKit SFU, Redis, PostgreSQL, Casdoor) and cross-component contract/E2E test suites. |
 | **Vehicle C++ Runtime** (`/home/wfh/01code/apollo-base`) | Production vehicle code lives in `apollo-base/data/sdk-kit` (`@sdk_kit//auth` for Ed25519 device-code bootstrap & single-flight OAuth tokens; `@sdk_kit//livekit` for isolated LiveKit worker) and `apollo-base/modules/teleop` (telemetry/data/task sync, control signature verification, and Cyber/Guardian/Canbus integration). `apps/vehicle-edge-cpp/` and `apps/vehicle-edge/` in this repo remain standalone SDK / legacy v1 references. |
 
@@ -145,9 +145,8 @@ Traffic in teleoperation and fleet management separates into three distinct plan
 - Do not bypass the Gateway by generating LiveKit administrative credentials in the browser or combining client, Gateway, LiveKit, and vehicle-edge responsibilities in one module.
 
 ## Sources (SSOT)
-- Architecture and data flow: `docs/architecture.md`
 - Managed authentication, onboarding, and device enrollment: `docs/auth-management.md`
 - Primary/legacy contracts: `docs/compatibility.md`
-- Requirements and security boundaries: `docs/spec.md`
+- Payload contracts: `api/schemas/`
 - Gateway implementation: `apps/teleop-gateway/`
 - Cyber/LiveKit vehicle runtime invariants: `.agents/knowledge/vehicle-cyber.md`

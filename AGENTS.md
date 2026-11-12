@@ -23,7 +23,7 @@
 ## Knowledge (what the project is)
 - `architecture.md` — Module breakdown, multi-tenant entity model (`Organization`, `Person`, `Vehicle`, `Role`/`Scope`), registration & binding flows, and 4-layer runtime authentication
 - `conventions.md` — Code style, naming, and security constraints
-- Current API/runtime compatibility boundaries: `docs/compatibility.md`
+- Release capabilities and limits: `docs/compatibility.md`; API payload contracts: `api/schemas/`
 - `vehicle-cyber.md` — Cyber/LiveKit module ownership, wire contract, and control safety invariants
 - `troubleshooting.md` — Common startup, test, and deployment problems
 

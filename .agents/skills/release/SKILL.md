@@ -12,10 +12,10 @@ Read this file when preparing a release, building images, deploying Docker Compo
 ## Rules
 
 - Before release, confirm that tests, example configuration, deployment documentation, and image builds match the change.
-- Use `infra/scripts/build-backend.sh` and `infra/scripts/build-frontend.sh` for the repository's defined builds.
-- Deploy to the cloud with `docker compose --profile cloud up -d --build`, then verify `/healthz`, `/readyz`, logs, and key domains.
+- Use `infra/scripts/package-release.py` for the AMD64 bundle and `infra/scripts/deploy.py` for source deployment. The standalone backend/frontend build helpers remain available for development.
+- Follow `docs/setup.md` or `docs/deploy-from-source.md`, then run the deployment's `verify` action and check logs. The release uses the generated state-directory Compose file.
 - Use HTTPS/WSS in production; open the required LiveKit media ports and never expose Redis publicly.
-- Inject secrets through the server environment or a Secret Manager; do not commit `.env` files or real credentials.
+- Keep generated deployment state private and outside the repository; do not commit `.env` files or real credentials.
 
 ## Do NOTs
 
@@ -25,8 +25,8 @@ Read this file when preparing a release, building images, deploying Docker Compo
 
 ## Sources (SSOT)
 
-- Deployment workflow: `docs/deployment.md`
+- Deployment workflow: `docs/deploy-from-source.md`
 - Operations and secret boundaries: `docs/operations.md`
-- Compose configuration: `docker-compose.yml`, `docker-compose.no-domain.yml`
-- Build scripts: `infra/scripts/build-backend.sh`, `infra/scripts/build-frontend.sh`
-- Pre-release validation: `docs/remote-validation.md`
+- Release configuration: `infra/scripts/deploy.py`, `infra/release/`
+- Build scripts: `infra/scripts/package-release.py`, `infra/scripts/build-backend.sh`, `infra/scripts/build-frontend.sh`
+- Pre-release validation: `tests/README.md`

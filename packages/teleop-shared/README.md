@@ -14,5 +14,5 @@ npm --prefix packages/teleop-shared test
 Consumers run the shared build before type-checking or serving. The React build
 bundles it; the legacy console copies its JavaScript to `dist/shared/` and uses
 an import map. Build either Dockerfile with the repository root as context.
-See [architecture](../../docs/architecture.md) and
-[compatibility boundaries](../../docs/compatibility.md) for current contracts.
+See [release capabilities](../../docs/compatibility.md) and
+[payload schemas](../../api/schemas/) for the browser/server contracts.

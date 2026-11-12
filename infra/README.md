@@ -1,28 +1,20 @@
 # Infrastructure
 
-This directory contains deployment and local development assets:
+The release uses `scripts/deploy.py` to generate a single-host Compose deployment
+with per-installation credentials, login configuration, and HTTPS.
 
-- `local-dev/` contains the local Caddy, LiveKit, and Casdoor configuration
-  used by the Docker Compose Demo.
-- `scripts/` contains the repeatable frontend and backend build helpers.
-- `frontend/` contains primary static hosting configuration. Build
-  `frontend/Dockerfile` from the repository root; Compose serves the result on
-  loopback port 8000, with the cloud Caddy profile proxying `CLIENT_DOMAIN`.
-- `k8s/` contains staging/production Kubernetes manifests and is optional for
-  the current Docker Compose Demo.
+- [Prebuilt LAN setup](../docs/setup.md): load the release and deploy without a source build.
+- [Source deployment](../docs/deploy-from-source.md): build and run from this checkout.
+- [Operations](../docs/operations.md): verification, logs, state, and backups.
 
-The normal Demo only requires the root `docker-compose.yml` and the
-`local-dev/` assets it references. Kubernetes manifests are retained for a
-later deployment target.
+`release/` contains the setup-image Dockerfile, bundle launcher, and bundled
+instructions. `scripts/package-release.py` builds and exports the AMD64 package.
+`frontend/` contains the frontend Nginx configuration.
 
-Only `frontend/public/runtime-config.js` (or an explicit public-only override)
-is mounted as browser configuration. It must contain no credentials.
-Primary commands and endpoint setup live in
-[`docs/deployment.md`](../docs/deployment.md), not historical design proposals.
+The generated Compose file lives in the private deployment state directory.
+The root Compose files and `local-dev/` assets are retained for compatibility
+and development; they are not the release launcher's deployment configuration.
+`k8s/` is outside the supported release workflow.
 
-The frontend may instead be published to Cloudflare Pages, with one backend
-host for the pilot. This is an external-hosting recommendation, not a supplied
-backend-only Compose profile: the current Caddy service still depends on
-`frontend` and proxies its domain. Required ingress changes, public runtime
-configuration, cache rules and independent RTC media connectivity are documented
-in [the static-hosting deployment guide](../docs/deployment.md#cloudflare-pages-and-a-single-backend-host).
+Browser runtime configuration contains only public URLs and a public OAuth
+client ID. Never add credentials to it or distribute generated server state.
