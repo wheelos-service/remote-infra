@@ -15,7 +15,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 DEPENDENCIES = {'postgres': 'postgres:16-alpine', 'redis': 'redis:7-alpine',
                 'casdoor': 'casbin/casdoor:v4.25.0', 'livekit': 'livekit/livekit-server:v1.13.11',
-                'caddy': 'caddy:2-alpine', 'storage-init': 'alpine:3.20'}
+                'caddy': 'caddy:2-alpine', 'adguardhome': 'adguard/adguardhome:v0.107.80',
+                'storage-init': 'alpine:3.20'}
 
 
 def run(args, **kwargs):

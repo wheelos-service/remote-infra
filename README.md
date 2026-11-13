@@ -25,17 +25,21 @@ deployments.
 
 ## Quick start
 
-For the prebuilt Ubuntu x86_64 release, follow the short [LAN setup guide](docs/setup.md).
+For the prebuilt Ubuntu x86_64 release, follow the [LAN setup guide](docs/setup.md).
 It requires Docker Engine and includes compiled applications and setup tools.
-To build from this checkout instead, install Docker Compose v2 and Python 3,
-then run using the deployment machine's LAN IP:
+To build from this checkout, install Docker Compose v2 and Python 3. For stable
+URLs shared with a public deployment, configure split DNS for both hostnames
+and deploy with the server's LAN IP:
 
 ```bash
-python3 infra/scripts/deploy.py --lan-ip 192.168.1.50 all
+python3 infra/scripts/deploy.py --lan-ip 192.168.1.50 \
+  --domain console.example.com --auth-domain login.example.com all
 ```
 
-Trust the generated CA certificate on each client, then open
-`https://192.168.1.50:8443` from the host or another LAN computer.
+The LAN stack runs AdGuard Home; add rewrites for both hostnames to the LAN IP
+and configure router DHCP to distribute that DNS server. Trust the generated
+CA certificate on each LAN client, then open
+`https://console.example.com` from the host or another LAN computer.
 Sign in with the administrator created during setup. The fleet starts empty;
 vehicle software installation is handled separately. Managed native driving
 is disabled until handover support is complete.

@@ -29,16 +29,19 @@ attestation. Control-session signing keys are separate from enrollment keys.
 
 ## Give the vehicle operator the endpoints
 
-For the example LAN deployment:
+For a split-DNS LAN deployment, use the same endpoints as public clients:
 
-- Gateway and console: `https://192.168.1.50:8443`
-- Login service: `https://192.168.1.50:8444`
-- Public CA certificate: `~/.local/state/teleop/root.crt` on the server
+- Gateway and console: `https://console.example.com`
+- Login service: `https://login.example.com`
+- LAN root CA certificate: `~/.local/state/teleop/root.crt` on the server
 
-Replace the IP with the deployment's saved address. Transfer only the public
-certificate over a trusted channel and compare its SHA-256 fingerprint with
-the setup output. The vehicle must trust it inside the environment running its
-software; host trust does not automatically configure a runtime container.
+Configure internal DNS to resolve both names to the deployment's LAN IP.
+Transfer only the public certificate over a trusted channel and compare its
+SHA-256 fingerprint with the setup output. The vehicle must trust it inside
+the environment running its software; host trust does not automatically
+configure a runtime container. IP-only LAN deployments, including existing
+saved state, are unsupported; migrate identity/data explicitly to a
+domain-based deployment before connecting vehicles.
 Never transfer the server's CA key, administrator password, or state directory.
 
 For public deployment, use publicly trusted certificates on Gateway, console

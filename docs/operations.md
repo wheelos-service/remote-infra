@@ -30,6 +30,8 @@ the Docker Compose v2 plugin on the host:
 ```bash
 docker compose -p teleop -f "$HOME/.local/state/teleop/compose.json" ps
 docker compose -p teleop -f "$HOME/.local/state/teleop/compose.json" logs --tail=100 gateway frontend caddy
+# LAN DNS only:
+docker compose -p teleop -f "$HOME/.local/state/teleop/compose.json" logs --tail=100 adguardhome
 docker compose -p teleop -f "$HOME/.local/state/teleop/compose.json" stop
 ```
 
@@ -55,6 +57,8 @@ Back up the state directory together with the deployment's named volumes:
 | `redis` volume | Runtime leases, replay protection, and handover fences |
 | `operations` volume | SQLite operational history |
 | `caddy-config` volume | Caddy configuration state |
+| `adguard-conf` volume | AdGuard Home DNS rewrites and settings (LAN only) |
+| `adguard-work` volume | AdGuard Home runtime data (LAN only) |
 
 Compose prefixes volume names with the project name. Inspect the generated
 Compose file privately to identify the exact names. For a consistent filesystem
@@ -74,9 +78,9 @@ restore. Database permission changes are not evidence of physical handover.
 
 | Symptom | Check |
 | --- | --- |
-| Another LAN computer cannot connect | Server IP, TCP 8443/8444 firewall access, and whether setup used `--lan-ip` rather than `--local` |
-| Browser certificate error | LAN: trust the verified `root.crt`; public domains: check ACME logs, certificate chain, DNS and client clock; use the exact configured address |
-| Login fails | Use the platform administrator from `administrator.txt`; verify the login URL on port 8444 and client clock |
+| Another LAN computer cannot connect | Check AdGuard Home is running, both rewrites point to the server's LAN IP, router DHCP advertises that DNS server, TCP/UDP 53 and TCP 443 are reachable; IP-only LAN deployments are rejected |
+| Browser certificate error | LAN: trust the verified `root.crt`; public domains: check ACME logs, certificate chain, DNS and client clock; use the exact configured hostname |
+| Login fails | Use the platform administrator from `administrator.txt`; verify the configured login hostname and client clock |
 | Empty fleet | A fresh deployment has no vehicles; select the organization and [register a prepared vehicle](add-vehicle.md) |
 | No live video | Vehicle media publisher and camera health, trusted HTTPS, TCP 7881 and UDP 51000–51100 connectivity |
 | Native control returns 503 | This release blocks managed native driving until handover support is complete |

@@ -15,6 +15,25 @@ builds, offline deployment or ACME issuance. On an AMD64 build/test host, also
 build the bundle, load it on a clean disposable host, run `./teleop all` and
 `./teleop verify`, restart and verify again. Test real public domains separately.
 
+## LAN split-DNS HTTPS acceptance
+
+```bash
+python3 tests/lan-deployment.py
+# Or use an already-built, verified release image manifest:
+python3 tests/lan-deployment.py --images /path/to/release-images.json
+```
+
+Requires Docker Compose v2 and either Go module network access for the Gateway
+image build or a verified release manifest. The test creates an isolated Docker
+network whose aliases stand in for the two internal DNS records. An independent
+client verifies both names resolve to the test LAN address, rejects the private
+CA by default, trusts it explicitly, calls Console and Casdoor over HTTPS, and
+checks Gateway discovery/PKCE, CA download, and restart persistence. This does
+not validate AdGuard DNS rewrites or router DHCP, query a real LAN resolver, or
+exercise a real browser's cookie callback. It also does not test CA rollover, a
+separate vehicle Go client, or public ACME issuance; those require dedicated
+fixtures/environments.
+
 ## Managed authentication acceptance
 
 ```bash

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise fresh LAN HTTPS provisioning from an independent Docker client.
 
-Uses an isolated network with an IP-address certificate and no host ports.
-The LAN address is allocated by Docker; existing deployments are untouched.
+Uses an isolated Docker network as a DNS fixture, with domain certificates and
+no host ports. The LAN address is allocated by Docker; existing deployments
+are untouched.
 Requires Docker Compose v2 and Python 3. No browser CA store is changed.
 """
 import importlib.util
@@ -11,6 +12,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import tempfile
 import uuid
@@ -25,22 +27,32 @@ import json, pathlib, ssl, sys, urllib.error, urllib.request
 ns = {'__name__': 'lan_client', '__file__': '/repo/infra/scripts/deploy.py'}
 exec(compile(pathlib.Path(ns['__file__']).read_text(), ns['__file__'], 'exec'), ns)
 data = json.load(sys.stdin)
-ns.update(LOCAL=False, PUBLIC_TLS=False, APP=data['app'], AUTH=data['auth'])
+ns.update(LOCAL=False, PUBLIC_TLS=False, LAN_DOMAIN=True, APP=data['app'], AUTH=data['auth'])
 state = pathlib.Path('/state')
 try:
     if data.get('inspect'):
+        for hostname in (data['app_host'], data['auth_host']):
+            addresses = {item[4][0] for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)}
+            if data['lan_ip'] not in addresses:
+                raise RuntimeError(f'{hostname} did not resolve to the LAN service IP')
         # The default client trust store must reject this private CA.
-        try:
-            urllib.request.urlopen(data['app'] + '/healthz', timeout=10)
-        except urllib.error.URLError as error:
-            assert isinstance(error.reason, ssl.SSLCertVerificationError), type(error.reason)
-        else:
-            raise RuntimeError('untrusted LAN certificate was accepted')
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        for url in (data['app'] + '/healthz', data['auth'] + '/api/health'):
+            try:
+                opener.open(url, timeout=10)
+            except urllib.error.URLError as error:
+                assert isinstance(error.reason, ssl.SSLCertVerificationError), type(error.reason)
+            else:
+                raise RuntimeError(f'untrusted LAN certificate was accepted for {url}')
         context = ssl.create_default_context(cafile=str(state / 'root.crt'))
-        def fetch(path):
-            return urllib.request.urlopen(data['app'] + path, context=context, timeout=10)
+        trusted = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                              urllib.request.HTTPSHandler(context=context))
+        def fetch(path, origin=data['app']):
+            return trusted.open(origin + path, timeout=10)
         with fetch('/') as response:
             assert response.status == 200 and b'<html' in response.read().lower()
+        with fetch('/api/health', data['auth']) as response:
+            assert response.status == 200
         with fetch('/runtime-config.js') as response:
             public = response.read().decode()
             assert data['app'] in public and data['auth'] in public
@@ -86,9 +98,10 @@ def main():
             deploy.run(['docker', 'network', 'create', '--subnet', str(subnet), name],
                        stdout=subprocess.DEVNULL)
             deploy.IP = deploy.lan_address(str(subnet.network_address + 10))
-            deploy.APP = f'https://{deploy.IP}:8443'
-            deploy.AUTH = f'https://{deploy.IP}:8444'
+            deploy.APP = 'https://console.teleop.test'
+            deploy.AUTH = 'https://login.teleop.test'
             deploy.LOCAL, deploy.PUBLIC_TLS, deploy.MEDIA = False, False, True
+            deploy.LAN_DOMAIN = True
             values = deploy.prepare(state)
             config = json.loads((state / 'compose.json').read_text())
             # A real, separate client reaches the same LAN IP as the services.
@@ -96,7 +109,10 @@ def main():
             for service in config['services'].values():
                 service.pop('ports', None)
             config['networks'] = {'default': {'external': True, 'name': name}}
-            config['services']['caddy']['networks'] = {'default': {'ipv4_address': deploy.IP}}
+            config['services']['caddy']['networks'] = {'default': {
+                'ipv4_address': deploy.IP,
+                'aliases': ['console.teleop.test', 'login.teleop.test'],
+            }}
             deploy.write(state / 'compose.json', config)
             prepared = True
             if deploy.RELEASE_IMAGES is None:
@@ -108,7 +124,9 @@ def main():
             client_started = True
 
             def remote_request(_state, *args, inspect=False, **kwargs):
-                data = dict(app=deploy.APP, auth=deploy.AUTH, args=args, kwargs=kwargs, inspect=inspect)
+                data = dict(app=deploy.APP, auth=deploy.AUTH, app_host='console.teleop.test',
+                            auth_host='login.teleop.test', lan_ip=deploy.IP,
+                            args=args, kwargs=kwargs, inspect=inspect)
                 # Provider credentials and tokens travel only over stdin/stdout pipes,
                 # never in command arguments or test logs.
                 result = deploy.run(['docker', 'exec', '-i', client, 'python3', '-c', CLIENT],
@@ -129,7 +147,7 @@ def main():
             deploy.verify(state, values)
             assert root == (state / 'root.crt').read_bytes(), 'restart changed the client trust anchor'
             assert original_secrets == (state / 'secrets.json').read_bytes(), 'restart changed credentials'
-            print('PASS: separate LAN client, IP TLS/trust rejection, webpage/API, PKCE, CA download, restart.')
+            print('PASS: split-DNS LAN client, domain TLS/trust rejection, webpage/API, PKCE, CA download, restart.')
         finally:
             if client_started:
                 deploy.run(['docker', 'rm', '-f', client], stdout=subprocess.DEVNULL)

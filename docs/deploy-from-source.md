@@ -7,18 +7,34 @@ host Go and Node.js installations are unnecessary. Builds require internet acces
 
 ## Deploy on the LAN
 
-Run from the repository root. Replace the example with a stable private IPv4
-address assigned to the server:
+Run from the repository root. Replace the example LAN IP and hostnames.
+For consistent URLs across LAN and public deployments, use the same domain pair.
+AdGuard Home is started with the LAN stack; its DNS rewrites and the router's
+DHCP DNS setting are configured after startup:
 
 ```bash
 docker info
 docker compose version
-python3 infra/scripts/deploy.py --lan-ip 192.168.1.50 all
+python3 infra/scripts/deploy.py --lan-ip 192.168.1.50 \
+  --domain console.example.com --auth-domain login.example.com all
 ```
 
 This generates credentials and configuration, builds the Gateway and frontend,
 starts the services, creates the first administrator, and verifies the deployment.
+The same domain pair can be used by a public deployment: public DNS points to
+the public IP, while split DNS points to the LAN IP. LAN mode uses Caddy's
+internal CA and serves HTTPS on TCP 443. Trust its generated `root.crt` on LAN
+clients. The LAN Compose stack also starts AdGuard Home with DNS on the LAN IP.
+Complete its setup, add the two DNS rewrites, and configure router DHCP to
+advertise that DNS server as described in [LAN setup](setup.md#1-deploy).
 No `.env` file or existing vehicle configuration is needed.
+
+LAN-only deployments may use names managed only by the internal DNS; a public
+domain is not required. IP-only LAN deployments, including existing saved
+state, are rejected; the launcher will not start them or silently change their
+issuer/URLs. The state and volumes are left untouched. Preserve them for
+explicit identity/data migration, and use a separate state directory for the
+domain-based deployment.
 
 Configuration generation precedes Compose builds because the generated Compose
 file defines build contexts and services. This is one preparation step, not a
@@ -29,14 +45,16 @@ Persistent setup files live in `~/.local/state/teleop`, outside the checkout.
 The script uses that directory's `compose.json`. Do not edit generated files:
 subsequent commands regenerate them.
 
-Allow LAN access to TCP 8443/8444, TCP 7881, and UDP 51000–51100.
+Allow LAN DNS on TCP/UDP 53, HTTPS on TCP 443, and media on TCP 7881 and UDP
+51000–51100. Restrict AdGuard setup/dashboard TCP 3000 to trusted admins.
 Follow [certificate trust and sign-in](setup.md#2-trust-the-certificate) before
-opening `https://192.168.1.50:8443` on the host or another LAN computer.
+opening `https://console.example.com` on the host or another LAN computer.
 
 ## Run individual steps
 
 ```bash
-python3 infra/scripts/deploy.py --lan-ip 192.168.1.50 prepare
+python3 infra/scripts/deploy.py --lan-ip 192.168.1.50 \
+  --domain console.example.com --auth-domain login.example.com prepare
 python3 infra/scripts/deploy.py build
 python3 infra/scripts/deploy.py start
 python3 infra/scripts/deploy.py verify
@@ -89,7 +107,8 @@ This issues server certificates, not a new CA or vehicle client certificates.
 
 Before starting:
 
-- Own two public DNS names. Set their A records to the origin's public IPv4;
+- Use the same two hostnames as LAN mode. Set their public A records to the
+  origin's public IPv4;
   publish AAAA only if IPv6 actually reaches this host.
 - Use DNS-only/direct records (Cloudflare grey cloud if using Cloudflare).
   Any DNS provider works. Do not use Cloudflare Origin CA for direct clients.
