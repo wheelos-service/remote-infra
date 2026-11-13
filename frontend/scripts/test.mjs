@@ -25,6 +25,7 @@ const { outputFiles } = await esbuild.build({
     { in: 'src/lib/control-input-adapter.ts', out: 'control-input-adapter' },
     { in: 'src/lib/camera-view.ts', out: 'camera-view' },
     { in: 'src/lib/camera-feed.ts', out: 'camera-feed' },
+    { in: 'src/lib/frame-metadata-worker.ts', out: 'frame-metadata-worker' },
     { in: 'src/lib/fleet-map.ts', out: 'fleet-map' },
     { in: 'src/lib/mock-fleet.ts', out: 'mock-fleet' },
     { in: 'src/lib/teleop-config.ts', out: 'teleop-config' },
@@ -59,6 +60,7 @@ const { ControlSessionClient } = await loadBundle('control-session-client')
 const controlInput = await loadBundle('control-input-adapter')
 const cameraView = await loadBundle('camera-view')
 const cameraFeed = await loadBundle('camera-feed')
+const { createFrameMetadataWorker, watchFrameMetadataWorker } = await loadBundle('frame-metadata-worker')
 const fleetMap = await loadBundle('fleet-map')
 const mockFleet = await loadBundle('mock-fleet')
 const dashboard = await loadBundle('dashboard-data')
@@ -955,6 +957,195 @@ test('camera feed readiness needs three advancing decoded streams and clears on 
   } finally { stop(); context.mock.timers.reset() }
 })
 
+test('frame latency uses only the matching RTP metadata and rejects unavailable or invalid timestamps', () => {
+  const calls = []
+  const track = { lookupFrameMetadata: ({ rtpTimestamp }) => {
+    calls.push(rtpTimestamp)
+    return rtpTimestamp === 42 ? { userTimestamp: 1_700_000_000_000_000n } : undefined
+  } }
+  const frame = { rtpTimestamp: 42, expectedDisplayTime: 1050 }
+  assert.equal(cameraFeed.estimatedFrameLatency(track, frame, 1_700_000_000_100, 1000), 150)
+  assert.deepEqual(calls, [42])
+  assert.equal(cameraFeed.estimatedFrameLatency(track, { ...frame, rtpTimestamp: 43 }, 1_700_000_000_100, 1000), undefined)
+  assert.equal(cameraFeed.estimatedFrameLatency(track, { expectedDisplayTime: 1050 }, 1_700_000_000_100, 1000), undefined)
+  assert.equal(cameraFeed.estimatedFrameLatency({}, frame, 1_700_000_000_100, 1000), undefined)
+  for (const userTimestamp of [0n, -1n, BigInt(Number.MAX_SAFE_INTEGER) + 1n]) {
+    assert.equal(cameraFeed.estimatedFrameLatency({ lookupFrameMetadata: () => ({ userTimestamp }) }, frame, 100, 1000), undefined)
+  }
+  assert.equal(cameraFeed.estimatedFrameLatency(track, { ...frame, expectedDisplayTime: NaN }, 1_700_000_000_100, 1000), undefined)
+  assert.equal(cameraFeed.estimatedFrameLatency(track, frame, 1_699_999_999_900, 1000), undefined)
+  assert.equal(cameraFeed.estimatedFrameLatency(track, frame, 1_700_000_100_100, 1000), 100150, 'old timestamps can indicate backlog')
+  assert.equal(cameraFeed.estimatedFrameLatency(track, { ...frame, expectedDisplayTime: 0 }, 1_700_000_000_100, 1000), undefined)
+})
+
+test('camera latency clears on missing metadata, stall, timeout and detach without changing readiness', (context) => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  context.mock.method(Date, 'now', () => 1_700_000_000_100 + now - 1000)
+  context.mock.timers.enable({ apis: ['setInterval'] })
+  const listeners = new Map()
+  let callback, live = false, latency
+  const values = []
+  const video = {
+    addEventListener: (name, fn) => listeners.set(name, fn),
+    removeEventListener: name => listeners.delete(name),
+    requestVideoFrameCallback: fn => { callback = fn; return 7 },
+    cancelVideoFrameCallback: () => {},
+  }
+  const track = {
+    attach: () => {}, detach: () => {},
+    lookupFrameMetadata: ({ rtpTimestamp }) => rtpTimestamp === 1 ? { userTimestamp: 1_700_000_000_000_000n } : undefined,
+  }
+  const stop = cameraFeed.bindCameraFeed(track, video, value => { live = value },
+    value => { latency = value; values.push(value) })
+  const frame = rtpTimestamp => callback(now, { rtpTimestamp, expectedDisplayTime: now + 50 })
+  try {
+    frame(1)
+    assert.equal(latency, 150)
+    assert.equal(live, true)
+    frame(1)
+    assert.deepEqual(values, [150], 'render updates are throttled')
+    frame(2)
+    assert.equal(latency, undefined)
+    assert.equal(live, true, 'missing metadata does not change frame readiness')
+    frame(1)
+    listeners.get('waiting')()
+    assert.equal(latency, undefined)
+    assert.equal(live, false)
+    frame(1)
+    now += cameraFeed.CAMERA_FRAME_TIMEOUT_MS
+    context.mock.timers.tick(100)
+    assert.equal(latency, undefined)
+    assert.equal(live, false)
+    frame(1)
+    stop()
+    assert.equal(latency, undefined)
+    callback(now, { rtpTimestamp: 1, expectedDisplayTime: now })
+    assert.equal(latency, undefined)
+  } finally { stop(); context.mock.timers.reset() }
+})
+
+test('browser clock jumps invalidate latency until feed rebind without changing readiness', (context) => {
+  let now = 1000
+  let wall = 1_700_000_000_100
+  context.mock.method(performance, 'now', () => now)
+  context.mock.method(Date, 'now', () => wall)
+  const callbacks = []
+  const video = {
+    addEventListener: () => {}, removeEventListener: () => {},
+    requestVideoFrameCallback: fn => { callbacks.push(fn); return callbacks.length },
+    cancelVideoFrameCallback: () => {},
+  }
+  const track = { attach: () => {}, detach: () => {},
+    lookupFrameMetadata: () => ({ userTimestamp: 1_700_000_000_000_000n }) }
+  let latency, live = false
+  const bind = () => cameraFeed.bindCameraFeed(track, video, value => { live = value }, value => { latency = value })
+  const frame = () => callbacks.at(-1)(now, { rtpTimestamp: 1, expectedDisplayTime: now })
+  let stop = bind()
+  try {
+    frame()
+    assert.equal(latency, 100)
+    now += 20; wall += 1020
+    frame()
+    assert.equal(latency, undefined)
+    assert.equal(live, true)
+    now += 300; wall += 300
+    frame()
+    assert.equal(latency, undefined)
+    stop()
+    stop = bind()
+    frame()
+    assert.equal(latency, 1420)
+    now += 20; wall -= 980
+    frame()
+    assert.equal(latency, undefined)
+    assert.equal(live, true)
+  } finally { stop() }
+})
+
+test('three camera feeds independently report latency and loss', (context) => {
+  context.mock.method(performance, 'now', () => 1000)
+  context.mock.method(Date, 'now', () => 1_700_000_000_100)
+  const feeds = [0, 1, 2].map(index => {
+    let callback
+    const listeners = new Map()
+    const video = {
+      addEventListener: (name, fn) => listeners.set(name, fn),
+      removeEventListener: name => listeners.delete(name),
+      requestVideoFrameCallback: fn => { callback = fn; return 1 },
+      cancelVideoFrameCallback: () => {},
+    }
+    const state = { latency: undefined, live: false }
+    const track = { attach: () => {}, detach: () => {},
+      lookupFrameMetadata: ({ rtpTimestamp }) => rtpTimestamp === index
+        ? { userTimestamp: 1_700_000_000_000_000n - BigInt(index * 10_000) } : undefined }
+    const stop = cameraFeed.bindCameraFeed(track, video, value => { state.live = value },
+      value => { state.latency = value })
+    return { state, stop, listeners, frame: timestamp => callback(1000, { rtpTimestamp: timestamp, expectedDisplayTime: 1000 }) }
+  })
+  try {
+    feeds.forEach((feed, index) => feed.frame(index))
+    assert.deepEqual(feeds.map(feed => feed.state.latency), [100, 110, 120])
+    feeds[0].listeners.get('waiting')()
+    feeds[1].frame(42)
+    assert.deepEqual(feeds.map(feed => feed.state.latency), [undefined, undefined, 120])
+    assert.deepEqual(feeds.map(feed => feed.state.live), [false, true, true])
+  } finally { feeds.forEach(feed => feed.stop()) }
+})
+
+test('unsupported video frame callbacks preserve readiness fallback but never report a latency', () => {
+  const listeners = new Map()
+  let live = false
+  const latencies = []
+  const video = {
+    readyState: 2,
+    addEventListener: (name, fn) => listeners.set(name, fn),
+    removeEventListener: name => listeners.delete(name),
+  }
+  const stop = cameraFeed.bindCameraFeed({ attach: () => {}, detach: () => {} }, video,
+    value => { live = value }, value => latencies.push(value))
+  try {
+    listeners.get('timeupdate')()
+    assert.equal(live, true)
+    assert.deepEqual(latencies, [])
+  } finally { stop() }
+})
+
+test('metadata worker handshake accepts ready workers and falls back on startup error or timeout', async (context) => {
+  const previousWorker = globalThis.Worker
+  const previousDocument = globalThis.document
+  const workers = []
+  let mode = 'ready'
+  globalThis.document = { baseURI: 'https://example.test/app/' }
+  globalThis.Worker = class {
+    constructor(url) { this.url = url; workers.push(this) }
+    postMessage() {
+      if (mode === 'ready') queueMicrotask(() => this.onmessage?.({ data: { kind: 'initAck' } }))
+      if (mode === 'error') queueMicrotask(() => this.onerror?.({}))
+    }
+    terminate() { this.terminated = true }
+  }
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const worker = await createFrameMetadataWorker()
+    assert.equal(worker.url.href, 'https://example.test/app/frame-metadata-worker.js')
+    assert.equal(worker.terminated, undefined)
+    assert.equal(worker.onmessage, null)
+    mode = 'error'
+    assert.equal(await createFrameMetadataWorker(), undefined)
+    assert.equal(workers.at(-1).terminated, true)
+    mode = 'timeout'
+    const pending = createFrameMetadataWorker()
+    context.mock.timers.tick(1000)
+    assert.equal(await pending, undefined)
+    assert.equal(workers.at(-1).terminated, true)
+  } finally {
+    globalThis.Worker = previousWorker
+    globalThis.document = previousDocument
+    context.mock.timers.reset()
+  }
+})
+
 test('video loss fences v2 control and restored frames cannot rearm the session', async () => {
   const blocked = controllerFixture()
   blocked.controller.setMediaReady(false)
@@ -1844,6 +2035,47 @@ function lifecycleHarness(overrides = {}, optionOverrides = {}) {
   })
   return { lifecycle, calls, options, lease }
 }
+
+test('runtime metadata worker errors stop active viewing without replacing SDK handler', async () => {
+  const worker = new EventTarget()
+  let sdkErrors = 0, unwatch, cancelled = false
+  worker.onerror = () => { sdkErrors++ }
+  const h = lifecycleHarness({}, {
+    createObserver() {
+      return {
+        connect: async () => { unwatch = watchFrameMetadataWorker(worker, h.lifecycle, () => cancelled) },
+        disconnect: async () => { cancelled = true; unwatch?.(); h.calls.disconnected++ },
+      }
+    },
+  })
+  await h.lifecycle.start()
+  assert.equal(h.calls.connected, 1)
+  worker.onerror()
+  worker.dispatchEvent(new Event('error'))
+  await h.lifecycle.stop()
+  assert.equal(sdkErrors, 1)
+  assert.equal(h.calls.errors.length, 1)
+  assert.match(h.calls.errors[0].message, /元数据处理失败/)
+  assert.equal(h.calls.disconnected, 1)
+  assert.equal(h.calls.released.length, 1)
+  worker.dispatchEvent(new Event('error'))
+  assert.equal(h.calls.errors.length, 1)
+})
+
+test('metadata worker error listener ignores disposed or inactive viewing', () => {
+  const worker = new EventTarget()
+  let disposed = true, failures = 0
+  const lifecycle = { active: true, fail: () => { failures++ } }
+  const unwatch = watchFrameMetadataWorker(worker, lifecycle, () => disposed)
+  worker.dispatchEvent(new Event('error'))
+  disposed = false
+  lifecycle.active = false
+  worker.dispatchEvent(new Event('error'))
+  unwatch()
+  lifecycle.active = true
+  worker.dispatchEvent(new Event('error'))
+  assert.equal(failures, 0)
+})
 
 test('viewing requests use POST, no-store, original bearer, stable IDs and empty renew/release bodies', async () => {
   const originalFetch = globalThis.fetch

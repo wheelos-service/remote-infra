@@ -11,23 +11,29 @@ function CameraSlot({ name, label, track, onFrame }: {
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
 }) {
   const video = useRef<HTMLVideoElement>(null)
+  const boundTrack = useRef<CameraFeedTrack | undefined>(undefined)
   const [live, setLive] = useState(false)
+  const [latency, setLatency] = useState<number>()
   useEffect(() => {
+    boundTrack.current = track
     setLive(false)
+    setLatency(undefined)
     onFrame?.(name, false, track)
     if (!track || !video.current) return
     return bindCameraFeed(track, video.current, (value) => {
       setLive(value)
       onFrame?.(name, value, track)
-    })
+    }, setLatency)
   }, [name, track, onFrame])
+  const currentLive = live && boundTrack.current === track
   return <section data-camera={name} className="relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-slate-700 bg-black">
-    <header className="flex justify-between gap-2 bg-slate-900 px-3 py-2 text-xs">
-      <span>{label}</span><span className={live ? 'text-emerald-300' : 'text-amber-300'}>{live ? '正在出帧' : track ? '停更 / 等待出帧' : '等待视频'}</span>
+    <header className="flex flex-wrap justify-between gap-x-2 gap-y-1 bg-slate-900 px-3 py-2 text-xs">
+      <span>{label}</span><span className={currentLive ? 'text-emerald-300' : 'text-amber-300'}>{currentLive ? '正在出帧' : track ? '停更 / 等待出帧' : '等待视频'}</span>
+      <span className="text-slate-300">读取至预计显示（估计）：{currentLive && latency !== undefined ? `${Math.round(latency)} ms` : '未知'}</span>
     </header>
     <div className="relative min-h-0 flex-1">
-      <video ref={video} className={`h-full w-full object-contain ${live ? '' : 'invisible'}`} />
-      {!live && <p className="absolute inset-0 flex items-center justify-center p-3 text-center text-xs text-amber-200">{track ? '画面未更新 · 不可驾驶' : '未接入该相机'}</p>}
+      <video ref={video} className={`h-full w-full object-contain ${currentLive ? '' : 'invisible'}`} />
+      {!currentLive && <p className="absolute inset-0 flex items-center justify-center p-3 text-center text-xs text-amber-200">{track ? '画面未更新 · 不可驾驶' : '未接入该相机'}</p>}
     </div>
   </section>
 }

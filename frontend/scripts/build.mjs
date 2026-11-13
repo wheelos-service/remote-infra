@@ -16,7 +16,10 @@ await rimraf('dist')
  */
 const esbuildOpts = {
   color: true,
-  entryPoints: ['src/main.tsx', 'index.html'],
+  entryPoints: [
+    'src/main.tsx', 'index.html',
+    { in: 'livekit-client/frame-metadata-worker', out: 'frame-metadata-worker' },
+  ],
   outdir: 'dist',
   entryNames: '[name]',
   write: true,
