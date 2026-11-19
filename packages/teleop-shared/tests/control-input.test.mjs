@@ -83,25 +83,6 @@ test('gear and mode keys send once, cancel motion and do not change driving key 
     assert.equal(h.actions().at(-1), 'stop');
 });
 
-test('pointer vehicle actions require control availability and disarm other inputs', async t => {
-    const h = setup(t);
-    h.input.vehicleAction('auto_enter', true);
-    await settle();
-    assert.deepEqual(h.actions(), []);
-    await h.arm();
-    h.input.keyDown('KeyW');
-    await settle();
-    h.input.vehicleAction('gear_neutral', true);
-    await settle();
-    assert.equal(h.actions().at(-1), 'gear_neutral');
-    assert.equal(h.timers.size, 0);
-    assert.equal(h.input.isKeyboardEnabled, false);
-    assert.equal(h.input.isGamepadEnabled, false);
-    h.input.keyDown('KeyW', true);
-    await settle();
-    assert.equal(h.actions().at(-1), 'gear_neutral');
-});
-
 test('all eight direction keys map to the existing high-level commands', async t => {
     const h = setup(t);
     await h.arm();
@@ -174,22 +155,6 @@ test('space overrides motion and held directions cannot resume after emergency s
     h.input.keyDown('KeyW');
     await settle();
     assert.equal(h.actions().at(-1), 'forward');
-});
-
-test('pointer replaces keyboard with one scheduler and global release stops it', async t => {
-    const h = setup(t);
-    await h.arm();
-    h.input.keyDown('KeyW');
-    await settle();
-    h.input.beginPointer({mode: 'high_level', action: 'left'});
-    await settle();
-    h.input.keyDown('KeyW', true);
-    assert.equal(h.input.isKeyboardEnabled, false);
-    assert.equal(h.timers.size, 1);
-    h.input.endPointer();
-    await settle();
-    assert.deepEqual(h.actions(), ['forward', 'left', 'stop']);
-    assert.equal(h.timers.size, 0);
 });
 
 test('release replaces queued motion while an earlier send is still in flight', async t => {
@@ -343,20 +308,4 @@ test('keyboard toggle focus does not silently re-enable an explicitly disabled c
     h.input.setKeyboardEnabled(false);
     await settle();
     assert.equal(h.input.isKeyboardEnabled, false);
-});
-
-test('pointer cancellation and release outside the button use the common stop path', async t => {
-    const h = setup(t);
-    const win = new Events(), doc = new Events();
-    bindKeyboardInput(h.input, win, doc);
-    h.input.setAvailable(true);
-    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
-        h.sent.length = 0;
-        h.input.beginPointer({mode: 'high_level', action: 'left'});
-        await settle();
-        win.emit(name);
-        await settle();
-        assert.deepEqual(h.actions(), ['left', 'stop']);
-        assert.equal(h.timers.size, 0);
-    }
 });

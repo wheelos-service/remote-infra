@@ -155,18 +155,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
           onClick={() => input.current?.setKeyboardEnabled(!inputState.keyboardEnabled)}>
           {inputState.keyboardEnabled ? '关闭键盘' : '启用键盘 WASD / 方向键'}
         </button>
-        {(['forward', 'reverse', 'left', 'right'] as const).map((action, index) => (
-          <button type="button" key={action} disabled={!ready} className={button}
-            onPointerDown={(event) => {
-              if (event.button !== 0) return
-              event.currentTarget.setPointerCapture(event.pointerId)
-              input.current?.beginPointer({ mode: 'high_level', action })
-            }} onPointerUp={() => input.current?.endPointer()}
-            onPointerCancel={() => input.current?.endPointer()}
-            onLostPointerCapture={() => input.current?.endPointer()}>
-            按住{['前进', '倒车', '左转', '右转'][index]}
-          </button>
-        ))}
       </div>
       <details className="mt-3">
         <summary>手柄检测与映射（修改后需重新确认，-1 表示不用）</summary>

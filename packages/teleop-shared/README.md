@@ -1,6 +1,6 @@
 # Shared teleoperation state machines
 
-Transport-free input intent, keyboard/pointer scheduling, gamepad mapping and
+Transport-free input intent, keyboard scheduling, gamepad mapping and
 camera-view intent. The primary React frontend depends on this local package.
 It has no Gateway client, session lease, signing key, v1/v2 wire encoder or
 vehicle writer. The React adapter rejects gear/mode intents and converts

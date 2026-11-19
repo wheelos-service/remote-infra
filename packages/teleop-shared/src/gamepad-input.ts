@@ -273,7 +273,7 @@ export function bindGamepadInput(monitor: GamepadInput, targetWindow: Window,
     const start = () => {
         if (timer !== undefined) return;
         poll();
-        timer = setInterval(poll, 50);
+        timer = setInterval(poll, 16);
     };
     const stop = () => {
         if (timer !== undefined) clearInterval(timer);

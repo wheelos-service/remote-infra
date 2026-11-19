@@ -32,7 +32,7 @@ type Options = {
     allowVehicleActions?: boolean;
 };
 
-/** One scheduler for pointer and keyboard input; no queued movement backlog. */
+/** One scheduler for keyboard and gamepad input; no queued movement backlog. */
 export class ControlInput {
     private available = false;
     private keyboardEnabled = false;
@@ -42,7 +42,6 @@ export class ControlInput {
     private pressed = new Set<string>();
     private actionPressed = new Set<string>();
     private blocked = false;
-    private pointerActive = false;
     private timer?: ReturnType<typeof setInterval>;
     private active?: ControlCommand;
     private pending?: ControlCommand;
@@ -64,7 +63,6 @@ export class ControlInput {
         this.timer = undefined;
         this.active = undefined;
         this.pending = undefined;
-        this.pointerActive = false;
         this.gamepadActive = false;
     }
 
@@ -165,7 +163,7 @@ export class ControlInput {
             ? {mode: 'high_level', action: value} : value;
         if (!this.gamepadActive) this.start(command, true);
         else {
-            // Sample at 50 ms, transmit at 100 ms; retain only the newest value.
+            // Gamepad is sampled at 16 ms; transmit at 100 ms; retain only the newest value.
             this.active = command;
             if (this.pending) this.pending = command;
         }
@@ -216,18 +214,7 @@ export class ControlInput {
         }
     }
 
-    beginPointer(command: ControlCommand): void {
-        if (!this.available) return;
-        // A pointer takes ownership explicitly; held keys cannot resume it.
-        this.keyboardEnabled = false;
-        this.gamepadEnabled = false;
-        this.pressed.clear();
-        this.blocked = false;
-        this.start(command);
-        this.pointerActive = true;
-    }
-
-    vehicleAction(action: VehicleAction, pointer = false): void {
+    vehicleAction(action: VehicleAction): void {
         if (!this.available || !(action in vehicleActionLabels)) return;
         if (this.options.allowVehicleActions === false) {
             this.suspend('当前协议未开放挡位/模式操作；已停止输入');
@@ -236,19 +223,8 @@ export class ControlInput {
         this.clearMovement();
         this.pressed.clear();
         this.blocked = false;
-        if (pointer) {
-            this.keyboardEnabled = false;
-            this.gamepadEnabled = false;
-        }
         this.dispatch({mode: 'high_level', action});
         this.report(`已发送请求：${vehicleActionLabels[action]}；以底盘挡位/模式反馈为准`);
-    }
-
-    endPointer(): void {
-        if (!this.pointerActive) return;
-        this.clearMovement();
-        this.dispatch({mode: 'high_level', action: 'stop'});
-        this.report('已发送停止；键盘控制未启用');
     }
 
     emergencyStop(): void {
@@ -285,15 +261,11 @@ export function bindKeyboardInput(input: ControlInput, targetWindow: Window, tar
             input.suspend('输入区域获得焦点：键盘与手柄控制已关闭');
         }
     };
-    const endPointer = () => input.endPointer();
     targetWindow.addEventListener('keydown', keydown);
     targetWindow.addEventListener('keyup', keyup);
     targetWindow.addEventListener('blur', blur);
     targetDocument.addEventListener('visibilitychange', visibility);
     targetDocument.addEventListener('focusin', focus);
-    targetWindow.addEventListener('pointerup', endPointer);
-    targetWindow.addEventListener('pointercancel', endPointer);
-    targetWindow.addEventListener('lostpointercapture', endPointer);
     return () => {
         input.suspend('输入组件已关闭');
         input.setAvailable(false);
@@ -302,8 +274,5 @@ export function bindKeyboardInput(input: ControlInput, targetWindow: Window, tar
         targetWindow.removeEventListener('blur', blur);
         targetDocument.removeEventListener('visibilitychange', visibility);
         targetDocument.removeEventListener('focusin', focus);
-        targetWindow.removeEventListener('pointerup', endPointer);
-        targetWindow.removeEventListener('pointercancel', endPointer);
-        targetWindow.removeEventListener('lostpointercapture', endPointer);
     };
 }

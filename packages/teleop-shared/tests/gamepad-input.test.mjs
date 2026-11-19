@@ -372,7 +372,7 @@ test('custom axis inversion and button-only mapping are honored', async t => {
     assert.deepEqual(h.actions(), ['left']);
 });
 
-test('keyboard and pointer take ownership without concurrent gamepad movement', async t => {
+test('keyboard takes ownership without concurrent gamepad movement', async t => {
     const h = setup(t);
     await h.arm();
     h.button(4, true);
@@ -388,13 +388,6 @@ test('keyboard and pointer take ownership without concurrent gamepad movement', 
     assert.equal(h.input.isKeyboardEnabled, true);
     assert.deepEqual(h.actions(), ['forward', 'stop', 'left']);
     assert.equal(h.timers.size, 1);
-    h.input.beginPointer({mode: 'high_level', action: 'right'});
-    h.poll();
-    await settle();
-    assert.equal(h.input.isKeyboardEnabled, false);
-    assert.equal(h.input.isGamepadEnabled, false);
-    assert.equal(h.timers.size, 1);
-    assert.equal(h.actions().at(-1), 'right');
 });
 
 class Events {
@@ -413,7 +406,7 @@ test('browser disconnect event and blur immediately stop; cleanup removes pollin
     await h.arm();
     h.button(4, true);
     h.device.axes[3] = -1;
-    h.tick(50);
+    h.tick(16);
     await settle();
     win.emit('blur');
     await settle();
@@ -424,7 +417,7 @@ test('browser disconnect event and blur immediately stop; cleanup removes pollin
     await h.arm();
     h.button(4, true);
     h.device.axes[3] = -1;
-    h.tick(50);
+    h.tick(16);
     await settle();
     pads = [];
     win.emit('gamepaddisconnected', {gamepad: h.device});
