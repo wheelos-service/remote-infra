@@ -2,21 +2,17 @@
 """Prepare and run a self-contained single-host Teleop deployment.
 
 Requires Docker Engine with Compose v2 and Python 3; no host Go/Node toolchain.
-For deployment on a local machine, use its LAN IPv4 address:
+For LAN deployment, use a stable LAN IP plus the console and login domains
+used by the public deployment. The LAN stack includes AdGuard Home; configure
+it and the router's DHCP DNS setting to resolve both names to the LAN IP.
+LAN clients must trust the generated root.crt:
 
-  python3 infra/scripts/deploy.py --lan-ip 192.168.1.50 all
-
-Both the host and other LAN computers use https://192.168.1.50:8443.
-The backend is at the same origin under /api; login uses port 8444.
-No domain, public IP or DNS setup is required. Allow TCP 8443/8444 and,
-for media, TCP 7881 and UDP 51000-51100 from the local network.
-Use a stable/reserved LAN IP. Each client must trust the generated root.crt
-in its OS/browser certificate store; check its printed SHA-256 fingerprint.
-On Ubuntu clients: copy root.crt to /usr/local/share/ca-certificates/teleop.crt,
-then run sudo update-ca-certificates and restart the browser.
+  python3 infra/scripts/deploy.py --lan-ip 192.168.1.50 \\
+    --domain console.example.com --auth-domain login.example.com all
 
 --local is loopback-only HTTP testing without media or LAN access.
---domain plus --auth-domain remains available for public HTTPS on TCP 80/443.
+--domain plus --auth-domain selects public HTTPS, or LAN HTTPS with --lan-ip.
+IP-only LAN deployments are not supported.
 
 Secrets and persistent identity settings live outside Git in --state (0700).
 Subsequent commands need only --state and an action. Back up that directory
@@ -45,24 +41,41 @@ PROJECT = "teleop"
 TENANT = "teleop"
 ADMIN_NAME = "platform-admin"
 PUBLIC_TLS = False
+ACME_EMAIL = ""
+ACME_STAGING = False
+ACME_PRODUCTION_URL = "https://acme-v02.api.letsencrypt.org/directory"
+ACME_STAGING_URL = "https://acme-staging-v02.api.letsencrypt.org/directory"
 MEDIA_IP = ""
 IP = "127.0.0.1"
 APP = f"https://{IP}:8443"
 AUTH = f"https://{IP}:8444"
 LOCAL = False
 MEDIA = False
+LAN_DOMAIN = False
 DASHBOARD_SESSION_HOURS = 7 * 24
 RELEASE_IMAGES = None
 
 
 def load_release_images(path):
     manifest = json.loads(path.read_text())
-    names = {"gateway", "frontend", "postgres", "redis", "casdoor", "livekit", "caddy", "storage-init"}
+    names = {"gateway", "frontend", "postgres", "redis", "casdoor", "livekit", "caddy",
+             "adguardhome", "storage-init"}
     images = manifest.get("images")
     if (manifest.get("platform") != "linux/amd64" or not isinstance(images, dict) or
             set(images) != names or any(not isinstance(value, str) or
             not re.fullmatch(r"[a-z0-9][a-z0-9./:@_-]+", value) for value in images.values())):
         raise RuntimeError("invalid prebuilt release image manifest")
+    image_ids = manifest.get("image_ids")
+    if (not isinstance(image_ids, dict) or set(image_ids) != names or
+            any(not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+                for value in image_ids.values())):
+        raise RuntimeError("release manifest requires an exact image ID for every service")
+    for name, image in images.items():
+        result = run(["docker", "image", "inspect", image], capture_output=True, text=True)
+        info = json.loads(result.stdout)
+        if (len(info) != 1 or info[0].get("Id") != image_ids[name] or
+                info[0].get("Os") != "linux" or info[0].get("Architecture") != "amd64"):
+            raise RuntimeError(f"release image mismatch for {name}; reload the verified release bundle")
     return images
 
 
@@ -173,6 +186,10 @@ def prepare(state):
     # This file is public browser configuration; Nginx's worker must read it.
     (state / "runtime-config.js").chmod(0o644)
     tls = "" if LOCAL or PUBLIC_TLS else "  tls internal\n"
+    if PUBLIC_TLS:
+        ca = ACME_STAGING_URL if ACME_STAGING else ACME_PRODUCTION_URL
+        email = f"      email {ACME_EMAIL}\n" if ACME_EMAIL else ""
+        tls = f"  tls {{\n    issuer acme {{\n      dir {ca}\n{email}    }}\n  }}\n"
     ca_route = "" if LOCAL or PUBLIC_TLS else """  @rootCA path /teleop-root-ca.crt /test-root-ca.crt
   handle @rootCA {
     header Content-Disposition "attachment; filename=teleop-root-ca.crt"
@@ -181,8 +198,12 @@ def prepare(state):
     file_server
   }
 """
-    global_options = ("" if PUBLIC_TLS else "  auto_https off" if LOCAL else
-                      f"  auto_https disable_redirects\n  default_sni {IP}")
+    if PUBLIC_TLS:
+        global_options = ""
+    elif LOCAL:
+        global_options = "  auto_https off"
+    else:
+        global_options = "  auto_https disable_redirects"
     write(state / "Caddyfile", f"""{{
   admin off
 {global_options}
@@ -250,7 +271,7 @@ def prepare(state):
         },
         "gateway": {
             "image": PROJECT + "-gateway:local", "environment": env,
-            "build": {"context": str(ROOT / "apps/teleop-gateway")},
+            "build": {"context": str(ROOT / "teleop-gateway")},
             "user": f"{os.getuid()}:{os.getgid()}",
             "volumes": [volume(name, "/run/auth/" + name)
                         for name in (("onboarding.json", "onboarding.key") if LOCAL or PUBLIC_TLS else
@@ -270,16 +291,26 @@ def prepare(state):
             "image": "caddy:2-alpine",
             "user": f"{os.getuid()}:{os.getgid()}",
             "environment": {"XDG_CONFIG_HOME": "/data/config"},
-            "ports": [f"{IP}:{port}:{port}" for port in (8443, 8444)],
+            "ports": ([f"{IP}:443:443"] if LAN_DOMAIN else
+                      [f"{IP}:{port}:{port}" for port in (8443, 8444)]),
             "volumes": [volume("Caddyfile", "/etc/caddy/Caddyfile"),
                         f"{state / 'caddy-data'}:/data", "caddy-config:/config"],
         },
     }
-    if PUBLIC_TLS:
-        services["caddy"]["ports"] = ["80:80", "443:443"]
+    if LAN_DOMAIN:
+        services["adguardhome"] = {
+            "image": "adguard/adguardhome:v0.107.80",
+            "ports": [f"{IP}:53:53/tcp", f"{IP}:53:53/udp",
+                      f"{IP}:3000:3000/tcp"],
+            "volumes": ["adguard-work:/opt/adguardhome/work",
+                        "adguard-conf:/opt/adguardhome/conf"],
+        }
+    if PUBLIC_TLS or LAN_DOMAIN:
         services["caddy"]["networks"] = {"default": {"aliases": [
             urllib.parse.urlsplit(APP).hostname, urllib.parse.urlsplit(AUTH).hostname]}}
         services["caddy"]["sysctls"] = {"net.ipv4.ip_unprivileged_port_start": "0"}
+        if PUBLIC_TLS:
+            services["caddy"]["ports"] = ["80:80", "443:443"]
     if MEDIA:
         if LOCAL:
             raise RuntimeError("media requires HTTPS")
@@ -310,11 +341,10 @@ def prepare(state):
             service["platform"] = "linux/amd64"
             service["pull_policy"] = "never"
             service.pop("build", None)
-    write(state / "compose.json", {
-        "services": services,
-        "volumes": {name: {} for name in
-                    ("postgres", "redis", "operations", "caddy-config")},
-    })
+    volumes = {name: {} for name in ("postgres", "redis", "operations", "caddy-config")}
+    if LAN_DOMAIN:
+        volumes.update({"adguard-work": {}, "adguard-conf": {}})
+    write(state / "compose.json", {"services": services, "volumes": volumes})
     for name in ("casdoor-data", "casdoor-logs", "caddy-data"):
         (state / name).mkdir(mode=0o700, exist_ok=True)
     compose(state, "config", "--quiet")
@@ -364,7 +394,10 @@ def success(value, stage):
 
 
 def start(state, values):
-    compose(state, "up", "-d", "storage-init", "postgres", "redis", "casdoor", "livekit", "caddy")
+    core_services = ["storage-init", "postgres", "redis", "casdoor", "livekit", "caddy"]
+    if LAN_DOMAIN:
+        core_services.append("adguardhome")
+    compose(state, "up", "-d", *core_services)
     if not LOCAL and not PUBLIC_TLS:
         root = state / "caddy-data/caddy/pki/authorities/local/root.crt"
         for _ in range(120):
@@ -538,10 +571,16 @@ def connection_info(state):
     print(f"Backend API: {APP}/api\nHealth: {APP}/healthz\nLogin: {AUTH}")
     print(f"Administrator credentials (host only): {state / 'administrator.txt'}")
     if not LOCAL and not PUBLIC_TLS:
-        print("LAN access: allow TCP 8443/8444 from your local network.")
-        print("Use this LAN IP on every computer, including the deployment host; keep it reserved/static.")
+        print(f"Configure AdGuard DNS rewrites: {urllib.parse.urlsplit(APP).hostname} and "
+              f"{urllib.parse.urlsplit(AUTH).hostname} to {IP}.")
+        print(f"AdGuard Home DNS: {IP}:53/udp and {IP}:53/tcp.")
+        print(f"AdGuard setup/dashboard: http://{IP}:3000.")
+        print("Add DNS rewrites for both configured domains to this LAN IP, then set the "
+              "router's DHCP DNS server to this address.")
+        print("Allow TCP 443 and UDP/TCP 53 from your LAN; restrict AdGuard admin TCP 3000 "
+              "to trusted administrators.")
         root = state / "root.crt"
-        print(f"Trust this public CA certificate on each client's OS/browser: {root}")
+        print(f"Trust this root CA certificate on each client's OS/browser: {root}")
         print(f"Certificate download: {APP}/teleop-root-ca.crt")
         if root.exists():
             fingerprint = hashlib.sha256(ssl.PEM_cert_to_DER_cert(root.read_text())).hexdigest().upper()
@@ -549,6 +588,15 @@ def connection_info(state):
         print("Copy only root.crt to clients; keep the rest of the state directory private.")
     elif LOCAL:
         print("Loopback only: other computers cannot connect. Use --lan-ip with a separate state for LAN access.")
+    elif PUBLIC_TLS:
+        ca = ACME_STAGING_URL if ACME_STAGING else ACME_PRODUCTION_URL
+        print(f"Automatic server certificates: Let's Encrypt ACME ({ca}).")
+        print("Use DNS-only records pointing to this host; allow public TCP 80/443 and outbound HTTPS.")
+        print(f"Certificate/account storage: {state / 'caddy-data'} (keep private and persistent).")
+        if ACME_STAGING:
+            print("STAGING ONLY: certificates are not publicly trusted; do not enroll vehicles.")
+        else:
+            print("Caddy renews certificates automatically while running; clients use their system CA store.")
     if MEDIA:
         print("WebRTC media: TCP 7881 and UDP 51000-51100; no vehicles preconfigured.")
     else:
@@ -568,6 +616,13 @@ def domain_name(value):
     raise argparse.ArgumentTypeError("use --lan-ip for an IP address")
 
 
+def acme_email(value):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9.-]+", value):
+        raise argparse.ArgumentTypeError("use an ACME contact email without whitespace or Caddyfile syntax")
+    local, host = value.split("@")
+    return local + "@" + domain_name(host)
+
+
 def project_name(value):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,40}", value):
         raise argparse.ArgumentTypeError("use a lowercase name starting with a letter (max 41 characters)")
@@ -578,29 +633,49 @@ def deployment_settings(state, args):
     """Persist identity/topology so restarts cannot silently change the issuer."""
     settings = state / "deployment.json"
     supplied = {key: getattr(args, key) for key in
-                ("local", "lan_ip", "domain", "auth_domain", "project", "media_ip")
+                ("local", "lan_ip", "domain", "auth_domain", "project", "media_ip",
+                 "acme_email", "acme_staging")
                 if getattr(args, key) is not None}
     if settings.exists():
         saved = json.loads(settings.read_text())
+        if not saved.get("local") and not (saved.get("domain") and saved.get("auth_domain")):
+            raise RuntimeError(
+                "saved IP-only LAN deployments are no longer supported; create a domain-based "
+                "deployment with a new --state directory")
+        if bool(saved.get("domain")) != bool(saved.get("auth_domain")):
+            raise RuntimeError("saved domain deployments require both --domain and --auth-domain")
+        if saved.get("domain") and saved["domain"] == saved["auth_domain"]:
+            raise RuntimeError("saved --domain and --auth-domain must be distinct")
         if any(saved.get(key) != value for key, value in supplied.items()):
             raise RuntimeError("deployment settings changed; use a separate state directory")
         return saved
     if not (args.local or args.lan_ip or args.domain):
-        raise RuntimeError("first deployment requires --domain, --lan-ip or --local")
-    if bool(args.domain) != bool(args.auth_domain) or args.domain and args.domain == args.auth_domain:
-        raise RuntimeError("public HTTPS requires distinct --domain and --auth-domain")
-    if args.media_ip and not args.domain:
-        raise RuntimeError("--media-ip is only used with --domain")
+        raise RuntimeError(
+            "first deployment requires --local or --domain/--auth-domain; add --lan-ip for LAN")
+    if bool(args.domain) != bool(args.auth_domain):
+        raise RuntimeError("domain deployments require both --domain and --auth-domain")
+    if args.domain and args.domain == args.auth_domain:
+        raise RuntimeError("--domain and --auth-domain must be distinct")
+    if args.lan_ip and not args.domain:
+        raise RuntimeError(
+            "IP-only LAN deployments are not supported; use --domain and --auth-domain")
+    if args.local and (args.lan_ip or args.domain or args.auth_domain):
+        raise RuntimeError("--local cannot be combined with LAN IP or domain options")
+    if args.media_ip and (not args.domain or args.lan_ip):
+        raise RuntimeError("--media-ip is only used with public domains")
+    if (args.acme_email or args.acme_staging) and (not args.domain or args.lan_ip):
+        raise RuntimeError("ACME options require public --domain and --auth-domain")
     if (state / "secrets.json").exists() or (state / "onboarding.json").exists():
         raise RuntimeError("state belongs to another deployment tool; use a new directory")
     saved = dict(local=bool(args.local), lan_ip=args.lan_ip, domain=args.domain,
-                 auth_domain=args.auth_domain, project=args.project or "teleop", media_ip=args.media_ip)
+                 auth_domain=args.auth_domain, project=args.project or "teleop", media_ip=args.media_ip,
+                 acme_email=args.acme_email, acme_staging=bool(args.acme_staging))
     write(settings, saved)
     return saved
 
 
 def main():
-    global LOCAL, MEDIA, IP, APP, AUTH, PROJECT, PUBLIC_TLS, MEDIA_IP, RELEASE_IMAGES
+    global LOCAL, MEDIA, LAN_DOMAIN, IP, APP, AUTH, PROJECT, PUBLIC_TLS, MEDIA_IP, RELEASE_IMAGES, ACME_EMAIL, ACME_STAGING
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--state", type=Path, default=Path.home() / ".local/state/teleop",
                         help="private persistent directory (default: ~/.local/state/teleop)")
@@ -608,9 +683,12 @@ def main():
     address.add_argument("--local", "--loopback", action="store_true", default=None,
                          help="loopback HTTP acceptance deployment; no media")
     address.add_argument("--lan-ip", type=lan_address,
-                         help="LAN deployment: private IPv4 address assigned to this host (no domain needed)")
-    address.add_argument("--domain", type=domain_name, help="public console/Gateway DNS hostname")
-    parser.add_argument("--auth-domain", type=domain_name, help="public Casdoor DNS hostname")
+                         help="LAN host IPv4; requires --domain and --auth-domain")
+    parser.add_argument("--domain", type=domain_name, help="console/Gateway DNS hostname")
+    parser.add_argument("--auth-domain", type=domain_name, help="Casdoor login DNS hostname")
+    parser.add_argument("--acme-email", type=acme_email, help="Let's Encrypt ACME contact email")
+    parser.add_argument("--acme-staging", action="store_true", default=None,
+                        help="prepare only: test certificate issuance with untrusted Let's Encrypt staging")
     parser.add_argument("--project", type=project_name, help="Compose project name (default: teleop)")
     parser.add_argument("--media-ip", type=ipaddress.IPv4Address,
                         help="explicit public media IPv4 address, otherwise discover automatically")
@@ -633,16 +711,20 @@ def main():
         parser.error("--state must be owned by the current user with mode 0700")
     os.umask(0o077)
     config = deployment_settings(state, args)
-    LOCAL, PUBLIC_TLS = config["local"], bool(config["domain"])
+    ACME_EMAIL, ACME_STAGING = config.get("acme_email") or "", config.get("acme_staging", False)
+    if ACME_STAGING and args.action != "prepare":
+        parser.error("ACME staging supports prepare only; use a separate production state for trusted HTTPS")
+    LOCAL = config["local"]
+    LAN_DOMAIN = bool(config["lan_ip"] and config["domain"])
+    PUBLIC_TLS = bool(config["domain"] and not config["lan_ip"])
     PROJECT, MEDIA_IP = config["project"], config["media_ip"] or ""
     check_project(state)
     MEDIA = not LOCAL
     IP = config["lan_ip"] or "127.0.0.1"
-    if PUBLIC_TLS:
+    if config["domain"]:
         APP, AUTH = "https://" + config["domain"], "https://" + config["auth_domain"]
     else:
-        scheme = "http" if LOCAL else "https"
-        APP, AUTH = (f"{scheme}://{IP}:{port}" for port in (8443, 8444))
+        APP, AUTH = f"http://{IP}:8443", f"http://{IP}:8444"
     first_boot = not (state / "bootstrapped").exists()
     values = prepare(state)
     if args.action == "build" or args.action == "all" and RELEASE_IMAGES is None:

@@ -6,7 +6,7 @@ Read this file when adding or modifying code, configuration, tests, logs, or sec
 ## Rules
 - Follow each language's existing style: use `gofmt` and package tests for Go, the existing module layout for Python, and keep the frontend within its static-page and TypeScript boundaries.
 - Reuse existing types, APIs, configuration, and test fixtures; update tests and documentation for public behavior changes.
-- Shared browser state machines belong in `packages/teleop-shared/`; app-to-app source imports are not permitted.
+- Keep framework-agnostic browser input state machines in `packages/teleop-shared/`; deployed applications must not import one another's source.
 - Inject configuration through environment variables or protected configuration files; example configuration committed to the repository must contain no real secrets.
 - Validate input, identity, tenant, scope, vehicle permissions, and control sessions on the server.
 - Keep audit logs structured and exclude tokens, private keys, passwords, and device credentials.
@@ -20,6 +20,5 @@ Read this file when adding or modifying code, configuration, tests, logs, or sec
 - General engineering constraints: `.github/copilot-instructions.md`
 - Runtime configuration and secret classification: `docs/operations.md`
 - Current API compatibility/ownership: `docs/compatibility.md`
-- API schema: `api/schemas/datachannel-control.schema.json`
-- Go module: `apps/teleop-gateway/go.mod`
-- Python project configuration: `apps/vehicle-edge/pyproject.toml`
+- API schema: `api/schemas/vehicle-control-v2.schema.json`
+- Go module: `teleop-gateway/go.mod`

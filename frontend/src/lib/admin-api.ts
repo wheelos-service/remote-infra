@@ -78,6 +78,9 @@ export const deviceEnrollmentApprovalSchema = z.object({
   vehicle_number: z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9_.-]{0,23}$/, '车辆编号须为 1–24 位字母、数字、点、横线或下划线').optional(),
 })
 export type DeviceEnrollmentApproval = z.infer<typeof deviceEnrollmentApprovalSchema>
+export const deviceEnrollmentConfirmationSchema = z.object({
+  expected_fingerprint: z.string().regex(/^SHA256:[0-9a-f]{64}$/, '请核对完整公钥指纹'),
+})
 
 export function onboardingNeedsPolling(operation: OnboardingOperation): boolean {
   return !['completed', 'failed'].includes(operation.status)
@@ -165,11 +168,13 @@ export async function lookupDeviceEnrollment(orgId: string, token: string, userC
   return parse(deviceEnrollmentSchema, await request(`${enrollmentPath(orgId)}/lookup`, token, { user_code: code.data }, signal))
 }
 export async function approveDeviceEnrollment(orgId: string, token: string, enrollment: DeviceEnrollment, input?: DeviceEnrollmentApproval, signal?: AbortSignal): Promise<DeviceEnrollment> {
-  let body: unknown = {}
+  const confirmation = deviceEnrollmentConfirmationSchema.safeParse({ expected_fingerprint: enrollment.fingerprint })
+  if (!confirmation.success) throw new AdminApiError('请核对完整公钥指纹。')
+  let body: unknown = confirmation.data
   if (!enrollment.recovery) {
     const parsed = deviceEnrollmentApprovalSchema.safeParse(input)
     if (!parsed.success) throw new AdminApiError(parsed.error.issues[0]?.message || '请检查车辆信息。')
-    body = parsed.data
+    body = { ...parsed.data, ...confirmation.data }
   }
   return parse(deviceEnrollmentSchema, await request(`${enrollmentPath(orgId)}/${encodeURIComponent(enrollment.id)}/approve`, token, body, signal))
 }

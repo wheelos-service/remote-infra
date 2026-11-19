@@ -89,10 +89,10 @@ def main():
                 "-v", f"{ROOT}:/src:ro", "-v", f"{cache}:/cache",
                 "-e", "GOCACHE=/cache/build", "-e", "GOMODCACHE=/cache/mod",
                 "-e", "AUTHZ_POSTGRES_TEST_DSN", "-e", "MANAGED_RTC_TEST_URL",
-                "-w", "/src/apps/teleop-gateway", "golang:1.24", *test,
+                "-w", "/src/teleop-gateway", "golang:1.24", *test,
             ]
             started.append(runner)
-        subprocess.run(command, cwd=ROOT / "apps/teleop-gateway",
+        subprocess.run(command, cwd=ROOT / "teleop-gateway",
                        env=env, check=True, timeout=950)
     finally:
         for name in reversed(started):

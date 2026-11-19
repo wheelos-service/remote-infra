@@ -27,5 +27,5 @@ Read this file when performing code review, refactoring, or assessing cross-comp
 
 - Security requirements: `docs/compatibility.md`, `docs/operations.md`, and current authorization/control tests
 - Architecture boundaries: `.agents/knowledge/architecture.md`
-- Release deployment configuration: `infra/scripts/deploy.py`, `infra/release/`; retained compatibility configuration: `docker-compose.yml`, `docker-compose.no-domain.yml`, `infra/local-dev/Caddyfile`
-- Existing tests: `apps/teleop-gateway/internal/gateway/*_test.go`, `apps/vehicle-edge/tests/`
+- Release deployment configuration: `infra/scripts/deploy.py`, `infra/release/`; Compose is generated in the private deployment state directory.
+- Existing tests: `teleop-gateway/internal/gateway/*_test.go`, `frontend/scripts/`, and `tests/`

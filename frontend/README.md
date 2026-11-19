@@ -19,9 +19,10 @@ C++ 三路视频与 v2 模拟控制。Mock 不会因此连接真实车辆。
 操作员只需浏览器，不需要在每台电脑安装前端。部署及证书配置见
 [局域网安装指南](../docs/setup.md)；独立静态托管不属于本次发布流程。
 
-## 导航与优化计划
+## 导航与后续工作
 
-当前版本基线提交为 `56cf3d7`，后续优先级及服务端前置条件见 [优化计划](OPTIMIZATION-PLAN.md)。
+后端前置条件及尚未完成的协作告警、远程驾驶数据接入事项见
+[前端后续路线图](../.agents/knowledge/frontend-optimization-roadmap.md)。
 页面、车辆、总览/监控/驾驶列表搜索与筛选、告警板块和筛选写入 HashRouter 地址，
 例如 `/#/?page=drive&driveVehicle=sim-004`；支持分享、刷新恢复与浏览器前进/后退。
 搜索输入替换当前历史，页面跳转新增历史；同一次操作的车辆和页面变更合并为一次跳转。
@@ -306,6 +307,7 @@ v2 仍使用可靠传输，完整的新鲜度协议待跨端实现，见[发布�
 这两个模块不再保留旧 `simulation-*` 文件或导出别名；模拟语义保留在 UI 和车端执行配置。
 验证命令见 [测试指南](../tests/README.md)，当前发布限制见 [兼容性说明](../docs/compatibility.md)。
 
-键盘及标准手柄输入状态机由 `packages/teleop-shared` 共享。跨端模拟控制和真实浏览器三路解码
+键盘及标准手柄输入状态机由 `packages/teleop-shared` 提供，供 React 前端多个模块复用。
+跨端模拟控制和真实浏览器三路解码
 验收脚本分别见 `python3 tests/control-chain.py` 与 `python3 tests/driving-ui.py`；
 部署配置、运行时注入及生产 Compose 流程见 [部署文档](../docs/deploy-from-source.md)。

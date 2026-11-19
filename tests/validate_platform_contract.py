@@ -11,7 +11,7 @@ from referencing import Registry, Resource
 def main():
     root = pathlib.Path(__file__).resolve().parents[1]
     schemas = {}
-    for name in ("vehicle-telemetry.schema.json", "vehicle-operations.schema.json"):
+    for name in ("vehicle-telemetry.schema.json", "vehicle-operations-response.schema.json"):
         schemas[name] = json.loads((root / "api/schemas" / name).read_text())
         Draft202012Validator.check_schema(schemas[name])
     registry = Registry().with_resources(
@@ -21,7 +21,7 @@ def main():
         schemas["vehicle-telemetry.schema.json"], registry=registry
     )
     operations = Draft202012Validator(
-        schemas["vehicle-operations.schema.json"], registry=registry
+        schemas["vehicle-operations-response.schema.json"], registry=registry
     )
     corpus = json.loads(pathlib.Path(sys.argv[1]).read_text())
     for scenario in corpus:

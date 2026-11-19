@@ -20,16 +20,12 @@ jobs:
           cache-dependency-path: |
             frontend/package-lock.json
             packages/teleop-shared/package-lock.json
-            apps/operator-console/package-lock.json
       - run: |
           npm ci --prefix packages/teleop-shared
           npm ci --prefix frontend
-          npm ci --prefix apps/operator-console
           npm --prefix packages/teleop-shared test
           npm --prefix frontend run build
           npm --prefix frontend test
-          npm --prefix apps/operator-console test
-      - run: docker compose --env-file .env.example config --quiet
       - run: docker build -f frontend/Dockerfile -t teleop-frontend:ci .
       - uses: actions/upload-artifact@v4
         with:
@@ -61,9 +57,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: apps/teleop-gateway/go.mod
-          cache-dependency-path: apps/teleop-gateway/go.sum
-      - working-directory: apps/teleop-gateway
+          go-version-file: teleop-gateway/go.mod
+          cache-dependency-path: teleop-gateway/go.sum
+      - working-directory: teleop-gateway
         run: |
           # PostgreSQL advisory locks are database-wide across package tests.
           go test -p 1 ./...
