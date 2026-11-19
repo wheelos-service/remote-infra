@@ -145,7 +145,8 @@ databases pretending to share history.
 `GET /api/vehicles/{vehicle_id}/operations` requires observe role and current
 tenant/vehicle ACL. It returns telemetry-derived diagnostics, chassis error
 transitions, read-only Mission snapshots and recent telemetry history, matching
-[`vehicle-operations-response.schema.json`](../api/schemas/vehicle-operations-response.schema.json).
+[`vehicle-operations-response.schema.json`](../api/schemas/vehicle-operations-response.schema.json),
+which references the independent alert and Mission resources.
 It does not certify SystemStatus health, geographical projection, complete
 replay or driving readiness. Retention is 1000 snapshots, alerts and missions
 each per vehicle; responses contain at most 300 snapshots, 100 alerts and

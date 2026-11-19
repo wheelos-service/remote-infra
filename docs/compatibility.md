@@ -46,7 +46,8 @@ lifetimes.
 Vehicle SDK builds and Apollo configuration are managed separately from this
 server repository.
 
-Current payload schemas are in [api/schemas](../api/schemas/). V2 control must
+Current payload schemas are in [api/schemas](../api/schemas/). The control packet is
+named `vehicle-control.schema.json`; its payload remains wire version 2 and must
 not silently downgrade to v1. Viewing leases grant observation only; control
 leases and handover remain separate. Browser feedback, Cyber publication,
 and simulation acknowledgements do not establish physical actuation or stop.

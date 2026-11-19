@@ -169,7 +169,7 @@ func (api *OperationsAPI) postMission(w http.ResponseWriter, r *http.Request) {
 
 func validOperationsMission(m OperationsMission) bool {
 	if !telemetryIdentifier.MatchString(m.MissionID) || m.UpdatedAtMS <= 0 ||
-		m.UpdatedAtMS > maxTelemetryInteger || !utf8.ValidString(m.Description) || len(m.Description) > 2048 {
+		m.UpdatedAtMS > maxTelemetryInteger || !utf8.ValidString(m.Description) || utf8.RuneCountInString(m.Description) > 2048 {
 		return false
 	}
 	switch m.Status {
@@ -306,7 +306,7 @@ func (s *OperationsStore) Snapshot(ctx context.Context, vehicleID string) (Opera
 func validOperationsAlert(alert OperationsAlert) bool {
 	id, err := hex.DecodeString(alert.EventID)
 	if err != nil || len(id) != 32 || alert.OccurredAtMS <= 0 || alert.OccurredAtMS > maxTelemetryInteger ||
-		len(alert.Code) == 0 || len(alert.Code) > 128 || len(alert.Message) == 0 || len(alert.Message) > 2048 ||
+		utf8.RuneCountInString(alert.Code) == 0 || utf8.RuneCountInString(alert.Code) > 128 || utf8.RuneCountInString(alert.Message) == 0 || utf8.RuneCountInString(alert.Message) > 2048 ||
 		!utf8.ValidString(alert.Message) {
 		return false
 	}

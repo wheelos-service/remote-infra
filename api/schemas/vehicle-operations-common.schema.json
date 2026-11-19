@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vehicle-operations-common.schema.json",
+  "title": "Vehicle operations shared types",
+  "description": "Shared value types for vehicle operations resources. Text limits use Unicode characters, not UTF-8 bytes.",
+  "type": "object",
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$" },
+    "eventId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "timestamp": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "nullableTimestamp": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+    "text128": { "type": "string", "maxLength": 128 },
+    "text2048": { "type": "string", "maxLength": 2048 }
+  }
+}

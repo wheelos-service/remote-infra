@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vehicle-operations-alert.schema.json",
+  "title": "Vehicle operations alert",
+  "description": "A single vehicle operations alert. Text limits use Unicode characters.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "occurred_at_ms", "severity", "code", "message", "status", "resolved_at_ms"],
+  "properties": {
+    "event_id": { "$ref": "vehicle-operations-common.schema.json#/$defs/eventId" },
+    "occurred_at_ms": { "$ref": "vehicle-operations-common.schema.json#/$defs/timestamp" },
+    "severity": { "enum": ["info", "warning", "critical"] },
+    "code": {
+      "allOf": [{ "$ref": "vehicle-operations-common.schema.json#/$defs/text128" }],
+      "minLength": 1
+    },
+    "message": {
+      "allOf": [{ "$ref": "vehicle-operations-common.schema.json#/$defs/text2048" }],
+      "minLength": 1
+    },
+    "status": { "enum": ["open", "resolved"] },
+    "resolved_at_ms": { "$ref": "vehicle-operations-common.schema.json#/$defs/nullableTimestamp" }
+  }
+}

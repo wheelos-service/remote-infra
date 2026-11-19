@@ -20,5 +20,5 @@ Read this file when adding or modifying code, configuration, tests, logs, or sec
 - General engineering constraints: `.github/copilot-instructions.md`
 - Runtime configuration and secret classification: `docs/operations.md`
 - Current API compatibility/ownership: `docs/compatibility.md`
-- API schema: `api/schemas/vehicle-control-v2.schema.json`
+- API schemas: `api/schemas/`
 - Go module: `teleop-gateway/go.mod`
