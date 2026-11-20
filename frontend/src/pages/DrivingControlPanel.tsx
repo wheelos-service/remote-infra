@@ -1,12 +1,21 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { DataPacket_Kind, Room, RoomEvent } from 'livekit-client'
 import { teleopConfig } from '../lib/teleop-config'
-import { ControlSessionClient } from '../lib/control-session-client'
+import { ControlSessionClient, isControlReady } from '../lib/control-session-client'
+import { applyControlSafetyStrategy, type ControlSafetyEvent } from '../lib/control-safety'
+import { CONTROL_TIMING } from '../lib/control-timing'
 import type { ControlCommand } from '../lib/control-protocol'
 import {
   ControlInput, GamepadInput, bindGamepadInput, bindKeyboardInput,
   toV2ControlCommand, v2GamepadMapping, type GamepadView, type GamepadMapping,
 } from '../lib/control-input-adapter'
+
+function withinBudget(promise: Promise<void>, message: string): Promise<void> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(message)), CONTROL_TIMING.neutralizeBudgetMs)),
+  ])
+}
 
 export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChange, onIntent }: {
   vehicleId: string
@@ -20,16 +29,80 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
   const gamepad = useRef<GamepadInput | undefined>(undefined)
   const mounted = useRef(false)
   const mediaReady = useRef(videoReady)
+  const safetyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const hiddenAt = useRef<number | undefined>(undefined)
   mediaReady.current = videoReady
   const [, render] = useState(0)
   const [message, setMessage] = useState('')
   const [inputState, setInputState] = useState({ keyboardEnabled: false, gamepadEnabled: false, message: '输入未启用' })
   const [pad, setPad] = useState<GamepadView>()
   const [mapping, setMapping] = useState<GamepadMapping>({ ...v2GamepadMapping })
+  const clearSafetyTimer = useCallback(() => {
+    if (safetyTimer.current) clearTimeout(safetyTimer.current)
+    safetyTimer.current = undefined
+  }, [])
+  const applySafetyEvent = useCallback((event: ControlSafetyEvent,
+      active: ControlSessionClient | undefined = controller.current): void => {
+    applyControlSafetyStrategy(event, {
+      disarm: (safetyEvent, decision) => {
+        input.current?.suspend(decision.message)
+        if (safetyEvent === 'page_hidden') hiddenAt.current = Date.now()
+        if (decision.escalateAfterMs && decision.escalateTo) {
+          clearSafetyTimer()
+          const escalation = decision.escalateTo
+          safetyTimer.current = setTimeout(() => {
+            safetyTimer.current = undefined
+            if (safetyEvent === 'page_hidden' && !document.hidden) return
+            applySafetyEvent(escalation, active)
+          }, decision.escalateAfterMs)
+        }
+      },
+      observe: (safetyEvent, decision) => {
+        const restored = safetyEvent === 'page_visible' || (safetyEvent === 'window_focus' && !document.hidden)
+        if (!restored) return
+        const expired = hiddenAt.current !== undefined &&
+          Date.now() - hiddenAt.current >= CONTROL_TIMING.pageHiddenGraceMs
+        hiddenAt.current = undefined
+        clearSafetyTimer()
+        if (expired) {
+          applySafetyEvent('page_unload', active)
+          return
+        }
+        if (decision.message) input.current?.suspend(decision.message)
+      },
+      release: (_safetyEvent, decision) => {
+        hiddenAt.current = undefined
+        clearSafetyTimer()
+        if (!active) {
+          input.current?.suspend(decision.message)
+          return
+        }
+        void (async () => {
+          const drained = input.current?.suspendAndWait(decision.message) ?? Promise.resolve()
+          await withinBudget(drained, 'Input neutralization timed out').catch(() => undefined)
+          let neutralizeError: unknown
+          try { await withinBudget(active.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs), 'Safe publication timed out') }
+          catch (error) { neutralizeError = error }
+          try { await active.release() }
+          catch (error) { throw neutralizeError ?? error }
+          if (neutralizeError) throw neutralizeError
+        })().catch(() => {
+          if (mounted.current) render((n) => n + 1)
+          else console.error('控制释放未确认；需检查 Gateway 交接状态')
+        })
+      },
+      fault: (_safetyEvent, decision) => {
+        hiddenAt.current = undefined
+        clearSafetyTimer()
+        input.current?.suspend(decision.message)
+        active?.fail(decision.message)
+      },
+    })
+  }, [clearSafetyTimer])
   const changed = useCallback(() => {
     if (!mounted.current) return
     const state = controller.current?.state
-    const ready = state === 'ready' && mediaReady.current
+    const ready = isControlReady(state, mediaReady.current)
     if (input.current?.isAvailable !== ready) input.current?.setAvailable(ready)
     if (!ready) onIntent(vehicleId)
     onBusyChange(Boolean(state && state !== 'closed' && state !== 'idle'))
@@ -42,7 +115,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       allowVehicleActions: false,
       send: async (intent) => {
         const active = controller.current
-        if (active?.state !== 'ready' || !mediaReady.current) throw new Error('控制或三路画面尚未就绪')
+        if (!active || !isControlReady(active.state, mediaReady.current)) throw new Error('控制或三路画面尚未就绪')
         const command = toV2ControlCommand(intent)
         active.setCommand(command)
         onIntent(vehicleId, command)
@@ -58,30 +131,20 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
     setMapping({ ...v2GamepadMapping })
     input.current = controls
     gamepad.current = monitor
-    const unbindKeyboard = bindKeyboardInput(controls, window, document)
+    const unbindKeyboard = bindKeyboardInput(controls, window, document, undefined, undefined, applySafetyEvent)
     const unbindGamepad = bindGamepadInput(monitor, window, document, navigator)
-    const release = () => {
-      controls.suspend('页面离开：输入已停止')
-      if (controller.current) void controller.current.release().catch(() => {
-        if (mounted.current) render((n) => n + 1)
-        else console.error('控制释放未确认；需检查 Gateway 交接状态')
-      })
-    }
-    const hidden = () => { if (document.hidden) release() }
-    window.addEventListener('blur', release)
-    window.addEventListener('pagehide', release)
-    document.addEventListener('visibilitychange', hidden)
+    const pagehide = (event: PageTransitionEvent) => applySafetyEvent(event.persisted ? 'page_hidden' : 'page_unload')
+    window.addEventListener('pagehide', pagehide)
     return () => {
       mounted.current = false
       unbindGamepad()
       unbindKeyboard()
-      window.removeEventListener('blur', release)
-      window.removeEventListener('pagehide', release)
-      document.removeEventListener('visibilitychange', hidden)
-      release()
+      window.removeEventListener('pagehide', pagehide)
+      clearSafetyTimer()
+      applySafetyEvent('page_unload')
       onIntent(vehicleId)
     }
-  }, [bearer, vehicleId, onIntent])
+  }, [bearer, vehicleId, onIntent, applySafetyEvent, clearSafetyTimer])
 
   useEffect(() => {
     controller.current?.setMediaReady(videoReady)
@@ -113,18 +176,25 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       }
     })
     room.on(RoomEvent.Disconnected, () => {
-      if (!['releasing', 'pending', 'closed'].includes(next.state)) next.fail('RTC disconnected; release before switching')
+      if (!['releasing', 'pending', 'closed'].includes(next.state)) applySafetyEvent('rtc_disconnected', next)
     })
-    room.on(RoomEvent.Reconnecting, () => next.fail('RTC reconnect requires a new control session'))
+    room.on(RoomEvent.Reconnecting, () => applySafetyEvent('rtc_reconnecting', next))
     try { await next.acquire() } catch (error) {
       if (mounted.current) setMessage(error instanceof Error ? error.message : 'Control acquire failed')
     }
   }
   const release = async () => {
-    input.current?.suspend('正在释放控制权')
-    try { await controller.current?.release() } catch (error) {
-      if (mounted.current) setMessage(error instanceof Error ? error.message : 'Handover pending')
+    const drained = input.current?.suspendAndWait('正在释放控制权') ?? Promise.resolve()
+    await withinBudget(drained, 'Input neutralization timed out').catch(() => undefined)
+    let failure: unknown
+    try {
+      if (controller.current) await withinBudget(controller.current.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs),
+        'Safe publication timed out')
     }
+    catch (error) { failure = error }
+    try { await controller.current?.release() }
+    catch (error) { failure ??= error }
+    if (failure && mounted.current) setMessage(failure instanceof Error ? failure.message : 'Handover pending')
   }
   const downloadDiagnostics = () => {
     const active = controller.current
@@ -141,7 +211,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
     setTimeout(() => URL.revokeObjectURL(url), 0)
   }
   const state = controller.current?.state ?? 'idle'
-  const ready = state === 'ready' && videoReady
+  const ready = isControlReady(state, videoReady)
   const busy = state !== 'closed' && state !== 'idle'
   const button = 'rounded border border-amber-600 px-3 py-2 disabled:opacity-40'
   return (

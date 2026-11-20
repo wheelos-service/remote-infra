@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {ControlInput, bindKeyboardInput} from '../dist/control-input.js';
+import {TELEOP_TIMING} from '../dist/control-timing.js';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -10,7 +11,7 @@ function setup(t, send) {
     const originalClear = globalThis.clearInterval;
     let timerId = 0;
     globalThis.setInterval = (callback, delay) => {
-        assert.equal(delay, 100);
+        assert.equal(delay, TELEOP_TIMING.inputRepeatMs);
         timers.set(++timerId, callback);
         return timerId;
     };
@@ -154,6 +155,10 @@ test('space overrides motion and held directions cannot resume after emergency s
     h.input.keyUp('KeyW');
     h.input.keyDown('KeyW');
     await settle();
+    assert.equal(h.actions().at(-1), 'emergency_stop');
+    h.input.setKeyboardEnabled(true);
+    h.input.keyDown('KeyW');
+    await settle();
     assert.equal(h.actions().at(-1), 'forward');
 });
 
@@ -168,6 +173,62 @@ test('release replaces queued motion while an earlier send is still in flight', 
     unblock();
     await settle();
     assert.deepEqual(h.actions(), ['forward', 'stop']);
+});
+
+test('suspendAndWait includes the queued stop in release ordering', async t => {
+    let unblock;
+    const h = setup(t, command => command.action === 'forward'
+        ? new Promise(resolve => { unblock = resolve; }) : undefined);
+    await h.arm();
+    h.input.keyDown('KeyW');
+    await settle();
+    let resolved = false;
+    const suspended = h.input.suspendAndWait('release').then(() => { resolved = true; });
+    await settle();
+    assert.equal(resolved, false);
+    unblock();
+    await suspended;
+    assert.deepEqual(h.actions(), ['forward', 'stop']);
+});
+
+test('lifecycle suspension preserves a queued emergency stop', async t => {
+    let unblock;
+    const h = setup(t, command => command.action === 'forward'
+        ? new Promise(resolve => { unblock = resolve; }) : undefined);
+    await h.arm();
+    h.input.keyDown('KeyW');
+    await settle();
+    h.input.emergencyStop();
+    h.input.suspend('blur');
+    unblock();
+    await settle();
+    assert.deepEqual(h.actions(), ['forward', 'emergency_stop']);
+});
+
+test('lifecycle suspension cannot neutralize an in-flight emergency stop', async t => {
+    let unblock;
+    const h = setup(t, command => command.action === 'emergency_stop'
+        ? new Promise(resolve => { unblock = resolve; }) : undefined);
+    await h.arm();
+    h.input.emergencyStop();
+    await settle();
+    h.input.suspend('blur');
+    unblock();
+    await settle();
+    assert.deepEqual(h.actions(), ['emergency_stop', 'emergency_stop']);
+});
+
+test('completed emergency remains latched until an explicit input rearm', async t => {
+    const h = setup(t);
+    await h.arm();
+    h.input.emergencyStop();
+    await settle();
+    h.input.suspend('blur');
+    await settle();
+    assert.deepEqual(h.actions(), ['emergency_stop', 'emergency_stop']);
+    h.input.setKeyboardEnabled(true);
+    await settle();
+    assert.equal(h.actions().at(-1), 'stop');
 });
 
 test('send failure clears movement and disarms keyboard', async t => {
@@ -221,15 +282,23 @@ class Events {
 test('browser binding cleanup removes handlers and timers without rearming on remount', async t => {
     const h = setup(t);
     const win = new Events(), doc = new Events();
-    const dispose = bindKeyboardInput(h.input, win, doc);
+    const interruptions = [];
+    const dispose = bindKeyboardInput(h.input, win, doc, undefined, undefined, event => interruptions.push(event));
     await h.arm();
     win.emit('keydown', {code: 'KeyW'});
     await settle();
+    win.emit('blur');
+    win.emit('focus');
+    assert.deepEqual(interruptions, ['window_blur', 'window_focus']);
+    interruptions.length = 0;
     dispose();
     await settle();
     assert.equal(h.input.isAvailable, false);
     assert.equal(h.timers.size, 0);
     assert.ok([...win.listeners.values(), ...doc.listeners.values()].every(value => value.length === 0));
+    win.emit('blur');
+    win.emit('focus');
+    assert.deepEqual(interruptions, []);
     const rebound = bindKeyboardInput(h.input, win, doc);
     h.input.setAvailable(true);
     win.emit('keydown', {code: 'KeyW'});

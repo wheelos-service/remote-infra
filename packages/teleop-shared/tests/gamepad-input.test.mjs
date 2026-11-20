@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {ControlInput, bindKeyboardInput} from '../dist/control-input.js';
+import {TELEOP_TIMING} from '../dist/control-timing.js';
 import {GamepadInput, bindGamepadInput, defaultGamepadMapping, validateMapping, analogAxis} from '../dist/gamepad-input.js';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -36,7 +37,7 @@ function setup(t, send) {
             : command.steering < 0 ? 'left' : command.steering > 0 ? 'right' : 'stop')),
         poll: (foreground = true) => monitor.poll([device], foreground),
         button(index, pressed) { device.buttons[index] = {pressed, value: pressed ? 1 : 0, touched: pressed}; },
-        tick(delay = 100) { [...timers.values()].filter(timer => timer.delay === delay).forEach(timer => timer.callback()); },
+        tick(delay = TELEOP_TIMING.inputRepeatMs) { [...timers.values()].filter(timer => timer.delay === delay).forEach(timer => timer.callback()); },
         advance(ms) { now += ms; },
         async arm() {
             input.setAvailable(true);
@@ -320,7 +321,7 @@ test('sample stalls stop the repeating scheduler even before the browser polls a
     h.device.axes[3] = -1;
     h.poll();
     await settle();
-    h.advance(201);
+    h.advance(TELEOP_TIMING.gamepadSampleTimeoutMs + 1);
     h.tick();
     await settle();
     assert.deepEqual(h.actions(), ['forward', 'stop']);
@@ -406,7 +407,7 @@ test('browser disconnect event and blur immediately stop; cleanup removes pollin
     await h.arm();
     h.button(4, true);
     h.device.axes[3] = -1;
-    h.tick(16);
+    h.tick(TELEOP_TIMING.gamepadPollMs);
     await settle();
     win.emit('blur');
     await settle();
@@ -417,7 +418,7 @@ test('browser disconnect event and blur immediately stop; cleanup removes pollin
     await h.arm();
     h.button(4, true);
     h.device.axes[3] = -1;
-    h.tick(16);
+    h.tick(TELEOP_TIMING.gamepadPollMs);
     await settle();
     pads = [];
     win.emit('gamepaddisconnected', {gamepad: h.device});

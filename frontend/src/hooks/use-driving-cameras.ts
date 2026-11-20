@@ -80,14 +80,11 @@ export function useDrivingCameras(vehicleId: string, bearer: string) {
         if (!disposed) setError('监看资源释放失败；租约将按 TTL 失效')
       },
     })
-    const hidden = () => { if (document.hidden) lifecycle.fail(new Error('页面隐藏，监看已停止')) }
-    const leave = () => { void lifecycle.stop() }
-    document.addEventListener('visibilitychange', hidden)
+    const leave = (event: PageTransitionEvent) => { if (!event.persisted) void lifecycle.stop() }
     window.addEventListener('pagehide', leave)
     void lifecycle.start()
     return () => {
       disposed = true
-      document.removeEventListener('visibilitychange', hidden)
       window.removeEventListener('pagehide', leave)
       void lifecycle.stop()
       room?.removeAllListeners()

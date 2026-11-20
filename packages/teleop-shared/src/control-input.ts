@@ -1,4 +1,5 @@
 import type {ControlCommand, VehicleAction} from './input-command.js';
+import {TELEOP_TIMING} from './control-timing.js';
 
 export const vehicleActionKeys: Readonly<Record<string, VehicleAction>> = {
     Digit1: 'gear_park', Digit2: 'gear_neutral', Digit3: 'gear_drive', Digit4: 'gear_reverse',
@@ -46,6 +47,9 @@ export class ControlInput {
     private active?: ControlCommand;
     private pending?: ControlCommand;
     private sending = false;
+    private sendingTask?: Promise<void>;
+    private emergencySending = false;
+    private emergencyLatched = false;
 
     constructor(private readonly options: Options) {}
 
@@ -69,7 +73,10 @@ export class ControlInput {
     private dispatch(command: ControlCommand): void {
         if (!this.available) return;
         this.pending = command;
-        if (!this.sending) void this.flush();
+        if (!this.sending) {
+            this.sendingTask = this.flush();
+            void this.sendingTask;
+        }
     }
 
     private async flush(): Promise<void> {
@@ -78,13 +85,16 @@ export class ControlInput {
             while (this.available && this.pending) {
                 const command = this.pending;
                 this.pending = undefined;
-                await this.options.send(command);
+                this.emergencySending = command.action === 'emergency_stop';
+                try { await this.options.send(command); }
+                finally { this.emergencySending = false; }
             }
         } catch (error) {
             this.setAvailable(false);
             this.options.onError(error);
         } finally {
             this.sending = false;
+            this.sendingTask = undefined;
         }
     }
 
@@ -92,14 +102,15 @@ export class ControlInput {
         this.clearMovement();
         this.active = command;
         this.gamepadActive = gamepad;
+        if (command.action !== 'emergency_stop') this.emergencyLatched = false;
         this.dispatch(command);
         this.timer = setInterval(() => {
-            if (this.gamepadActive && performance.now() - this.gamepadSampleAt > 200) {
+            if (this.gamepadActive && performance.now() - this.gamepadSampleAt > TELEOP_TIMING.gamepadSampleTimeoutMs) {
                 this.suspend('手柄采样超时：已停止，请重新启用');
                 return;
             }
             if (this.active) this.dispatch(this.active);
-        }, 100);
+        }, TELEOP_TIMING.inputRepeatMs);
         this.report(`正在发送：${command.action ?? '低层控制'}（非车端执行确认）`);
     }
 
@@ -110,6 +121,7 @@ export class ControlInput {
         this.blocked = false;
         this.keyboardEnabled = false;
         this.gamepadEnabled = false;
+        this.emergencyLatched = false;
         this.available = available;
         this.report(available ? '键盘控制未启用' : '控制不可用');
     }
@@ -122,28 +134,37 @@ export class ControlInput {
         this.blocked = false;
         this.keyboardEnabled = enabled;
         this.gamepadEnabled = false;
-        this.dispatch({mode: 'high_level', action: 'stop'});
+        if (enabled) this.emergencyLatched = false;
+        this.dispatch({mode: 'high_level', action: this.emergencyLatched ? 'emergency_stop' : 'stop'});
         this.report(enabled ? '键盘控制已启用，等待按键' : '键盘控制未启用');
     }
 
     suspend(message = '已停止；请重新启用键盘控制'): void {
         const wasActive = this.keyboardEnabled || this.gamepadEnabled || Boolean(this.active);
-        const pendingSafety = this.pending?.action === 'stop' || this.pending?.action === 'emergency_stop'
-            ? this.pending : undefined;
+        const pendingSafety = this.pending?.action === 'emergency_stop'
+            ? this.pending : this.emergencySending || this.emergencyLatched
+                ? {mode: 'high_level', action: 'emergency_stop'} as const :
+                this.pending?.action === 'stop' ? this.pending : undefined;
         this.clearMovement();
         this.pressed.clear();
         this.actionPressed.clear();
         this.blocked = false;
         this.keyboardEnabled = false;
         this.gamepadEnabled = false;
-        if (wasActive) this.dispatch({mode: 'high_level', action: 'stop'});
+        if (wasActive) this.dispatch(pendingSafety ?? {mode: 'high_level', action: 'stop'});
         else if (pendingSafety) this.dispatch(pendingSafety);
         this.report(message);
+    }
+
+    async suspendAndWait(message = '已停止；请重新启用控制'): Promise<void> {
+        this.suspend(message);
+        await this.sendingTask;
     }
 
     setGamepadEnabled(enabled: boolean): void {
         if (!this.available) return;
         this.suspend();
+        if (enabled) this.emergencyLatched = false;
         this.gamepadEnabled = enabled;
         this.report(enabled ? '手柄已启用：先松开使能键并回中' : '手柄控制未启用');
     }
@@ -163,7 +184,7 @@ export class ControlInput {
             ? {mode: 'high_level', action: value} : value;
         if (!this.gamepadActive) this.start(command, true);
         else {
-            // Gamepad is sampled at 16 ms; transmit at 100 ms; retain only the newest value.
+            // Polling supplies fresh samples; the shared repeat timer retains only the newest value.
             this.active = command;
             if (this.pending) this.pending = command;
         }
@@ -229,6 +250,8 @@ export class ControlInput {
 
     emergencyStop(): void {
         if (!this.available) return;
+        this.emergencyLatched = true;
+        this.keyboardEnabled = false;
         this.gamepadEnabled = false;
         this.clearMovement();
         this.blocked = this.pressed.size > 0;
@@ -238,8 +261,11 @@ export class ControlInput {
 }
 
 /** Bind browser lifecycle events separately from the command state machine. */
+export type InputInterruption = 'window_blur' | 'window_focus' | 'page_hidden' | 'page_visible' | 'editable_focus';
+
 export function bindKeyboardInput(input: ControlInput, targetWindow: Window, targetDocument: Document,
-    keyboardToggle?: EventTarget, gamepadToggle?: EventTarget): () => void {
+    keyboardToggle?: EventTarget, gamepadToggle?: EventTarget,
+    onInterruption?: (event: InputInterruption) => void): () => void {
     const keydown = (event: KeyboardEvent) => {
         if (!input.isKeyboardEnabled || !isControlKey(event.code)) return;
         if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing ||
@@ -252,27 +278,36 @@ export function bindKeyboardInput(input: ControlInput, targetWindow: Window, tar
         if (input.isKeyboardEnabled && !isEditableTarget(event.target)) event.preventDefault();
         input.keyUp(event.code);
     };
-    const blur = () => input.suspend('窗口失焦：已停止，请重新启用控制');
-    const visibility = () => {
-        if (targetDocument.hidden) input.suspend('页面已隐藏：已停止，请重新启用控制');
+    const blur = () => {
+        input.suspend('窗口失焦：已停止，请重新启用控制');
+        onInterruption?.('window_blur');
     };
-    const focus = (event: FocusEvent) => {
+    const focus = () => onInterruption?.('window_focus');
+    const visibility = () => {
+        if (targetDocument.hidden) {
+            input.suspend('页面已隐藏：已停止，请重新启用控制');
+            onInterruption?.('page_hidden');
+        } else onInterruption?.('page_visible');
+    };
+    const focusin = (event: FocusEvent) => {
         if (event.target !== keyboardToggle && event.target !== gamepadToggle && isEditableTarget(event.target)) {
             input.suspend('输入区域获得焦点：键盘与手柄控制已关闭');
+            onInterruption?.('editable_focus');
         }
     };
     targetWindow.addEventListener('keydown', keydown);
     targetWindow.addEventListener('keyup', keyup);
     targetWindow.addEventListener('blur', blur);
+    targetWindow.addEventListener('focus', focus);
     targetDocument.addEventListener('visibilitychange', visibility);
-    targetDocument.addEventListener('focusin', focus);
+    targetDocument.addEventListener('focusin', focusin);
     return () => {
-        input.suspend('输入组件已关闭');
-        input.setAvailable(false);
+        void input.suspendAndWait('输入组件已关闭').finally(() => input.setAvailable(false));
         targetWindow.removeEventListener('keydown', keydown);
         targetWindow.removeEventListener('keyup', keyup);
         targetWindow.removeEventListener('blur', blur);
+        targetWindow.removeEventListener('focus', focus);
         targetDocument.removeEventListener('visibilitychange', visibility);
-        targetDocument.removeEventListener('focusin', focus);
+        targetDocument.removeEventListener('focusin', focusin);
     };
 }

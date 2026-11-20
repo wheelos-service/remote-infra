@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import { CONTROL_TIMING } from './control-timing'
+import { controlSafetyDecision } from './control-safety'
 import { organizationHeaders, requestOrganization } from './organization-context'
 import {
   base64, controlCommandSchema, controlFeedbackSchema, neutralCommand, signControl,
@@ -16,9 +18,13 @@ const sessionSchema = z.object({
 const responseSchema = z.object({
   session: sessionSchema,
   token: z.string().min(1).optional(),
-  renew_after_ms: z.number().int().min(200).max(30_000),
+  renew_after_ms: z.number().int().min(CONTROL_TIMING.leaseRenewMinMs).max(CONTROL_TIMING.leaseRenewMaxMs),
 })
 export type ControllerState = 'idle' | 'acquiring' | 'connecting' | 'ready' | 'locked' | 'releasing' | 'pending' | 'closed'
+
+export function isControlReady(state: ControllerState | undefined, mediaReady: boolean): boolean {
+  return state === 'ready' && mediaReady
+}
 
 export interface ControlConnection {
   connect(token: string): Promise<void>
@@ -26,10 +32,8 @@ export interface ControlConnection {
   disconnect(): Promise<void>
 }
 
-const SEND_BUDGET_MS = 250
-// Replace the former six-sequence distance at the nominal 75 ms cadence with
-// an actual dispatch-to-acknowledgement deadline, independent of signing gaps.
-const ACK_BUDGET_MS = 450
+// Budgets are centralized in control-timing.ts and measure real progress,
+// rather than coupling safety deadlines to packet cadence or sequence count.
 const MAX_PENDING_COMMANDS = 64
 const MAX_TRACE_EVENTS = 128
 
@@ -78,6 +82,8 @@ export class ControlSessionClient {
   private connectionStarted = false
   private command: ControlCommand = { ...neutralCommand }
   private intentRevision = 0
+  private publishedIntentRevision = 0
+  private publishedIntentCommand?: ControlCommand
   private timer?: ReturnType<typeof setInterval>
   private sending = false
   private sendStarted = 0
@@ -142,7 +148,7 @@ export class ControlSessionClient {
           timer = setTimeout(() => {
             reject(new Error('Control API timed out'))
             abort.abort()
-          }, 3000)
+          }, CONTROL_TIMING.apiTimeoutMs)
         }),
       ])
     } finally { clearTimeout(timer) }
@@ -185,14 +191,14 @@ export class ControlSessionClient {
             if (this.closing || this.state === 'locked') await this.connection.disconnect()
           }),
           new Promise<never>((_, reject) => {
-            timeout = setTimeout(() => reject(new Error('Control RTC connection timed out')), 5000)
+            timeout = setTimeout(() => reject(new Error('Control RTC connection timed out')), CONTROL_TIMING.rtcConnectTimeoutMs)
           }),
         ])
       } finally { clearTimeout(timeout) }
       if (!this.canContinue()) return
       if (performance.now() >= this.leaseDeadline) throw new Error('Control lease expired while connecting')
       this.connectedAt = performance.now()
-      this.timer = setInterval(() => { void this.tick() }, 75)
+      this.timer = setInterval(() => { void this.tick() }, CONTROL_TIMING.tickMs)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Control connection failed'
       // A definitive acquire rejection created no session to release. Keep
@@ -270,7 +276,7 @@ export class ControlSessionClient {
   setMediaReady(ready: boolean): void {
     this.mediaReady = ready
     if (!ready && ['acquiring', 'connecting', 'ready'].includes(this.state)) {
-      this.fail('Camera feed lost; release and acquire a new session', 'media_lost')
+      this.fail(controlSafetyDecision('media_lost').message, 'media_lost')
     }
   }
 
@@ -304,16 +310,18 @@ export class ControlSessionClient {
   }
 
   private checkDeadlines(now: number): boolean {
-    if (now >= this.leaseDeadline || (this.feedback ? now - this.lastFeedback > 750 : now - this.connectedAt > 5000)) {
-      this.fail('Control lease or vehicle feedback timed out', 'authority_or_feedback_timeout')
+    if (now >= this.leaseDeadline || (this.feedback
+      ? now - this.lastFeedback > CONTROL_TIMING.feedbackTimeoutMs
+      : now - this.connectedAt > CONTROL_TIMING.initialFeedbackTimeoutMs)) {
+      this.fail(controlSafetyDecision('feedback_timeout').message, 'authority_or_feedback_timeout')
       return false
     }
-    if (this.sending && now - this.sendStarted >= SEND_BUDGET_MS) {
+    if (this.sending && now - this.sendStarted >= CONTROL_TIMING.sendBudgetMs) {
       this.fail('Control signing or publication stalled', 'send_stalled')
       return false
     }
     const oldest = this.pendingCommands[0]
-    if (oldest && now - oldest.dispatchedAt >= ACK_BUDGET_MS) {
+    if (oldest && now - oldest.dispatchedAt >= CONTROL_TIMING.ackBudgetMs) {
       this.fail('Control acknowledgement progress timed out', 'ack_timeout')
       return false
     }
@@ -334,13 +342,14 @@ export class ControlSessionClient {
     this.sending = true
     this.sendStarted = now
     const intentRevision = this.intentRevision
+    const signedCommand = { ...this.command }
     const sequence = ++this.sequence
     try {
       const body = await signControl(this.key, {
         version: 2, type: 'control', vehicle_id: this.vehicleId,
         session_id: this.session.session_id, client_instance_id: this.instanceId,
         receiver_instance_id: this.feedback.receiver_instance_id, revision: this.feedback.revision,
-        sequence, timestamp_ms: Date.now(), command: { ...this.command },
+        sequence, timestamp_ms: Date.now(), command: signedCommand,
       })
       this.record('sign', sequence, performance.now() - now)
       if (!this.canContinue() || this.state !== 'ready' || !this.checkDeadlines(performance.now())) return
@@ -358,6 +367,8 @@ export class ControlSessionClient {
       this.pendingCommands.push({ sequence, dispatchedAt })
       this.record('dispatch', sequence, dispatchedAt - now)
       await this.connection.publish(new TextEncoder().encode(body))
+      this.publishedIntentRevision = intentRevision
+      this.publishedIntentCommand = signedCommand
       this.record('published', sequence, performance.now() - dispatchedAt)
       if (this.canContinue()) this.checkDeadlines(performance.now())
     } catch {
@@ -365,6 +376,26 @@ export class ControlSessionClient {
     } finally {
       this.sending = false
     }
+  }
+
+  async neutralizeAndPublish(timeoutMs = CONTROL_TIMING.neutralizeBudgetMs): Promise<void> {
+    if (!isControlReady(this.state, this.mediaReady)) return
+    const emergency = this.command.brake === 1000 && this.command.throttle === 0 &&
+      this.command.steering === 0 && this.command.direction === 0
+    const safeCommand = emergency ? { ...this.command } : { ...neutralCommand }
+    this.setCommand(safeCommand)
+    const targetRevision = this.intentRevision
+    const deadline = performance.now() + timeoutMs
+    while (performance.now() < deadline && this.canContinue()) {
+      await this.tick()
+      const published = this.publishedIntentCommand
+      if (this.publishedIntentRevision === targetRevision && published &&
+          published.steering === safeCommand.steering && published.throttle === safeCommand.throttle &&
+          published.brake === safeCommand.brake && published.direction === safeCommand.direction) return
+      await new Promise((resolve) => setTimeout(resolve, CONTROL_TIMING.controlYieldMs))
+    }
+    this.fail('Safe control publication timed out', 'publication_failed')
+    throw new Error('Safe control publication timed out')
   }
 
   private async renew(): Promise<void> {
@@ -416,16 +447,26 @@ export class ControlSessionClient {
 
   private async finishRelease(): Promise<void> {
     try {
+      let disconnectCleanupError = ''
+      let disconnectTimer: ReturnType<typeof setTimeout> | undefined
       try {
-        await this.connection.disconnect()
-      } finally {
-        if (this.session) await this.api(`/api/control/${this.session.session_id}/release`, {}, true)
-      }
+        await Promise.race([
+          this.connection.disconnect(),
+          new Promise<never>((_, reject) => {
+            disconnectTimer = setTimeout(() => reject(new Error('Control RTC disconnect timed out')),
+              CONTROL_TIMING.rtcDisconnectBudgetMs)
+          }),
+        ])
+      } catch {
+        disconnectCleanupError = 'Control RTC disconnect failed; release continues through Gateway'
+        this.record('disconnect_failed')
+      } finally { clearTimeout(disconnectTimer) }
+      if (this.session) await this.api(`/api/control/${this.session.session_id}/release`, {}, true)
       const session = this.session
       if (!session) return
       this.state = 'pending'
       this.changed()
-      const until = performance.now() + 10_000
+      const until = performance.now() + CONTROL_TIMING.handoverTimeoutMs
       while (performance.now() < until) {
         const value = z.object({
           vehicle_id: z.string(), session_id: z.string(), state: z.string(),
@@ -434,11 +475,11 @@ export class ControlSessionClient {
         if (value.vehicle_id === this.vehicleId && value.session_id === session.session_id &&
             value.state === 'CONFIRMED' && value.vehicle_handover_confirmed === true) {
           this.state = 'closed'
-          this.cleanupError = ''
+          this.cleanupError = disconnectCleanupError
           this.changed()
           return
         }
-        await new Promise((resolve) => setTimeout(resolve, 200))
+        await new Promise((resolve) => setTimeout(resolve, CONTROL_TIMING.handoverPollMs))
       }
       throw new Error('Vehicle handover is still pending')
     } catch (error) {

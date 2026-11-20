@@ -22,6 +22,8 @@ const { outputFiles } = await esbuild.build({
     { in: 'src/lib/preview-vehicles.ts', out: 'preview-vehicles' },
     { in: 'src/lib/control-protocol.ts', out: 'control-protocol' },
     { in: 'src/lib/control-session-client.ts', out: 'control-session-client' },
+    { in: 'src/lib/control-safety.ts', out: 'control-safety' },
+    { in: 'src/lib/control-timing.ts', out: 'control-timing' },
     { in: 'src/lib/control-input-adapter.ts', out: 'control-input-adapter' },
     { in: 'src/lib/camera-view.ts', out: 'camera-view' },
     { in: 'src/lib/camera-feed.ts', out: 'camera-feed' },
@@ -55,7 +57,10 @@ const operations = await loadBundle('vehicle-operations-api')
 const dataAPI = await loadBundle('vehicle-data-api')
 const preview = await loadBundle('preview-vehicles')
 const controlProtocol = await loadBundle('control-protocol')
-const { ControlSessionClient } = await loadBundle('control-session-client')
+const controlSession = await loadBundle('control-session-client')
+const { ControlSessionClient, isControlReady } = controlSession
+const controlSafety = await loadBundle('control-safety')
+const { CONTROL_TIMING } = await loadBundle('control-timing')
 const controlInput = await loadBundle('control-input-adapter')
 const cameraView = await loadBundle('camera-view')
 const cameraFeed = await loadBundle('camera-feed')
@@ -132,6 +137,33 @@ lane {
   right_boundary { curve { segment { line_segment { point { x: 100 y: 198 } point { x: 108 y: 220 } } } } }
 }`
 const demoMap = fleetMap.fleetMapSchema.parse(convertMap(mapText, 'fixture-map'))
+
+test('control readiness requires both a ready session and live media', () => {
+  assert.equal(isControlReady('ready', true), true)
+  assert.equal(isControlReady('ready', false), false)
+  assert.equal(isControlReady('connecting', true), false)
+  assert.equal(isControlReady(undefined, true), false)
+})
+
+test('control interruption events select one centralized safety strategy', () => {
+  assert.equal(controlSafety.controlSafetyDecision('window_blur').strategy, 'disarm')
+  assert.equal(controlSafety.controlSafetyDecision('page_hidden').strategy, 'disarm')
+  assert.equal(controlSafety.controlSafetyDecision('page_hidden').escalateAfterMs, CONTROL_TIMING.pageHiddenGraceMs)
+  assert.equal(controlSafety.controlSafetyDecision('page_hidden').recovery, 'manual-rearm')
+  assert.equal(controlSafety.controlSafetyDecision('page_visible').strategy, 'observe')
+  assert.equal(controlSafety.controlSafetyDecision('page_unload').strategy, 'release')
+  for (const event of ['media_lost', 'rtc_disconnected', 'rtc_reconnecting', 'feedback_timeout', 'control_fault']) {
+    assert.equal(controlSafety.controlSafetyDecision(event).strategy, 'fault')
+  }
+  const actions = []
+  controlSafety.applyControlSafetyStrategy('page_unload', {
+    disarm: () => actions.push('disarm'),
+    observe: () => actions.push('observe'),
+    release: () => actions.push('release'),
+    fault: () => actions.push('fault'),
+  })
+  assert.deepEqual(actions, ['release'])
+})
 
 test('legacy simulation query does not select the vehicle control backend', async () => {
   const search = window.location.search
@@ -487,7 +519,9 @@ test('shared input converts normalized intent to v2 integers without enabling le
   const convert = controlInput.toV2ControlCommand
   assert.deepEqual(convert({ mode: 'low_level', steering: -0.5, throttle: 0.125, brake: 0, direction: -1 }),
     { steering: -500, throttle: 125, brake: 0, direction: -1 })
-  for (const action of ['stop', 'emergency_stop']) assert.deepEqual(convert({ mode: 'high_level', action }),
+  assert.deepEqual(convert({ mode: 'high_level', action: 'stop' }),
+    { steering: 0, throttle: 0, brake: 0, direction: 0 })
+  assert.deepEqual(convert({ mode: 'high_level', action: 'emergency_stop' }),
     { steering: 0, throttle: 0, brake: 1000, direction: 0 })
   assert.equal(convert({ mode: 'high_level', action: 'reverse' }).direction, -1)
   assert.equal(convert({ mode: 'high_level', action: 'left' }).throttle, 0)
@@ -517,7 +551,7 @@ test('v2 input capability gate stops held movement instead of passing gear or mo
     await flush()
     input.keyDown('KeyE')
     await flush()
-    assert.deepEqual(sent.at(-1), { steering: 0, throttle: 0, brake: 1000, direction: 0 })
+    assert.deepEqual(sent.at(-1), { steering: 0, throttle: 0, brake: 0, direction: 0 })
     assert.equal(input.isKeyboardEnabled, false)
     assert.match(states.at(-1).message, /未开放/)
     const count = sent.length
@@ -526,7 +560,7 @@ test('v2 input capability gate stops held movement instead of passing gear or mo
   } finally { input.setAvailable(false) }
 })
 
-test('shared gamepad uses the v2 adapter and release replaces propulsion with braking', async () => {
+test('shared gamepad uses the v2 adapter and release neutralizes propulsion', async () => {
   const sent = []
   const input = new controlInput.ControlInput({
     allowVehicleActions: false, send: async (value) => { sent.push(controlInput.toV2ControlCommand(value)) },
@@ -553,7 +587,7 @@ test('shared gamepad uses the v2 adapter and release replaces propulsion with br
     pad.buttons[4].pressed = false
     monitor.poll([pad], true)
     await flush()
-    assert.deepEqual(sent.at(-1), { steering: 0, throttle: 0, brake: 1000, direction: 0 })
+    assert.deepEqual(sent.at(-1), { steering: 0, throttle: 0, brake: 0, direction: 0 })
   } finally { input.setAvailable(false) }
 })
 
@@ -765,7 +799,7 @@ test('v2 canonical signing rejects float and conflicting pedal commands', () => 
 function controllerFixture(renewAfter = 10000) {
   let instanceId
   let sequence = 0
-  const calls = []
+  const calls = [], publishedCommands = []
   const session = {
     session_id: 'e0dfe6c0-63ee-416d-81b1-689bf10c785d', vehicle_id: 'car-test',
     protocol_version: 2, sender_identity: 'control-e0dfe6c0-63ee-416d-81b1-689bf10c785d',
@@ -775,7 +809,9 @@ function controllerFixture(renewAfter = 10000) {
   const connection = {
     connect: async () => { calls.push('connect') },
     publish: async (body) => {
-      sequence = JSON.parse(new TextDecoder().decode(body)).sequence
+      const payload = JSON.parse(new TextDecoder().decode(body))
+      sequence = payload.sequence
+      publishedCommands.push(payload.command)
       calls.push('publish')
     },
     disconnect: async () => { calls.push('disconnect') },
@@ -800,8 +836,44 @@ function controllerFixture(renewAfter = 10000) {
   })
   const accept = (data = feedback(), sender = 'vehicle-car-test') =>
     controller.acceptFeedback(sender, true, new TextEncoder().encode(JSON.stringify(data)))
-  return { controller, connection, calls, feedback, accept, request }
+  return { controller, connection, calls, publishedCommands, feedback, accept, request }
 }
+
+test('neutral release waits for an all-zero revision after in-flight motion', async () => {
+  const f = controllerFixture()
+  const publish = f.connection.publish
+  let releaseMotion, motionStarted = false
+  f.connection.publish = async body => {
+    if (!motionStarted) {
+      motionStarted = true
+      await new Promise(resolve => { releaseMotion = resolve })
+    }
+    await publish(body)
+  }
+  try {
+    await f.controller.acquire()
+    f.accept()
+    f.controller.setCommand({ steering: 400, throttle: 800, brake: 0, direction: 1 })
+    const motion = f.controller.tick()
+    while (!motionStarted) await new Promise(resolve => setImmediate(resolve))
+    const neutralizing = f.controller.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs)
+    releaseMotion()
+    await motion
+    await neutralizing
+    assert.deepEqual(f.publishedCommands.at(-1), { steering: 0, throttle: 0, brake: 0, direction: 0 })
+  } finally { await f.controller.release() }
+})
+
+test('neutralization preserves an explicit emergency command', async () => {
+  const f = controllerFixture()
+  try {
+    await f.controller.acquire()
+    f.accept()
+    f.controller.setCommand({ steering: 0, throttle: 0, brake: 1000, direction: 0 })
+    await f.controller.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs)
+    assert.deepEqual(f.publishedCommands.at(-1), { steering: 0, throttle: 0, brake: 1000, direction: 0 })
+  } finally { await f.controller.release() }
+})
 
 test('simulation and Cyber feedback use the same signed control lifecycle', async () => {
   // Include the deployed Cyber service's APPLIED response as well as ACCEPTED.
@@ -1014,6 +1086,22 @@ test('controller requires bound feedback, signs commands, and fences switching t
   } finally { await f.controller.release() }
 })
 
+test('stalled RTC disconnect still releases control through Gateway', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = controllerFixture()
+  await f.controller.acquire()
+  f.accept()
+  f.connection.disconnect = () => new Promise(() => {})
+  const releasing = f.controller.release()
+  await new Promise(resolve => setImmediate(resolve))
+  context.mock.timers.tick(CONTROL_TIMING.rtcDisconnectBudgetMs)
+  await releasing
+  assert.ok(f.calls.includes('release'))
+  assert.match(f.controller.cleanupError, /disconnect failed/)
+  assert.equal(f.controller.state, 'closed')
+  context.mock.timers.reset()
+})
+
 test('release during in-flight connection cannot leave a connected controller behind', async () => {
   const f = controllerFixture()
   let connected
@@ -1054,7 +1142,7 @@ test('stale feedback and stalled publication latch control off without queuing c
   const second = controllerFixture()
   await second.controller.acquire()
   second.accept()
-  now += 751
+  now += CONTROL_TIMING.feedbackTimeoutMs + 1
   await second.controller.tick()
   assert.equal(second.controller.state, 'locked')
   assert.match(second.controller.error, /feedback timed out/)
@@ -1074,7 +1162,7 @@ test('control acquire timeout covers stalled response bodies', async (context) =
     const acquiring = controller.acquire()
     const rejection = assert.rejects(acquiring, /timed out/)
     while (!requested) await new Promise((resolve) => setImmediate(resolve))
-    context.mock.timers.tick(3000)
+    context.mock.timers.tick(CONTROL_TIMING.apiTimeoutMs)
     await rejection
     assert.equal(controller.state, 'locked')
     await controller.release()
@@ -1138,15 +1226,15 @@ test('sign completion enforces the exact send deadline without an intervening ti
     now += delay
     return signature
   })
-  for (delay of [249, 250, 300]) {
+  for (delay of [CONTROL_TIMING.sendBudgetMs - 1, CONTROL_TIMING.sendBudgetMs, CONTROL_TIMING.sendBudgetMs + 50]) {
     const f = controllerFixture()
     try {
       await f.controller.acquire()
       f.accept()
       await f.controller.tick()
-      assert.equal(f.calls.includes('publish'), delay < 250)
-      assert.equal(f.controller.state, delay < 250 ? 'ready' : 'locked')
-      if (delay >= 250) {
+      assert.equal(f.calls.includes('publish'), delay < CONTROL_TIMING.sendBudgetMs)
+      assert.equal(f.controller.state, delay < CONTROL_TIMING.sendBudgetMs ? 'ready' : 'locked')
+      if (delay >= CONTROL_TIMING.sendBudgetMs) {
         assert.match(f.controller.error, /stalled/)
         assert.ok(f.calls.includes('disconnect'))
       }
@@ -1163,7 +1251,7 @@ test('sign completion checks lease and feedback deadlines before enqueue', async
     now += delay
     return signature
   })
-  for (const [renewAfter, elapsed] of [[200, 400], [10000, 751]]) {
+  for (const [renewAfter, elapsed] of [[200, 400], [10000, CONTROL_TIMING.feedbackTimeoutMs + 1]]) {
     const f = controllerFixture(renewAfter)
     try {
       await f.controller.acquire()
@@ -1249,12 +1337,12 @@ test('repeated feedback cannot reset dispatch progress and a late ACK cannot rev
       await f.controller.acquire()
       f.accept()
       await f.controller.tick()
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < 5; i++) {
         now += 100
         f.accept({ ...f.feedback(), accepted_sequence: 0 })
         assert.equal(f.controller.state, 'ready')
       }
-      now += 50
+      now += CONTROL_TIMING.ackBudgetMs - 500 + 1
       if (lateAck) f.accept()
       else await f.controller.tick()
       assert.equal(f.controller.state, 'locked')

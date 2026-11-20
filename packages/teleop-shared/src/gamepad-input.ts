@@ -1,5 +1,6 @@
 import {ControlInput, isEditableTarget} from './control-input.js';
 import type {VehicleAction} from './input-command.js';
+import {TELEOP_TIMING} from './control-timing.js';
 
 export const vehicleActionButtons = {
     parkButton: 'gear_park', neutralButton: 'gear_neutral', driveButton: 'gear_drive',
@@ -273,7 +274,7 @@ export function bindGamepadInput(monitor: GamepadInput, targetWindow: Window,
     const start = () => {
         if (timer !== undefined) return;
         poll();
-        timer = setInterval(poll, 16);
+        timer = setInterval(poll, TELEOP_TIMING.gamepadPollMs);
     };
     const stop = () => {
         if (timer !== undefined) clearInterval(timer);

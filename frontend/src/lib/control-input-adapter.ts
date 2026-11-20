@@ -36,7 +36,7 @@ export function toV2ControlCommand(input: InputCommand): ControlCommand {
   return controlCommandSchema.parse({
     steering: action === 'left' ? -1000 : action === 'right' ? 1000 : 0,
     throttle: action === 'forward' || action === 'reverse' ? 1000 : 0,
-    brake: action === 'stop' || action === 'emergency_stop' ? 1000 : 0,
+    brake: action === 'emergency_stop' ? 1000 : 0,
     direction: action === 'forward' ? 1 : action === 'reverse' ? -1 : 0,
   })
 }
