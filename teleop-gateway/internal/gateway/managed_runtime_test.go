@@ -927,6 +927,15 @@ func TestManagedRuntimePostgresViewingAndV2ControlTokens(t *testing.T) {
 		}
 	}
 	assertTrackedToken(viewing.Token, "observer-"+viewing.ViewingSessionID, false)
+	viewingRoot := "/api/vehicles/car-one/viewing/" + viewing.ViewingSessionID
+	w = f.request(t, "POST", viewingRoot+"/token", "viewer", "", "", 200)
+	var refreshed struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	assertTrackedToken(refreshed.Token, "observer-"+viewing.ViewingSessionID, false)
 	t.Setenv("SIMULATED_CONTROL_VEHICLES_JSON", `["car-one"]`)
 	w = f.request(t, "POST", "/api/vehicles/car-one/control/acquire", "operator", "",
 		`{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","protocol_version":2,"client_instance_id":"browser-one"}`, 200)
@@ -940,6 +949,7 @@ func TestManagedRuntimePostgresViewingAndV2ControlTokens(t *testing.T) {
 	}
 	f.request(t, "POST", "/api/control/"+control.Session.SessionID+"/renew", "operator", "", "", 200)
 	f.runtime.maintenance = true
+	f.request(t, "POST", viewingRoot+"/token", "viewer", "", "", 503)
 	f.request(t, "POST", "/api/control/"+control.Session.SessionID+"/renew", "operator", "", "", 503)
 	f.request(t, "POST", "/api/vehicles/car-one/viewing/"+viewing.ViewingSessionID+"/renew", "viewer", "", "", 503)
 	f.request(t, "POST", "/api/control/"+control.Session.SessionID+"/release", "operator", "", "", 202)

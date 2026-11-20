@@ -20,18 +20,23 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
   vehicleId: string; bearer: string; onBusyChange: (busy: boolean) => void; onClose: () => void; observeOnly: boolean
   row: OverviewVehicle; onMonitor: () => void; controlDenied: boolean
 }) {
-  const cameras = useDrivingCameras(vehicleId, bearer)
+  const cameras = useDrivingCameras(vehicleId, bearer, true)
   const [frames, setFrames] = useState<Partial<Record<FrontCamera, CameraFeedTrack>>>({})
   const [busy, setBusy] = useState(false)
+  const { reportFrame } = cameras
   const onFrame = useCallback((name: FrontCamera, live: boolean, track?: CameraFeedTrack) => {
+    reportFrame(name, live, track)
     setFrames(previous => {
       if (!live && previous[name] !== track) return previous
       const current = live ? track : undefined
       return previous[name] === current ? previous : { ...previous, [name]: current }
     })
-  }, [])
+  }, [reportFrame])
   const onBusy = useCallback((value: boolean) => { setBusy(value); onBusyChange(value) }, [onBusyChange])
   const onIntent = useCallback(() => {}, [])
+  const liveCount = (['left', 'center', 'right'] as const).filter(
+    name => Boolean(cameras.tracks[name]) && frames[name] === cameras.tracks[name],
+  ).length
   const videoReady = cameras.connected && threeCamerasReady(Object.fromEntries(
     (['left', 'center', 'right'] as const).map(name => [name, Boolean(cameras.tracks[name]) && frames[name] === cameras.tracks[name]]),
   ))
@@ -47,8 +52,8 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
     <TeleopWorkbench vehicleId={vehicleId} row={row} gear={['P', 'R', 'N', 'D'].includes(row.gear) ? row.gear as 'P' | 'R' | 'N' | 'D' : '—'}
       networkQuality={null} speedKph={row.speed ?? undefined} batteryPercent={row.battery ?? undefined}
       runModeLabel={row.modeLabel} locationLabel={row.locationReason} authenticated busy={busy} observeOnly={observeOnly}
-      onBack={onClose} onMonitor={onMonitor} videoStatus={`${cameras.connected ? '已连接' : '未连接 / 正在连接'} · 三路：${videoReady ? '正在出帧' : '未就绪'}`}
-      cameraView={<ThreeCameraView vehicleId={vehicleId} tracks={cameras.tracks} onFrame={onFrame} />}
+      onBack={onClose} onMonitor={onMonitor} videoStatus={`${cameras.error ? '监看已结束' : cameras.recovering ? '正在恢复监看' : cameras.connected ? '已连接' : '未连接 / 正在连接'} · 三路：${videoReady ? '正在出帧' : `${liveCount}/3 路出帧`}`}
+      cameraView={<ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} failedCameras={cameras.failedCameras} requireFrameCallback onFrame={onFrame} />}
       controlPanel={!observeOnly
       ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={videoReady} onBusyChange={onBusy} onIntent={onIntent} />
       : <div className="space-y-2 text-xs text-amber-200">
@@ -62,14 +67,27 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
 }
 
 function MonitorCameraFeed({ vehicleId, bearer, onStop }: { vehicleId: string; bearer: string; onStop: () => void }) {
-  const cameras = useDrivingCameras(vehicleId, bearer)
+  const cameras = useDrivingCameras(vehicleId, bearer, true)
+  const [frames, setFrames] = useState<Partial<Record<FrontCamera, CameraFeedTrack>>>({})
+  const { reportFrame } = cameras
+  const onFrame = useCallback((name: FrontCamera, live: boolean, track?: CameraFeedTrack) => {
+    reportFrame(name, live, track)
+    setFrames(previous => {
+      if (!live && previous[name] !== track) return previous
+      const current = live ? track : undefined
+      return previous[name] === current ? previous : { ...previous, [name]: current }
+    })
+  }, [reportFrame])
+  const liveCount = (['left', 'center', 'right'] as const).filter(
+    name => Boolean(cameras.tracks[name]) && frames[name] === cameras.tracks[name],
+  ).length
   return <div className="space-y-2 p-3">
     <div className="flex items-center justify-between text-xs">
-      <span>{cameras.connected ? '监看已连接' : '正在连接监看…'}</span>
-      <button type="button" onClick={onStop} className="text-sky-200">停止监看</button>
+      <span role="status">{cameras.error ? '监看已结束' : cameras.recovering ? `正在恢复监看（${liveCount}/3 路出帧）…` : cameras.connected ? `监看已连接（${liveCount}/3 路出帧）` : '正在连接监看…'}</span>
+      <button type="button" onClick={onStop} className="text-sky-200">{cameras.error ? '返回并重新申请' : '停止监看'}</button>
     </div>
     {cameras.error && <p role="alert" className="text-xs text-red-300">{cameras.error}</p>}
-    <ThreeCameraView vehicleId={vehicleId} tracks={cameras.tracks} />
+    <ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} failedCameras={cameras.failedCameras} onFrame={onFrame} />
   </div>
 }
 

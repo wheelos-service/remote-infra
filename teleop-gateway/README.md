@@ -225,6 +225,7 @@ an authority for the new demand model. Do not mix the two lifecycles.
 | --- | --- | --- |
 | POST | `/api/vehicles/{vehicle_id}/viewing/acquire` | Create one independently expiring viewer |
 | POST | `/api/vehicles/{vehicle_id}/viewing/{viewing_session_id}/renew` | Extend this viewer only |
+| POST | `/api/vehicles/{vehicle_id}/viewing/{viewing_session_id}/token` | Issue a join token without extending an active lease |
 | POST | `/api/vehicles/{vehicle_id}/viewing/{viewing_session_id}/release` | Idempotently release this viewer |
 | GET | `/api/vehicles/{vehicle_id}/media-demand` | Authenticated device-self demand synchronization |
 
@@ -239,6 +240,10 @@ already-gone lease is retried; a known foreign owner returns `403`.
 Acquire returns `vehicle_id`, `viewing_session_id`, `expires_at_ms`,
 `server_time_ms`, `renew_after_ms` and a read-only `token`. Renew returns the same
 fields without a token. The lease lasts 30 seconds; renew after 10 seconds.
+`POST /api/vehicles/{vehicle_id}/viewing/{viewing_session_id}/token` takes an
+empty body, rechecks observe ACL and active lease ownership, and returns the
+acquire response shape with a fresh 30-second initial join JWT **without**
+renewing the lease. A missing, expired or released lease returns `409`.
 The token's identity is `observer-<viewing_session_id>`, not the legacy
 `operator-<operator_id>`. Distinct instances cannot evict each other through an
 identical observer identity. Controller identity/signing behavior is unchanged.
@@ -255,9 +260,9 @@ expired request records remain for up to 24 hours to prevent delayed retries
 from reviving them; idempotency does not extend beyond that retention window.
 
 Each registered vehicle's demand has a persistent random `epoch` and increasing
-`revision`. Reads do not increment the revision unless effective membership or
-control demand changed; successful lease mutations do. Renewed control TTL may
-change the validity deadline without changing the revision. The device must
+`revision`. Creation, effective release/expiry, and changes in control demand
+advance the revision. Viewer and control renewal can change the validity
+deadline without changing the revision. The device must
 accept newer validity on an equal revision, reject lower revisions in the same
 epoch, and invalidate its previous authorization on an epoch change.
 Responses expire after **at most 5 seconds**, clipped to the latest contributing
@@ -277,11 +282,27 @@ Cluster hash-slot compatible). Persistent epoch/revision keys must not be
 selectively cleared while active devices retain old demand. Apply deployment
 request-rate limits in addition to the active-viewer cap and 24-hour record TTL.
 
-The browser disconnects on renewal failure and releases with its original
-credentials. This lease is a **media demand**, not an SFU access-revocation
+Read-only monitoring retries transient renew failures only while another
+request fits before its monotonic lease deadline (with a 500 ms margin). It
+keeps renewing independently of the Room. On media interruption the SDK gets
+the first chance to recover; a terminal disconnect permits bounded Room rebuilds
+(with transient token-refresh backoff retries) inside the original 15-second
+recovery window. Monitoring resumes after at least one current camera shows
+playback progress, not merely when signaling reconnects. Playback progress is
+not proof of capture freshness or driving readiness. At expiry, on terminal
+renewal failure or on recovery timeout, the browser stops monitoring and
+releases with its original credentials. In the driving workbench, camera recovery
+keeps the video display available while any loss of video readiness immediately
+locks an active control session; control `RoomEvent.Reconnecting` disarms local
+inputs while `ControlSessionClient` deadlines and vehicle feedback remain
+authoritative, and `vehicle.control.v2` sends over Lossy DataChannel packets.
+
+This lease is a **media demand**, not an SFU access-revocation
 mechanism: previously issued observer JWTs have their own lifetime; other
-viewers/control may keep the Room alive. Immediate per-viewer SFU removal/token
-revocation is not implemented. The C++ service now implements demand polling and
+viewers/control may keep the Room alive. The join JWT lifetime does not bound
+an established subscription or LiveKit's server-issued reconnect credentials.
+Immediate per-viewer SFU removal/token revocation is not implemented.
+The C++ service now implements demand polling and
 an optional real-SDK media worker with an explicitly synthetic camera. Real
 camera deployment and production resource/bandwidth evidence remain unverified.
 No unattended-zero-video deployment claim is made, and lease release does not

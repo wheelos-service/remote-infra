@@ -123,7 +123,7 @@ export class ControlInput {
         this.gamepadEnabled = false;
         this.emergencyLatched = false;
         this.available = available;
-        this.report(available ? '键盘控制未启用' : '控制不可用');
+        this.report(available ? '控制已就绪，请启用手柄' : '控制不可用');
     }
 
     setKeyboardEnabled(enabled: boolean): void {
@@ -265,11 +265,23 @@ export type InputInterruption = 'window_blur' | 'window_focus' | 'page_hidden' |
 
 export function bindKeyboardInput(input: ControlInput, targetWindow: Window, targetDocument: Document,
     keyboardToggle?: EventTarget, gamepadToggle?: EventTarget,
-    onInterruption?: (event: InputInterruption) => void): () => void {
+    onInterruption?: (event: InputInterruption) => void,
+    onEmergencyStop?: () => void): () => void {
     const keydown = (event: KeyboardEvent) => {
-        if (!input.isKeyboardEnabled || !isControlKey(event.code)) return;
+        if (!isControlKey(event.code)) return;
         if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing ||
             targetDocument.hidden || !targetDocument.hasFocus() || isEditableTarget(event.target)) return;
+        if (event.code === 'Space') {
+            if (input.isKeyboardEnabled) {
+                event.preventDefault();
+                input.keyDown(event.code, event.repeat);
+            } else if (!event.repeat && onEmergencyStop) {
+                event.preventDefault();
+                onEmergencyStop();
+            }
+            return;
+        }
+        if (!input.isKeyboardEnabled) return;
         event.preventDefault();
         input.keyDown(event.code, event.repeat);
     };

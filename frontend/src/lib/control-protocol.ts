@@ -3,9 +3,9 @@ import { z } from 'zod'
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/)
 const integer = z.number().int().safe()
 export const controlCommandSchema = z.object({
-  steering: integer.min(-1000).max(1000),
-  throttle: integer.min(0).max(1000),
-  brake: integer.min(0).max(1000),
+  steering: integer.min(-100).max(100),
+  throttle: integer.min(0).max(100),
+  brake: integer.min(0).max(100),
   direction: z.union([z.literal(-1), z.literal(0), z.literal(1)]),
 }).strict().refine((value) => !(value.throttle && value.brake), 'Conflicting pedals')
 export type ControlCommand = z.infer<typeof controlCommandSchema>
@@ -19,7 +19,7 @@ export const controlFeedbackSchema = z.object({
   receiver_instance_id: z.string().regex(/^[a-f0-9]{32}$/),
   revision: integer.nonnegative(),
   accepted_sequence: integer.nonnegative(),
-  status: z.enum(['DISABLED', 'READY', 'ACCEPTED', 'APPLIED', 'LOCKED']),
+  status: z.enum(['DISABLED', 'READY', 'ACCEPTED', 'APPLIED', 'PAUSED', 'LOCKED']),
   reason: z.string().max(64),
   last_rejection: z.string().max(64),
   simulation: z.boolean(),

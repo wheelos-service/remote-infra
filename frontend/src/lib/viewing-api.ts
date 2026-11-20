@@ -3,6 +3,9 @@ import { teleopConfig } from './teleop-config'
 import { organizationHeaders, requestOrganization } from './organization-context'
 
 export const VIEWING_REQUEST_TIMEOUT_MS = 5_000
+export class ViewingRequestError extends Error {
+  constructor(message: string, readonly retryable: boolean, readonly status = 0) { super(message) }
+}
 const gatewayUrl = teleopConfig.gatewayUrl.replace(/\/$/, '')
 const timestamp = z.number().int().safe().positive()
 const vehicleIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/)
@@ -53,17 +56,31 @@ async function post(path: string, bearer: string, body?: object, keepalive = fal
           signal: controller.signal,
           cache: 'no-store',
           keepalive,
+        }).catch((cause: unknown) => {
+          if (!(cause instanceof TypeError)) throw cause
+          throw new ViewingRequestError('监看网络暂不可用', true)
         })
         if (!response.ok) {
-          throw new Error(response.status === 401
+          let message = response.status === 401
             ? '监看认证已失效，请重新登录'
-            : `监看租约请求失败 (${response.status})`)
+            : response.status === 409
+              ? '监看租约已失效，请重新申请'
+              : `监看租约请求失败 (${response.status})`
+          let retryable = response.status === 429 || [500, 502, 503, 504].includes(response.status)
+          if (response.status === 503 && typeof response.text === 'function') {
+            const detail = (await response.text().catch(() => '')).slice(0, 512)
+            if (detail.includes('MANAGED_MAINTENANCE_REQUIRED') || detail.includes('maintenance')) {
+              message = '平台处于维护排空窗口，监看暂不可用 (503)'
+              retryable = false
+            }
+          }
+          throw new ViewingRequestError(message, retryable, response.status)
         }
         return response.status === 204 ? undefined : await response.json()
       })(),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
-          reject(new Error('监看租约请求超时；已停止监看，请重试'))
+          reject(new ViewingRequestError('监看租约请求超时', true))
           controller.abort()
         }, VIEWING_REQUEST_TIMEOUT_MS)
       }),
@@ -147,5 +164,20 @@ export async function renewViewing(
     return withDeadline(viewingLeaseSchema.parse(raw), vehicleId, startedAt, sessionId)
   } catch {
     throw new Error('续期响应身份或有效期限无效')
+  }
+}
+
+export async function refreshViewingToken(
+  vehicleId: string,
+  sessionId: string,
+  bearer: string,
+  organizationId = requestOrganization(),
+): Promise<ViewingAcquire> {
+  const startedAt = performance.now()
+  const raw = await post(`${path(vehicleId, sessionId)}/token`, bearer, undefined, false, organizationId)
+  try {
+    return withDeadline(viewingAcquireSchema.parse(raw), vehicleId, startedAt, sessionId)
+  } catch {
+    throw new Error('监看凭证响应身份或有效期限无效')
   }
 }

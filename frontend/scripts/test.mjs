@@ -116,6 +116,12 @@ test('root OAuth callbacks safely restore unified platform routes', () => {
   assert.equal(authCallbackRoute('', '/teleop'), undefined)
 })
 
+test('teleopConfig defaults to throttle mode and 5 m/s limit', async () => {
+  const { teleopConfig } = await loadBundle('teleop-config')
+  assert.equal(teleopConfig.controlLongitudinalMode, 'throttle')
+  assert.equal(teleopConfig.maxRemoteSpeedMps, 5)
+})
+
 test('operations navigation round-trips vehicle/filter context and rejects invalid routes', () => {
   const state = { ...navigation.defaultNavigation, page: 'alerts', vehicle: 'sim-004',
     alertSection: 'work', query: '告警 & event=1', state: 'all', selectedVehicle: 'sim-004',
@@ -152,7 +158,11 @@ test('control interruption events select one centralized safety strategy', () =>
   assert.equal(controlSafety.controlSafetyDecision('page_hidden').recovery, 'manual-rearm')
   assert.equal(controlSafety.controlSafetyDecision('page_visible').strategy, 'observe')
   assert.equal(controlSafety.controlSafetyDecision('page_unload').strategy, 'release')
-  for (const event of ['media_lost', 'rtc_disconnected', 'rtc_reconnecting', 'feedback_timeout', 'control_fault']) {
+  assert.equal(controlSafety.controlSafetyDecision('rtc_reconnecting').strategy, 'disarm')
+  assert.equal(controlSafety.controlSafetyDecision('rtc_reconnecting').retainSession, true)
+  assert.equal(controlSafety.controlSafetyDecision('rtc_reconnected').strategy, 'observe')
+  assert.equal(controlSafety.controlSafetyDecision('rtc_reconnected').retainSession, true)
+  for (const event of ['media_lost', 'rtc_disconnected', 'feedback_timeout', 'control_fault']) {
     assert.equal(controlSafety.controlSafetyDecision(event).strategy, 'fault')
   }
   const actions = []
@@ -518,11 +528,11 @@ test('passive vehicle diagnosis prioritizes faults and treats missing, stale and
 test('shared input converts normalized intent to v2 integers without enabling legacy actions', () => {
   const convert = controlInput.toV2ControlCommand
   assert.deepEqual(convert({ mode: 'low_level', steering: -0.5, throttle: 0.125, brake: 0, direction: -1 }),
-    { steering: -500, throttle: 125, brake: 0, direction: -1 })
+    { steering: -50, throttle: 13, brake: 0, direction: -1 })
   assert.deepEqual(convert({ mode: 'high_level', action: 'stop' }),
     { steering: 0, throttle: 0, brake: 0, direction: 0 })
   assert.deepEqual(convert({ mode: 'high_level', action: 'emergency_stop' }),
-    { steering: 0, throttle: 0, brake: 1000, direction: 0 })
+    { steering: 0, throttle: 0, brake: 100, direction: 0 })
   assert.equal(convert({ mode: 'high_level', action: 'reverse' }).direction, -1)
   assert.equal(convert({ mode: 'high_level', action: 'left' }).throttle, 0)
   for (const action of ['gear_drive', 'auto_enter', 'auto_exit']) {
@@ -583,7 +593,7 @@ test('shared gamepad uses the v2 adapter and release neutralizes propulsion', as
     pad.axes[3] = -0.575
     monitor.poll([pad], true)
     await flush()
-    assert.deepEqual(sent.at(-1), { steering: 500, throttle: 500, brake: 0, direction: 1 })
+    assert.deepEqual(sent.at(-1), { steering: 50, throttle: 50, brake: 0, direction: 1 })
     pad.buttons[4].pressed = false
     monitor.poll([pad], true)
     await flush()
@@ -788,11 +798,12 @@ test('v2 canonical signing rejects float and conflicting pedal commands', () => 
     version: 2, type: 'control', vehicle_id: 'car-test', session_id: 'session-test',
     client_instance_id: 'browser-test', receiver_instance_id: 'a'.repeat(32),
     revision: 1, sequence: 1, timestamp_ms: 1700000000000,
-    command: { steering: -1000, throttle: 1000, brake: 0, direction: -1 },
+    command: { steering: -100, throttle: 100, brake: 0, direction: -1 },
   }
   assert.equal(new TextDecoder().decode(controlProtocol.controlSignBytes(payload)),
-    `[2,"control","car-test","session-test","browser-test","${'a'.repeat(32)}",1,1,1700000000000,-1000,1000,0,-1]`)
+    `[2,"control","car-test","session-test","browser-test","${'a'.repeat(32)}",1,1,1700000000000,-100,100,0,-1]`)
   assert.throws(() => controlProtocol.controlSignBytes({ ...payload, command: { ...payload.command, throttle: 0.1 } }))
+  assert.throws(() => controlProtocol.controlSignBytes({ ...payload, command: { ...payload.command, throttle: 101 } }))
   assert.throws(() => controlProtocol.controlSignBytes({ ...payload, command: { ...payload.command, brake: 1 } }))
 })
 
@@ -853,7 +864,7 @@ test('neutral release waits for an all-zero revision after in-flight motion', as
   try {
     await f.controller.acquire()
     f.accept()
-    f.controller.setCommand({ steering: 400, throttle: 800, brake: 0, direction: 1 })
+    f.controller.setCommand({ steering: 40, throttle: 80, brake: 0, direction: 1 })
     const motion = f.controller.tick()
     while (!motionStarted) await new Promise(resolve => setImmediate(resolve))
     const neutralizing = f.controller.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs)
@@ -869,9 +880,9 @@ test('neutralization preserves an explicit emergency command', async () => {
   try {
     await f.controller.acquire()
     f.accept()
-    f.controller.setCommand({ steering: 0, throttle: 0, brake: 1000, direction: 0 })
+    f.controller.setCommand({ steering: 0, throttle: 0, brake: 100, direction: 0 })
     await f.controller.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs)
-    assert.deepEqual(f.publishedCommands.at(-1), { steering: 0, throttle: 0, brake: 1000, direction: 0 })
+    assert.deepEqual(f.publishedCommands.at(-1), { steering: 0, throttle: 0, brake: 100, direction: 0 })
   } finally { await f.controller.release() }
 })
 
@@ -1025,6 +1036,47 @@ test('camera feed readiness needs three advancing decoded streams and clears on 
     callback()
     assert.equal(cameraFeed.threeCamerasReady(frames), false, 'late callback cannot restore detached feed')
   } finally { stop(); context.mock.timers.reset() }
+})
+
+test('bindCameraFeed requires frame callback when requested and ignores frozen rtpTimestamp metadata', async (context) => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  context.mock.timers.enable({ apis: ['setInterval'] })
+  const listeners = new Map()
+  const videoNoCallback = {
+    readyState: 4,
+    addEventListener: (name, fn) => listeners.set(name, fn),
+    removeEventListener: name => listeners.delete(name),
+  }
+  const fallbackStates = []
+  const stopNoCb = cameraFeed.bindCameraFeed({ attach: () => {}, detach: () => {} }, videoNoCallback,
+    live => fallbackStates.push(live), { requireFrameCallback: true })
+  try {
+    listeners.get('timeupdate')?.()
+    assert.deepEqual(fallbackStates, [])
+  } finally { stopNoCb() }
+
+  let callback
+  const videoWithMeta = {
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    requestVideoFrameCallback: fn => { callback = fn; return 1 },
+    cancelVideoFrameCallback: () => {},
+  }
+  const metaStates = []
+  const stopMeta = cameraFeed.bindCameraFeed({ attach: () => {}, detach: () => {} }, videoWithMeta,
+    live => metaStates.push(live), { requireFrameCallback: true })
+  try {
+    callback(now, { rtpTimestamp: 100, presentedFrames: 1 })
+    assert.deepEqual(metaStates, [true])
+    now += cameraFeed.CAMERA_FRAME_TIMEOUT_MS - 100
+    callback(now, { rtpTimestamp: 100, presentedFrames: 1 })
+    now += 150
+    context.mock.timers.tick(100)
+    assert.deepEqual(metaStates, [true, false], 'frozen rtpTimestamp must not extend frame liveness')
+    callback(now, { rtpTimestamp: 101, presentedFrames: 2 })
+    assert.deepEqual(metaStates, [true, false, true])
+  } finally { stopMeta(); context.mock.timers.reset() }
 })
 
 test('video loss fences v2 control and restored frames cannot rearm the session', async () => {
@@ -1349,6 +1401,195 @@ test('repeated feedback cannot reset dispatch progress and a late ACK cannot rev
       assert.match(f.controller.error, /acknowledgement progress timed out/)
     } finally { await f.controller.release() }
   }
+})
+
+test('controller calibrates signed command timestamps from Gateway server_time_ms and falls back to local clock when omitted', async context => {
+  let now = 1_000
+  let wall = 1_700_000_000_500 // Browser PC clock is 500ms ahead of server/vehicle clock.
+  context.mock.method(performance, 'now', () => now)
+  context.mock.method(Date, 'now', () => wall)
+  const published = []
+  let instanceId = ''
+  const session = {
+    session_id: 'e0dfe6c0-63ee-416d-81b1-689bf10c785d', vehicle_id: 'car-test',
+    protocol_version: 2, sender_identity: 'control-e0dfe6c0-63ee-416d-81b1-689bf10c785d',
+    status: 'ACTIVE',
+  }
+  const controller = new ControlSessionClient('car-test', 'http://localhost', 'test-bearer',
+    {
+      connect: async () => {},
+      publish: async (body) => { published.push(JSON.parse(new TextDecoder().decode(body))) },
+      disconnect: async () => {},
+    }, () => {},
+    async (url, options) => {
+      if (url.endsWith('/acquire')) {
+        instanceId = JSON.parse(options.body).client_instance_id
+        now += 40
+        wall += 40
+        return Response.json({
+          session: { ...session, client_instance_id: instanceId },
+          token: 'test-token', renew_after_ms: 10_000, server_time_ms: 1_700_000_000_020,
+        })
+      }
+      if (url.endsWith('/release')) return Response.json({ state: 'PENDING' }, { status: 202 })
+      return Response.json({ vehicle_id: 'car-test', session_id: session.session_id, state: 'CONFIRMED', vehicle_handover_confirmed: true })
+    })
+  try {
+    await controller.acquire()
+    assert.equal(controller.clockOffset, -500)
+    controller.acceptFeedback('vehicle-car-test', true, new TextEncoder().encode(JSON.stringify({
+      version: 2, type: 'control.feedback', vehicle_id: 'car-test', session_id: session.session_id,
+      receiver_instance_id: 'a'.repeat(32), revision: 1, accepted_sequence: 0,
+      status: 'READY', reason: 'awaiting_command', last_rejection: '', simulation: true, command: null,
+    })))
+    assert.equal(controller.isEmergencyStop, false)
+    controller.setCommand({ steering: 0, throttle: 0, brake: 100, direction: 0 })
+    assert.equal(controller.isEmergencyStop, true)
+    await controller.tick()
+    assert.equal(published.length, 1)
+    assert.equal(published[0].timestamp_ms, wall - 500)
+  } finally { await controller.release() }
+})
+
+test('controller retries transient renewal failures before lease deadline and locks immediately on terminal 409', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  let instanceId = ''
+  let renewCalls = 0
+  let publishedSeq = 0
+  let mode = 'transient-then-ok'
+  const session = {
+    session_id: 'e0dfe6c0-63ee-416d-81b1-689bf10c785d', vehicle_id: 'car-test',
+    protocol_version: 2, sender_identity: 'control-e0dfe6c0-63ee-416d-81b1-689bf10c785d',
+    status: 'ACTIVE',
+  }
+  const controller = new ControlSessionClient('car-test', 'http://localhost', 'test-bearer',
+    {
+      connect: async () => {},
+      publish: async (body) => { publishedSeq = JSON.parse(new TextDecoder().decode(body)).sequence },
+      disconnect: async () => {},
+    }, () => {},
+    async (url, options) => {
+      if (url.endsWith('/acquire')) {
+        instanceId = JSON.parse(options.body).client_instance_id
+        return Response.json({ session: { ...session, client_instance_id: instanceId }, token: 'test-token', renew_after_ms: 5_000 })
+      }
+      if (url.endsWith('/renew')) {
+        renewCalls++
+        if (mode === 'transient-then-ok' && renewCalls === 1) return new Response(null, { status: 503 })
+        if (mode === 'terminal-409') return new Response(null, { status: 409 })
+        return Response.json({ session: { ...session, client_instance_id: instanceId }, renew_after_ms: 5_000 })
+      }
+      if (url.endsWith('/release')) return Response.json({ state: 'PENDING' }, { status: 202 })
+      return Response.json({ vehicle_id: 'car-test', session_id: session.session_id, state: 'CONFIRMED', vehicle_handover_confirmed: true })
+    })
+  const accept = () => controller.acceptFeedback('vehicle-car-test', true, new TextEncoder().encode(JSON.stringify({
+    version: 2, type: 'control.feedback', vehicle_id: 'car-test', session_id: session.session_id,
+    receiver_instance_id: 'a'.repeat(32), revision: 1, accepted_sequence: publishedSeq,
+    status: 'READY', reason: 'awaiting_command', last_rejection: '', simulation: true, command: null,
+  })))
+  const advanceWithFeedback = (ms) => {
+    for (let elapsed = 0; elapsed < ms; elapsed += 500) {
+      const step = Math.min(500, ms - elapsed)
+      now += step
+      accept()
+    }
+  }
+  try {
+    await controller.acquire()
+    accept()
+    advanceWithFeedback(5_000)
+    await controller.tick()
+    await flush()
+    assert.equal(renewCalls, 1)
+    assert.equal(controller.state, 'ready', 'transient 503 renewal error must retry before deadline')
+    advanceWithFeedback(500)
+    context.mock.timers.tick(500)
+    await flush()
+    assert.equal(renewCalls, 2)
+    assert.equal(controller.state, 'ready')
+    assert.equal(controller.diagnostics.findLast(event => event.event === 'renew')?.event, 'renew')
+
+    mode = 'terminal-409'
+    advanceWithFeedback(5_000)
+    await controller.tick()
+    await flush()
+    assert.equal(renewCalls, 3)
+    assert.equal(controller.state, 'locked', '409 must fail closed without retrying')
+    assert.equal(controller.diagnostics.findLast(event => event.event === 'fault')?.fault_code, 'renewal_failed')
+
+    // Policy 503 (maintenance / handover support required) must not retry during renew/acquire,
+    // and definitive HTTP rejections return to idle rather than stranding the operator in locked.
+    let policyCalls = 0
+    const policyController = new ControlSessionClient('car-test', 'http://localhost', 'test-bearer',
+      { connect: async () => {}, publish: async () => {}, disconnect: async () => {} }, () => {},
+      async () => {
+        policyCalls++
+        return new Response('managed native control unavailable: handover support required', { status: 503 })
+      })
+    await assert.rejects(policyController.acquire(), /受管实车控制暂未开放/)
+    assert.equal(policyCalls, 1)
+    assert.equal(policyController.state, 'idle', 'definitive HTTP 503 acquire rejection must stay idle')
+
+    // Transient 503 during acquire retries briefly and succeeds, or returns to idle if exhausted.
+    let transientCalls = 0
+    const retryAcquire = new ControlSessionClient('car-test', 'http://localhost', 'test-bearer',
+      { connect: async () => {}, publish: async () => {}, disconnect: async () => {} }, () => {},
+      async (url, options) => {
+        if (url.endsWith('/acquire')) {
+          transientCalls++
+          if (transientCalls === 1) return new Response('db busy', { status: 503 })
+          instanceId = JSON.parse(options.body).client_instance_id
+          return Response.json({ session: { ...session, client_instance_id: instanceId }, token: 'test-token', renew_after_ms: 5_000 })
+        }
+        if (url.endsWith('/release')) return Response.json({ state: 'PENDING' }, { status: 202 })
+        return Response.json({ vehicle_id: 'car-test', session_id: session.session_id, state: 'CONFIRMED', vehicle_handover_confirmed: true })
+      })
+    const acquiring = retryAcquire.acquire()
+    while (transientCalls === 0) await new Promise(resolve => setImmediate(resolve))
+    await flush()
+    context.mock.timers.tick(500)
+    await acquiring
+    assert.equal(transientCalls, 2)
+    assert.equal(retryAcquire.state, 'connecting')
+    await retryAcquire.release()
+  } finally { await controller.release(); context.mock.timers.reset() }
+})
+
+test('rtcReconnecting holds control session across transient <1.2s ICE reconnect and locks on timeout', async context => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  const f = controllerFixture()
+  try {
+    await f.controller.acquire()
+    f.accept()
+    f.controller.setCommand({ steering: 20, throttle: 30, brake: 0, direction: 1 })
+    await f.controller.tick()
+    now += 100
+    f.accept()
+    // Dispatch an in-flight command right before Reconnecting; its late Reliable ACK
+    // arriving after Reconnected must still be accepted cleanly.
+    await f.controller.tick()
+    f.controller.setRtcReconnecting(true)
+    now += 900
+    await f.controller.tick()
+    assert.equal(f.controller.state, 'ready')
+    f.accept({ ...f.feedback(), status: 'PAUSED', reason: 'command_paused', command: null })
+    assert.equal(f.controller.state, 'ready')
+    f.controller.setRtcReconnecting(false)
+    f.accept()
+    assert.equal(f.controller.state, 'ready')
+    await f.controller.tick()
+    assert.equal(f.controller.state, 'ready')
+    assert.deepEqual(f.publishedCommands.at(-1), { steering: 0, throttle: 0, brake: 0, direction: 0 })
+    now += 100
+    f.accept()
+    f.controller.setRtcReconnecting(true)
+    now += 1200
+    await f.controller.tick()
+    assert.equal(f.controller.state, 'locked')
+  } finally { await f.controller.release() }
 })
 
 test('timely cumulative ACKs retire dispatched commands and record application response time', async context => {
@@ -2049,6 +2290,22 @@ test('viewing timeout covers a stalled response body and renew/release requests'
   }
 })
 
+test('viewing classifies maintenance 503 as non-retryable while keeping transient 503 retryable', async () => {
+  const originalFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async () => new Response('{"code":"MANAGED_MAINTENANCE_REQUIRED"}', { status: 503 })
+    await assert.rejects(
+      viewing.renewViewing('fleet-1', sessionId, 'bearer'),
+      err => err instanceof viewing.ViewingRequestError && err.retryable === false && /维护/.test(err.message),
+    )
+    globalThis.fetch = async () => new Response('storage unavailable', { status: 503 })
+    await assert.rejects(
+      viewing.renewViewing('fleet-1', sessionId, 'bearer'),
+      err => err instanceof viewing.ViewingRequestError && err.retryable === true,
+    )
+  } finally { globalThis.fetch = originalFetch }
+})
+
 test('only the exact requested vehicle participant can provide video', () => {
   assert.equal(viewing.isVehicleVideoSender('vehicle-fleet-1', 'fleet-1'), true)
   for (const identity of ['vehicle-fleet-2', 'observer-' + sessionId, 'fleet-1', 'vehicle-fleet-1-extra', '', undefined]) {
@@ -2072,6 +2329,236 @@ test('renewal failure stops observing and releases with the captured bearer', as
     await flush()
     assert.equal(calls.released.length, 1)
   } finally { await lifecycle.stop(); context.mock.timers.reset() }
+})
+
+test('read-only viewing acquire retries transient 503 and stops immediately on maintenance 503', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  const originalFetch = globalThis.fetch
+  let acquireCalls = 0
+  const { options, calls } = lifecycleHarness({}, { onRecovering: () => {} })
+  const lifecycle = new ViewingLifecycle(options)
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/acquire')) {
+      acquireCalls++
+      if (acquireCalls === 1) return new Response('redis unavailable', { status: 503 })
+      return Response.json(viewingResponse)
+    }
+    return new Response(null, { status: 204 })
+  }
+  try {
+    const starting = lifecycle.start()
+    await flush()
+    assert.equal(acquireCalls, 1)
+    context.mock.timers.tick(500)
+    await starting
+    assert.equal(acquireCalls, 2)
+    assert.equal(calls.connected, 1)
+  } finally { await lifecycle.stop(); globalThis.fetch = originalFetch; context.mock.timers.reset() }
+
+  const maintenance = lifecycleHarness({}, { onRecovering: () => {} })
+  const lc2 = new ViewingLifecycle(maintenance.options)
+  let maintCalls = 0
+  globalThis.fetch = async () => {
+    maintCalls++
+    return new Response('{"code":"MANAGED_MAINTENANCE_REQUIRED"}', { status: 503 })
+  }
+  try {
+    await lc2.start()
+    assert.equal(maintCalls, 1)
+    assert.match(maintenance.calls.errors[0].message, /维护/)
+  } finally { await lc2.stop(); globalThis.fetch = originalFetch }
+})
+
+test('read-only viewing retries transient renewal without replacing the Room and stops on a gone lease', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000
+  context.mock.method(performance, 'now', () => now)
+  let renewed = 0
+  let released = 0
+  const { options, calls } = lifecycleHarness({}, { onRecovering: () => {} })
+  const lifecycle = new ViewingLifecycle(options)
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (url.endsWith('/acquire')) return Response.json(viewingResponse)
+    if (url.endsWith('/release')) {
+      released++
+      return new Response(null, { status: 204 })
+    }
+    renewed++
+    if (renewed !== 2) return new Response(null, { status: renewed === 1 ? 503 : 409 })
+    const { token, ...lease } = viewingResponse
+    return Response.json({
+      ...lease, expires_at_ms: lease.expires_at_ms + 10_500, server_time_ms: lease.server_time_ms + 10_500,
+    })
+  }
+  const advance = async (ms) => {
+    now += ms
+    context.mock.timers.tick(ms)
+    await flush()
+  }
+  try {
+    await lifecycle.start()
+    await advance(10_000)
+    assert.equal(renewed, 1)
+    assert.equal(lifecycle.active, true)
+    await advance(500)
+    assert.equal(renewed, 2)
+    assert.equal(calls.created, 1)
+    await advance(10_000)
+    assert.equal(renewed, 3)
+    assert.equal(lifecycle.active, false)
+    assert.equal(released, 1)
+    assert.match(calls.errors[0].message, /租约已失效/)
+  } finally { await lifecycle.stop(); globalThis.fetch = originalFetch }
+})
+
+test('SDK recovery keeps the Room and lease until a current frame renders; terminal disconnect rebuilds once', async () => {
+  const events = []
+  const tokens = []
+  const refreshed = []
+  const { lifecycle, calls, lease } = lifecycleHarness({
+    refreshToken: async (...args) => {
+      refreshed.push(args)
+      return { ...lease, token: 'fresh-join-token' }
+    },
+  }, {
+    onRecovering: () => {},
+    createObserver(token, roomEvents) {
+      events.push(roomEvents)
+      tokens.push(token)
+      return { connect: async () => {}, disconnect: async () => { calls.disconnected++ } }
+    },
+  })
+  try {
+    await lifecycle.start()
+    events[0].reconnecting()
+    lifecycle.frameRendered()
+    assert.equal(calls.connected, 1, 'frames cannot recover a disconnected transport')
+    events[0].reconnected()
+    assert.equal(calls.connected, 1, 'a connected transport does not prove frame delivery')
+    lifecycle.frameRendered()
+    assert.equal(calls.connected, 2)
+    assert.equal(events.length, 1, 'SDK recovery must not replace the Room')
+    assert.equal(refreshed.length, 0)
+
+    events[0].disconnected()
+    await flush()
+    assert.deepEqual(refreshed, [['fleet-1', sessionId, 'original-bearer']])
+    assert.deepEqual(tokens, [viewingResponse.token, 'fresh-join-token'])
+    assert.equal(events[0].current(), false)
+    events[0].disconnected()
+    events[0].reconnecting()
+    lifecycle.frameRendered()
+    assert.equal(calls.connected, 3)
+    assert.equal(calls.released.length, 0)
+    assert.equal(calls.disconnected, 1)
+  } finally { await lifecycle.stop() }
+  assert.equal(calls.released.length, 1)
+})
+
+test('a late token response cannot rebuild after the original media recovery deadline', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000
+  context.mock.method(performance, 'now', () => now)
+  const pending = deferred()
+  const rooms = []
+  const { lifecycle, calls, lease } = lifecycleHarness({ refreshToken: () => pending.promise }, {
+    onRecovering: () => {},
+    createObserver(_token, events) {
+      rooms.push(events)
+      return { connect: async () => {}, disconnect: async () => {} }
+    },
+  })
+  try {
+    await lifecycle.start()
+    rooms[0].reconnecting()
+    now += 10_000
+    context.mock.timers.tick(10_000)
+    await flush()
+    assert.equal(calls.renewed.length, 1, 'HTTP renewal continues during media recovery')
+    rooms[0].disconnected()
+    now += 5_000
+    context.mock.timers.tick(5_000)
+    pending.resolve(lease)
+    await flush()
+    assert.equal(rooms.length, 1)
+    assert.equal(calls.released.length, 1)
+    assert.match(calls.errors[0].message, /恢复超时/)
+  } finally { await lifecycle.stop() }
+})
+
+test('recovery retries transient token refresh and permits bounded Room rebuilds inside the 15s window', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000
+  context.mock.method(performance, 'now', () => now)
+  let tokenAttempt = 0
+  const rooms = []
+  const { options, calls } = lifecycleHarness({}, {
+    onRecovering: () => {},
+    createObserver(_token, events) {
+      rooms.push(events)
+      return { connect: async () => {}, disconnect: async () => { calls.disconnected++ } }
+    },
+  })
+  const lifecycle = new ViewingLifecycle(options)
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith('/acquire')) return Response.json(viewingResponse)
+    if (String(url).endsWith('/release')) return new Response(null, { status: 204 })
+    if (String(url).endsWith('/token')) {
+      tokenAttempt++
+      if (tokenAttempt === 1) return new Response(null, { status: 503 })
+      return Response.json({ ...viewingResponse, token: `token-${tokenAttempt}` })
+    }
+    const { token, ...lease } = viewingResponse
+    return Response.json({
+      ...lease, expires_at_ms: lease.expires_at_ms + 10_000, server_time_ms: lease.server_time_ms + 10_000,
+    })
+  }
+  const advance = async (ms) => {
+    now += ms
+    context.mock.timers.tick(ms)
+    await flush()
+  }
+  try {
+    await lifecycle.start()
+    rooms[0].disconnected()
+    await flush()
+    assert.equal(tokenAttempt, 1)
+    assert.equal(rooms.length, 1)
+    await advance(500)
+    assert.equal(tokenAttempt, 2)
+    assert.equal(rooms.length, 2, 'retryable 503 during token refresh must retry inside the recovery window')
+    // Second terminal disconnect triggers a second bounded rebuild after backoff.
+    rooms[1].disconnected()
+    await flush()
+    assert.equal(rooms.length, 2)
+    await advance(500)
+    assert.equal(rooms.length, 3)
+    lifecycle.frameRendered()
+    assert.equal(calls.connected, 2)
+    assert.equal(calls.errors.length, 0)
+  } finally { await lifecycle.stop(); globalThis.fetch = originalFetch; context.mock.timers.reset() }
+})
+
+test('a suspended read-only viewer does not start an HTTP renew that no longer fits before expiry', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000
+  context.mock.method(performance, 'now', () => now)
+  const { lifecycle, calls } = lifecycleHarness({}, { onRecovering: () => {} })
+  try {
+    await lifecycle.start()
+    now = 27_000
+    context.mock.timers.tick(10_000)
+    await flush()
+    assert.equal(calls.renewed.length, 0)
+    assert.equal(lifecycle.active, true)
+    now = 31_000
+    context.mock.timers.tick(20_000)
+    await flush()
+    assert.equal(lifecycle.active, false)
+    assert.equal(calls.released.length, 1)
+  } finally { await lifecycle.stop() }
 })
 
 test('stale or regressed renewal timestamps fail closed before extending the local deadline', async (context) => {

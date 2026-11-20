@@ -50,6 +50,9 @@ func TestDeviceControlContextAndSimulationFence(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &acquired); err != nil {
 		t.Fatal(err)
 	}
+	if acquired.ServerTimeMS <= 0 {
+		t.Fatalf("acquire response missing server_time_ms: %+v", acquired)
+	}
 	parts := strings.Split(acquired.Token, ".")
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {

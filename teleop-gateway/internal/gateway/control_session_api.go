@@ -21,6 +21,7 @@ type controlSessionResponse struct {
 	Session      ControlSession `json:"session"`
 	Token        string         `json:"token,omitempty"`
 	RenewAfterMS int64          `json:"renew_after_ms,omitempty"`
+	ServerTimeMS int64          `json:"server_time_ms,omitempty"`
 }
 
 func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +118,7 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		Session:      session,
 		Token:        token,
 		RenewAfterMS: controlLeases.ttl.Milliseconds() / 2,
+		ServerTimeMS: now.UnixMilli(),
 	})
 }
 
@@ -148,6 +150,7 @@ func handleRenewControl(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, controlSessionResponse{
 		Session:      session,
 		RenewAfterMS: controlLeases.ttl.Milliseconds() / 2,
+		ServerTimeMS: time.Now().UnixMilli(),
 	})
 }
 

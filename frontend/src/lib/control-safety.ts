@@ -11,6 +11,7 @@ export type ControlSafetyEvent =
   | 'media_lost'
   | 'rtc_disconnected'
   | 'rtc_reconnecting'
+  | 'rtc_reconnected'
   | 'feedback_timeout'
   | 'control_fault'
 
@@ -38,7 +39,8 @@ const CONTROL_SAFETY_DECISIONS: Readonly<Record<ControlSafetyEvent, ControlSafet
   input_unavailable: { strategy: 'disarm', message: '输入不可用：已停止，请检查设备状态', recovery: 'manual-rearm', retainSession: true },
   media_lost: { strategy: 'fault', message: 'Camera feed lost; release and acquire a new session', recovery: 'new-session', retainSession: false },
   rtc_disconnected: { strategy: 'fault', message: 'RTC disconnected; release before switching', recovery: 'new-session', retainSession: false },
-  rtc_reconnecting: { strategy: 'fault', message: 'RTC reconnect requires a new control session', recovery: 'new-session', retainSession: false },
+  rtc_reconnecting: { strategy: 'disarm', message: 'RTC 重连中：已停止输入，恢复后请手动重新启用', recovery: 'manual-rearm', retainSession: true },
+  rtc_reconnected: { strategy: 'observe', message: 'RTC 已重连；控制仍保持停用，请手动重新启用', recovery: 'manual-rearm', retainSession: true },
   feedback_timeout: { strategy: 'fault', message: 'Control lease or vehicle feedback timed out', recovery: 'new-session', retainSession: false },
   control_fault: { strategy: 'fault', message: 'Control interrupted by a safety fault', recovery: 'new-session', retainSession: false },
 }

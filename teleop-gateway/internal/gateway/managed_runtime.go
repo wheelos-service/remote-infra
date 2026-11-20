@@ -35,6 +35,7 @@ type ManagedRuntime struct {
 	onlineMutations bool
 	mu              sync.RWMutex
 	additiveMu      sync.Mutex
+	instanceMu      sync.Mutex
 	roomsEmpty      func(context.Context) error
 	evictRoom       func(context.Context, string, string)
 	rtcProxy        http.Handler
@@ -196,9 +197,12 @@ func (m *ManagedRuntime) authorizeRequest(r *http.Request, claims *UserClaims) (
 	if m.instance != nil {
 		// A lost session loses the single-instance lock. Never silently acquire
 		// a replacement connection or continue serving under that condition.
-		m.additiveMu.Lock()
-		err := m.instance.PingContext(r.Context())
-		m.additiveMu.Unlock()
+		// Use instanceMu (not additiveMu) so admin mutations never stall hot-path polls.
+		pingCtx, cancel := context.WithTimeout(r.Context(), 1500*time.Millisecond)
+		m.instanceMu.Lock()
+		err := m.instance.PingContext(pingCtx)
+		m.instanceMu.Unlock()
+		cancel()
 		if err != nil {
 			return fail(fmt.Errorf("managed instance lock unavailable: %w", err))
 		}
@@ -440,6 +444,9 @@ func managedStartsSession(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
 	}
+	if strings.Contains(path, "/viewing/") && strings.HasSuffix(path, "/token") {
+		return true
+	}
 	return (strings.Contains(path, "/control/") || strings.Contains(path, "/viewing/") ||
 		strings.Contains(path, "/video/")) &&
 		(strings.HasSuffix(path, "/acquire") || strings.HasSuffix(path, "/renew"))
@@ -475,7 +482,9 @@ func reserveManagedToken(w http.ResponseWriter, r *http.Request, token string) b
 	expiry := tokenClaims.Expiry.Time().Add(time.Minute)
 	var persistErr error
 	if managedRuntime.instance != nil {
+		managedRuntime.instanceMu.Lock()
 		persistErr = managedRuntime.store.RecordTokenExpiryOn(r.Context(), managedRuntime.instance, claims.Organization, expiry)
+		managedRuntime.instanceMu.Unlock()
 	} else {
 		persistErr = managedRuntime.store.RecordTokenExpiry(r.Context(), claims.Organization, expiry)
 	}
@@ -578,7 +587,10 @@ func (m *ManagedRuntime) BeforeAdditive(ctx context.Context, _ string) (func(), 
 		return nil, err
 	}
 	if m.instance != nil {
-		if err := m.instance.PingContext(ctx); err != nil {
+		m.instanceMu.Lock()
+		err := m.instance.PingContext(ctx)
+		m.instanceMu.Unlock()
+		if err != nil {
 			release()
 			return nil, fmt.Errorf("managed instance lock unavailable: %w", err)
 		}
@@ -588,7 +600,10 @@ func (m *ManagedRuntime) BeforeAdditive(ctx context.Context, _ string) (func(), 
 
 func (m *ManagedRuntime) checkDrained(ctx context.Context) error {
 	if m.instance != nil {
-		if err := m.instance.PingContext(ctx); err != nil {
+		m.instanceMu.Lock()
+		err := m.instance.PingContext(ctx)
+		m.instanceMu.Unlock()
+		if err != nil {
 			return fmt.Errorf("managed instance lock unavailable: %w", err)
 		}
 	}

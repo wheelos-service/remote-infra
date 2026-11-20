@@ -6,34 +6,38 @@ export const frontCameras: { name: FrontCamera; label: string }[] = [
   { name: 'left', label: '前左' }, { name: 'center', label: '前中' }, { name: 'right', label: '前右' },
 ]
 
-function CameraSlot({ name, label, track, onFrame }: {
-  name: FrontCamera; label: string; track?: CameraFeedTrack
+function CameraSlot({ name, label, track, failure, requireFrameCallback, onFrame }: {
+  name: FrontCamera; label: string; track?: CameraFeedTrack; failure?: string; requireFrameCallback?: boolean
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
 }) {
   const video = useRef<HTMLVideoElement>(null)
+  const onFrameRef = useRef(onFrame)
+  onFrameRef.current = onFrame
   const [live, setLive] = useState(false)
   useEffect(() => {
     setLive(false)
-    onFrame?.(name, false, track)
+    onFrameRef.current?.(name, false, track)
     if (!track || !video.current) return
     return bindCameraFeed(track, video.current, (value) => {
       setLive(value)
-      onFrame?.(name, value, track)
-    })
-  }, [name, track, onFrame])
+      onFrameRef.current?.(name, value, track)
+    }, { requireFrameCallback })
+  }, [name, track, requireFrameCallback])
   return <section data-camera={name} className="relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-slate-700 bg-black">
     <header className="flex justify-between gap-2 bg-slate-900 px-3 py-2 text-xs">
-      <span>{label}</span><span className={live ? 'text-emerald-300' : 'text-amber-300'}>{live ? '正在出帧' : track ? '停更 / 等待出帧' : '等待视频'}</span>
+      <span>{label}</span><span className={live ? 'text-emerald-300' : failure ? 'text-red-300' : 'text-amber-300'}>{live ? '正在出帧' : failure ? failure : track ? '停更 / 等待出帧' : '等待视频'}</span>
     </header>
     <div className="relative min-h-0 flex-1">
       <video ref={video} className={`h-full w-full object-contain ${live ? '' : 'invisible'}`} />
-      {!live && <p className="absolute inset-0 flex items-center justify-center p-3 text-center text-xs text-amber-200">{track ? '画面未更新 · 不可驾驶' : '未接入该相机'}</p>}
+      {!live && <p className="absolute inset-0 flex items-center justify-center p-3 text-center text-xs text-amber-200">{failure ? `相机${failure} · 不可驾驶` : track ? '画面未更新 · 不可驾驶' : '未接入该相机'}</p>}
     </div>
   </section>
 }
 
-export default function ThreeCameraView({ vehicleId, tracks = {}, onFrame }: {
+export default function ThreeCameraView({ vehicleId, tracks = {}, failedCameras = {}, requireFrameCallback = false, onFrame }: {
   vehicleId: string; tracks?: Partial<Record<FrontCamera, CameraFeedTrack>>
+  failedCameras?: Partial<Record<FrontCamera, string>>
+  requireFrameCallback?: boolean
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
 }) {
   const [focused, setFocused] = useState(false)
@@ -51,7 +55,7 @@ export default function ThreeCameraView({ vehicleId, tracks = {}, onFrame }: {
       {frontCameras.map(camera => <div key={camera.name} className="flex min-h-0 min-w-0 [&>section]:flex-1"
         style={focused ? camera.name === 'center' ? { gridColumn: 1, gridRow: '1 / 3' }
           : { gridColumn: 2, gridRow: camera.name === 'left' ? 1 : 2 } : undefined}>
-        <CameraSlot {...camera} track={tracks[camera.name]} onFrame={onFrame} />
+        <CameraSlot {...camera} track={tracks[camera.name]} failure={failedCameras[camera.name]} requireFrameCallback={requireFrameCallback} onFrame={onFrame} />
       </div>)}
     </div>
   </section>

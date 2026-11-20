@@ -326,6 +326,21 @@ test('browser bindings ignore editors, composition, modifiers, hidden and unfocu
     assert.deepEqual(h.actions(), []);
 });
 
+test('single keyboard binding triggers emergency callback on Space even before keyboard mode is enabled', async t => {
+    const h = setup(t);
+    const win = new Events(), doc = new Events();
+    let emergencyCalls = 0;
+    const dispose = bindKeyboardInput(h.input, win, doc, undefined, undefined, undefined, () => { emergencyCalls++; });
+    try {
+        assert.equal(win.emit('keydown', {code: 'Space', repeat: true}).prevented, undefined);
+        assert.equal(win.emit('keydown', {code: 'Space', target: {closest: () => ({})}}).prevented, undefined);
+        assert.equal(win.emit('keydown', {code: 'Space'}).prevented, true);
+        assert.equal(emergencyCalls, 1);
+    } finally {
+        dispose();
+    }
+});
+
 test('blur, hiding, editor focus and disabling stop and require explicit rearming', async t => {
     const h = setup(t);
     const win = new Events(), doc = new Events();

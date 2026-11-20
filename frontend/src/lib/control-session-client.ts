@@ -19,6 +19,7 @@ const responseSchema = z.object({
   session: sessionSchema,
   token: z.string().min(1).optional(),
   renew_after_ms: z.number().int().min(CONTROL_TIMING.leaseRenewMinMs).max(CONTROL_TIMING.leaseRenewMaxMs),
+  server_time_ms: z.number().int().safe().positive().optional(),
 })
 export type ControllerState = 'idle' | 'acquiring' | 'connecting' | 'ready' | 'locked' | 'releasing' | 'pending' | 'closed'
 
@@ -55,8 +56,10 @@ export interface ControlTimingEvent {
 }
 
 class ControlAPIError extends Error {
-  constructor(readonly status: number, detail = '') {
-    super(`Control API: HTTP ${status}${detail ? ` — ${detail}` : ''}`)
+  constructor(readonly status: number, detail = '', readonly retryable = false) {
+    super(status > 0
+      ? `Control API: HTTP ${status}${detail ? ` — ${detail}` : ''}`
+      : (detail || 'Control API request failed'))
   }
 }
 
@@ -88,7 +91,12 @@ export class ControlSessionClient {
   private sending = false
   private sendStarted = 0
   private renewing = false
+  private renewTimer?: ReturnType<typeof setTimeout>
+  private renewalSeq = 0
+  private clockOffsetMs = 0
   private mediaReady = true
+  private rtcReconnecting = false
+  private rtcReconnectDeadline = 0
   private releaseTask?: Promise<void>
   private readonly instanceId = crypto.randomUUID()
   private readonly organizationId = requestOrganization()
@@ -106,6 +114,21 @@ export class ControlSessionClient {
   // arbitrary transport errors, or command values in this snapshot.
   get diagnostics(): readonly ControlTimingEvent[] {
     return this.trace.map(event => ({ ...event }))
+  }
+
+  get clockOffset(): number {
+    return this.clockOffsetMs
+  }
+
+  get isEmergencyStop(): boolean {
+    return this.command.brake === 100 && this.command.throttle === 0 &&
+      this.command.steering === 0 && this.command.direction === 0
+  }
+
+  private calibrateClock(serverTimeMs: number | undefined, started: number, finished: number): void {
+    const rtt = finished - started
+    if (typeof serverTimeMs !== 'number' || !Number.isFinite(rtt) || rtt < 0 || rtt > CONTROL_TIMING.apiTimeoutMs) return
+    this.clockOffsetMs = Math.round(serverTimeMs + rtt / 2 - Date.now())
   }
 
   private record(event: TraceEvent, sequence = this.sequence, duration_ms?: number, fault_code?: FaultCode): void {
@@ -128,25 +151,41 @@ export class ControlSessionClient {
             body: body === undefined ? undefined : JSON.stringify(body),
             signal: abort.signal,
             cache: 'no-store',
+          }).catch((cause: unknown) => {
+            if (cause instanceof TypeError) throw new ControlAPIError(0, 'Control API network unavailable', true)
+            throw cause
           })
           if (allowGone && response.status === 404) return null
           if (!response.ok) {
             let detail = ''
-            if (response.status === 409) {
-              const reason = (await response.text()).trim()
-              if (reason === 'control lease is already held') {
-                detail = '控制权已被占用，请先在持有控制权的浏览器中释放，再重试。'
-              } else if (reason === 'previous vehicle handover is not confirmed') {
-                detail = '上一次车辆交接尚未确认，请等待车端确认；同一操作员的其他车辆会话也可能阻止申请。'
+            let retryable = response.status === 429 || [500, 502, 503, 504].includes(response.status)
+            if ((response.status === 409 || response.status === 503) && typeof response.text === 'function') {
+              const reason = (await response.text().catch(() => '')).trim().slice(0, 512)
+              if (response.status === 409) {
+                if (reason === 'control lease is already held') {
+                  detail = '控制权已被占用，请先在持有控制权的浏览器中释放，再重试。'
+                } else if (reason === 'previous vehicle handover is not confirmed') {
+                  detail = '上一次车辆交接尚未确认，请等待车端确认；同一操作员的其他车辆会话也可能阻止申请。'
+                }
+              } else if (response.status === 503) {
+                if (reason.includes('handover support required')) {
+                  detail = '受管实车控制暂未开放（缺少实车交接确认支持）'
+                  retryable = false
+                } else if (reason.includes('MANAGED_MAINTENANCE_REQUIRED') || reason.includes('maintenance')) {
+                  detail = '平台处于维护排空窗口，暂不可申请或续约控制'
+                  retryable = false
+                } else if (reason) {
+                  detail = '网关服务暂时不可用，请稍后重试'
+                }
               }
             }
-            throw new ControlAPIError(response.status, detail)
+            throw new ControlAPIError(response.status, detail, retryable)
           }
           return response.status === 204 ? null : await response.json()
         })(),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            reject(new Error('Control API timed out'))
+            reject(new ControlAPIError(0, 'Control API timed out', true))
             abort.abort()
           }, CONTROL_TIMING.apiTimeoutMs)
         }),
@@ -165,11 +204,26 @@ export class ControlSessionClient {
       const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']) as CryptoKeyPair
       this.key = pair.privateKey
       const publicKey = base64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey)))
-      const started = performance.now()
-      const response = await this.api(`/api/vehicles/${encodeURIComponent(this.vehicleId)}/control/acquire`, {
-        protocol_version: 2, client_instance_id: this.instanceId, public_key_b64: publicKey,
-      })
+      let started = 0
+      let response: unknown
+      for (let attempt = 0; ; attempt++) {
+        started = performance.now()
+        try {
+          response = await this.api(`/api/vehicles/${encodeURIComponent(this.vehicleId)}/control/acquire`, {
+            protocol_version: 2, client_instance_id: this.instanceId, public_key_b64: publicKey,
+          })
+          break
+        } catch (error) {
+          if (!this.canContinue() || !(error instanceof ControlAPIError) ||
+              !error.retryable || error.status === 0 || attempt >= 2) {
+            throw error
+          }
+          await new Promise<void>(resolve => setTimeout(resolve, 500 * 2 ** attempt))
+          if (!this.canContinue()) return
+        }
+      }
       const data = responseSchema.parse(response)
+      this.calibrateClock(data.server_time_ms, started, performance.now())
       this.session = data.session
       if (data.session.vehicle_id !== this.vehicleId ||
           data.session.client_instance_id !== this.instanceId ||
@@ -201,9 +255,11 @@ export class ControlSessionClient {
       this.timer = setInterval(() => { void this.tick() }, CONTROL_TIMING.tickMs)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Control connection failed'
-      // A definitive acquire rejection created no session to release. Keep
-      // retries explicit; uncertain failures and safety locks remain latched.
-      if (error instanceof ControlAPIError && error.status === 409 &&
+      // Explicit HTTP rejections (400/403/409/503) before any session exists
+      // created nothing to release; return to idle so the operator can retry
+      // without waiting on a phantom handover. Uncertain timeouts (status=0)
+      // and safety locks remain latched.
+      if (error instanceof ControlAPIError && error.status > 0 &&
           !this.session && !this.closing && this.state === 'acquiring') {
         this.error = message
         this.state = 'idle'
@@ -259,8 +315,32 @@ export class ControlSessionClient {
     if (data.status === 'LOCKED' || data.last_rejection) {
       const reason = data.last_rejection || data.reason
       this.fail(reason, reason === 'stale_command' ? 'stale_command' : 'vehicle_rejection')
-    } else if (data.status === 'READY' || data.status === 'ACCEPTED' || data.status === 'APPLIED') this.state = 'ready'
+    } else if (data.status === 'READY' || data.status === 'ACCEPTED' || data.status === 'APPLIED' || data.status === 'PAUSED') {
+      this.state = 'ready'
+    }
     this.changed()
+  }
+
+  setRtcReconnecting(reconnecting: boolean): void {
+    if (this.closing || this.state === 'closed' || this.state === 'locked') return
+    const now = performance.now()
+    if (reconnecting) {
+      if (!this.rtcReconnecting) {
+        this.rtcReconnecting = true
+        this.rtcReconnectDeadline = now + CONTROL_TIMING.rtcReconnectGraceMs
+      }
+      return
+    }
+    if (!this.rtcReconnecting) return
+    this.rtcReconnecting = false
+    this.rtcReconnectDeadline = 0
+    for (const pending of this.pendingCommands) pending.dispatchedAt = now
+    this.lastFeedback = now
+    if (this.state === 'ready' && !this.isEmergencyStop) {
+      this.command = { ...neutralCommand }
+      this.intentRevision++
+      this.record('input')
+    }
   }
 
   setCommand(command: ControlCommand): void {
@@ -291,6 +371,10 @@ export class ControlSessionClient {
     this.state = 'locked'
     if (this.timer) clearInterval(this.timer)
     this.timer = undefined
+    if (this.renewTimer) clearTimeout(this.renewTimer)
+    this.renewTimer = undefined
+    this.renewing = false
+    this.renewalSeq++
     this.record('fault', this.sequence, undefined, code)
     this.changed()
     // Closing the RTC connection stops resume/replay attempts. Receiver fencing
@@ -310,9 +394,20 @@ export class ControlSessionClient {
   }
 
   private checkDeadlines(now: number): boolean {
-    if (now >= this.leaseDeadline || (this.feedback
+    if (now >= this.leaseDeadline) {
+      this.fail(controlSafetyDecision('feedback_timeout').message, 'authority_or_feedback_timeout')
+      return false
+    }
+    if (this.rtcReconnecting) {
+      if (now >= this.rtcReconnectDeadline) {
+        this.fail('Control RTC reconnection timed out', 'authority_or_feedback_timeout')
+        return false
+      }
+      return true
+    }
+    if (this.feedback
       ? now - this.lastFeedback > CONTROL_TIMING.feedbackTimeoutMs
-      : now - this.connectedAt > CONTROL_TIMING.initialFeedbackTimeoutMs)) {
+      : now - this.connectedAt > CONTROL_TIMING.initialFeedbackTimeoutMs) {
       this.fail(controlSafetyDecision('feedback_timeout').message, 'authority_or_feedback_timeout')
       return false
     }
@@ -336,9 +431,9 @@ export class ControlSessionClient {
     if (!this.checkDeadlines(now)) return
     if (!this.renewing && now >= this.renewAt) {
       this.renewing = true
-      void this.renew().finally(() => { this.renewing = false })
+      void this.renew(0, ++this.renewalSeq)
     }
-    if (this.sending || this.state !== 'ready' || !this.feedback || !this.key) return
+    if (this.rtcReconnecting || this.sending || this.state !== 'ready' || !this.feedback || !this.key) return
     this.sending = true
     this.sendStarted = now
     const intentRevision = this.intentRevision
@@ -349,7 +444,7 @@ export class ControlSessionClient {
         version: 2, type: 'control', vehicle_id: this.vehicleId,
         session_id: this.session.session_id, client_instance_id: this.instanceId,
         receiver_instance_id: this.feedback.receiver_instance_id, revision: this.feedback.revision,
-        sequence, timestamp_ms: Date.now(), command: signedCommand,
+        sequence, timestamp_ms: Math.max(1, Math.round(Date.now() + this.clockOffsetMs)), command: signedCommand,
       })
       this.record('sign', sequence, performance.now() - now)
       if (!this.canContinue() || this.state !== 'ready' || !this.checkDeadlines(performance.now())) return
@@ -380,8 +475,7 @@ export class ControlSessionClient {
 
   async neutralizeAndPublish(timeoutMs = CONTROL_TIMING.neutralizeBudgetMs): Promise<void> {
     if (!isControlReady(this.state, this.mediaReady)) return
-    const emergency = this.command.brake === 1000 && this.command.throttle === 0 &&
-      this.command.steering === 0 && this.command.direction === 0
+    const emergency = this.isEmergencyStop
     const safeCommand = emergency ? { ...this.command } : { ...neutralCommand }
     this.setCommand(safeCommand)
     const targetRevision = this.intentRevision
@@ -398,10 +492,18 @@ export class ControlSessionClient {
     throw new Error('Safe control publication timed out')
   }
 
-  private async renew(): Promise<void> {
+  private async renew(attempt = 0, seq = this.renewalSeq): Promise<void> {
     const session = this.session
-    if (!session) return
+    if (!session || !this.canContinue() || seq !== this.renewalSeq) {
+      this.renewing = false
+      return
+    }
     const started = performance.now()
+    if (started >= this.leaseDeadline) {
+      this.renewing = false
+      this.fail(controlSafetyDecision('feedback_timeout').message, 'authority_or_feedback_timeout')
+      return
+    }
     try {
       const data = responseSchema.parse(await this.api(`/api/control/${session.session_id}/renew`, {}))
       if (data.session.session_id !== session.session_id ||
@@ -409,12 +511,32 @@ export class ControlSessionClient {
           data.session.vehicle_id !== this.vehicleId ||
           data.session.sender_identity !== session.sender_identity) throw new Error('Renew binding mismatch')
       if (performance.now() >= this.leaseDeadline) throw new Error('Lease expired during renewal')
-      if (!this.canContinue()) return
+      if (!this.canContinue() || seq !== this.renewalSeq) {
+        this.renewing = false
+        return
+      }
       if (performance.now() >= started + data.renew_after_ms * 2) throw new Error('Renewed lease already expired')
+      this.calibrateClock(data.server_time_ms, started, performance.now())
       this.leaseDeadline = started + data.renew_after_ms * 2
       this.renewAt = started + data.renew_after_ms
+      this.renewing = false
       this.record('renew', this.sequence, performance.now() - started)
-    } catch {
+    } catch (error) {
+      if (!this.canContinue() || seq !== this.renewalSeq) {
+        this.renewing = false
+        return
+      }
+      if (error instanceof ControlAPIError && error.retryable) {
+        const delay = Math.min(500 * 2 ** attempt, 2_000)
+        if (performance.now() + delay + CONTROL_TIMING.apiTimeoutMs < this.leaseDeadline) {
+          this.renewTimer = setTimeout(() => {
+            this.renewTimer = undefined
+            void this.renew(attempt + 1, seq)
+          }, delay)
+          return
+        }
+      }
+      this.renewing = false
       this.fail('Control renewal failed', 'renewal_failed')
     }
   }
@@ -424,6 +546,10 @@ export class ControlSessionClient {
     this.closing = true
     this.cleanupError = ''
     if (this.timer) clearInterval(this.timer)
+    if (this.renewTimer) clearTimeout(this.renewTimer)
+    this.renewTimer = undefined
+    this.renewing = false
+    this.renewalSeq++
     this.command = { ...neutralCommand }
     this.state = 'releasing'
     this.changed()

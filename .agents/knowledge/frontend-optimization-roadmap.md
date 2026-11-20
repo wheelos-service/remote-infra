@@ -25,7 +25,11 @@ frontend behavior and deployment boundaries are documented in
 - Entering the workspace is view-only. A control request must separately
   confirm the target vehicle and obtain server authorization.
 - Integrate authoritative session, lease, and video measurements when their
-  backend contracts are available.
+  backend contracts are available; follow
+  [`video-freshness-verification.md`](video-freshness-verification.md) for
+  source capture-time validation and
+  [`remote-control-resilience.md`](remote-control-resilience.md) for
+  the L0/L1/L2/L3 fault model and future single-Room consolidation.
 - Validate stale data, another operator holding the lease, disconnection, and
   release behavior.
 - Do not imply that a displayed readiness state proves a real vehicle control

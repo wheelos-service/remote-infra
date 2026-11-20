@@ -16,6 +16,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
+	"github.com/livekit/protocol/auth"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -92,9 +93,15 @@ func TestViewingExpiryRenewalAndControlAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	server.SetTime(time.UnixMilli(lease.ServerTimeMS + 20000))
+	before := demandFor(t, store, "car-1")
 	renewed, err := store.mutate(ctx, "renew", "car-1", "alice", sid)
 	if err != nil || renewed.ExpiresAtMS != lease.ExpiresAtMS+20000 {
 		t.Fatalf("renewal = %#v %v", renewed, err)
+	}
+	server.SetTime(time.UnixMilli(lease.ExpiresAtMS - 1000))
+	after := demandFor(t, store, "car-1")
+	if after.Revision != before.Revision || after.ValidUntilMS != after.ServerTimeMS+5000 {
+		t.Fatalf("renewal changed demand membership or did not renew validity: before=%#v after=%#v", before, after)
 	}
 	for _, op := range []string{"renew", "release", "acquire"} {
 		if _, err := store.mutate(ctx, op, "car-1", "bob", sid); !errors.Is(err, errViewingOwner) {
@@ -287,6 +294,9 @@ func TestViewingRealRedis(t *testing.T) {
 	if _, err := store.mutate(ctx, "renew", vehicleID, "test-owner", sid); err != nil {
 		t.Fatal(err)
 	}
+	if renewed := demandFor(t, store, vehicleID); renewed.Revision != active.Revision {
+		t.Fatalf("real Redis renewal changed demand revision: %d -> %d", active.Revision, renewed.Revision)
+	}
 	if _, err := store.mutate(ctx, "release", vehicleID, "test-owner", sid); err != nil {
 		t.Fatal(err)
 	}
@@ -382,18 +392,40 @@ func TestViewingAPIAuthenticationOwnershipAndTokens(t *testing.T) {
 	f.request(t, http.MethodGet, demandPath, "device1", "", http.StatusOK)
 	root := "/api/vehicles/car-1/viewing/" + lease.ViewingSessionID
 	f.request(t, http.MethodPost, root+"/renew", "observer", "{}", http.StatusBadRequest)
-	f.request(t, http.MethodPost, root+"/renew", "observer", "", http.StatusOK)
+	f.request(t, http.MethodPost, root+"/token", "observer", "{}", http.StatusBadRequest)
+	tokenResponse := f.request(t, http.MethodPost, root+"/token", "observer", "", http.StatusOK)
+	var refreshed struct {
+		ViewingLease
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(tokenResponse.Body.Bytes(), &refreshed); err != nil ||
+		refreshed.ViewingSessionID != lease.ViewingSessionID || refreshed.ExpiresAtMS != lease.ExpiresAtMS {
+		t.Fatalf("token refresh changed the lease: %#v %v", refreshed.ViewingLease, err)
+	}
+	verifier, err := auth.ParseAPIToken(refreshed.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenClaims, grants, err := verifier.Verify(lkApiSecret)
+	if err != nil || tokenClaims.Subject != "observer-"+lease.ViewingSessionID ||
+		grants.Video.Room != "teleop-car-1" || grants.Video.GetCanPublish() || grants.Video.GetCanPublishData() ||
+		!grants.Video.GetCanSubscribe() ||
+		tokenClaims.Expiry == nil || tokenClaims.Expiry.Time().After(time.Now().Add(viewingLeaseTTL)) {
+		t.Fatal("invalid refreshed observer credential")
+	}
 	// Another authorized observer still cannot mutate Alice's lease.
 	api.authorizer.entries = append(api.authorizer.entries, VehicleACL{
 		UserID: "bob", TenantID: "tenant-a", VehicleID: "car-1", Permissions: []VehiclePermission{ObservePermission},
 	})
 	f.request(t, http.MethodPost, root+"/renew", "denied", "", http.StatusForbidden)
+	f.request(t, http.MethodPost, root+"/token", "denied", "", http.StatusForbidden)
 	f.request(t, http.MethodPost, root+"/release", "denied", "", http.StatusForbidden)
 	f.request(t, http.MethodPost, "/api/vehicles/car-2/viewing/"+lease.ViewingSessionID+"/release", "observer", "", http.StatusNoContent)
 	f.request(t, http.MethodPost, root+"/renew", "observer", "", http.StatusOK)
 	f.request(t, http.MethodPost, root+"/release", "observer", "", http.StatusNoContent)
 	f.request(t, http.MethodPost, root+"/release", "observer", "", http.StatusNoContent)
 	f.request(t, http.MethodPost, root+"/renew", "observer", "", http.StatusConflict)
+	f.request(t, http.MethodPost, root+"/token", "observer", "", http.StatusConflict)
 	f.request(t, http.MethodPost, path, "observer", body, http.StatusConflict)
 	// Authorization is rechecked on renewal, not only on acquisition.
 	api.authorizer.entries = nil
