@@ -47,9 +47,10 @@ func (s *JSONAuditSink) Record(_ context.Context, event AuditEvent) error {
 }
 
 type vehicleAuditRequest struct {
-	SessionID string `json:"session_id"`
-	Event     string `json:"event"`
-	Reason    string `json:"reason"`
+	SessionID string  `json:"session_id"`
+	Event     string  `json:"event"`
+	Reason    string  `json:"reason"`
+	LatencyMS float64 `json:"latency_ms,omitempty"`
 }
 
 func handleVehicleAudit(w http.ResponseWriter, r *http.Request) {
@@ -67,12 +68,21 @@ func handleVehicleAudit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if !vehicleSafetyAuditEvent(request.Event) || request.Reason == "" {
+	if !vehicleSafetyAuditEvent(request.Event) || request.Reason == "" ||
+		len(request.Reason) > 128 || len(request.SessionID) > 128 ||
+		request.LatencyMS < 0 || request.LatencyMS > 60000 {
 		http.Error(w, "invalid vehicle audit event", http.StatusBadRequest)
 		return
 	}
+	vehicleID, ok := resolveVehicleClaims(claims, vehicleIdentities)
+	if !ok || vehicleID == "" {
+		vehicleID = claims.Name
+	}
+	if request.LatencyMS > 0 {
+		teleopE2eLatencyP99.WithLabelValues(vehicleID).Set(request.LatencyMS)
+	}
 	recordAudit(r.Context(), AuditEvent{
-		VehicleID: claims.Name, SessionID: request.SessionID, Event: request.Event,
+		VehicleID: vehicleID, SessionID: request.SessionID, Event: request.Event,
 		Reason: request.Reason, Result: "reported",
 	})
 	w.WriteHeader(http.StatusNoContent)
@@ -80,7 +90,7 @@ func handleVehicleAudit(w http.ResponseWriter, r *http.Request) {
 
 func vehicleSafetyAuditEvent(event string) bool {
 	switch event {
-	case "watchdog_timeout", "command_rejected", "emergency_stop":
+	case "watchdog_timeout", "command_rejected", "emergency_stop", "paused_hold", "camera_stalled":
 		return true
 	default:
 		return false

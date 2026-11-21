@@ -24,6 +24,7 @@ const { outputFiles } = await esbuild.build({
     { in: 'src/lib/control-session-client.ts', out: 'control-session-client' },
     { in: 'src/lib/control-safety.ts', out: 'control-safety' },
     { in: 'src/lib/control-timing.ts', out: 'control-timing' },
+    { in: 'src/lib/teleop-diagnostics.ts', out: 'teleop-diagnostics' },
     { in: 'src/lib/control-input-adapter.ts', out: 'control-input-adapter' },
     { in: 'src/lib/camera-view.ts', out: 'camera-view' },
     { in: 'src/lib/camera-feed.ts', out: 'camera-feed' },
@@ -1686,6 +1687,17 @@ test('timing snapshots are bounded, independent copies without commands or crede
     assert.doesNotMatch(JSON.stringify(trace), /test-bearer|test-token|signature|throttle|private/)
     assert.ok(trace.some(event => event.event === 'ack' && event.duration_ms === 1))
   } finally { await f.controller.release() }
+})
+
+test('teleopDiagnosticsBuffer bounds entries to 256 and returns defensive copies', async () => {
+  const { TeleopDiagnosticsBuffer } = await loadBundle('teleop-diagnostics')
+  const buf = new TeleopDiagnosticsBuffer()
+  for (let i = 0; i < 270; i++) buf.record('video', `ev-${i}`, 'camera-left')
+  const items = buf.entries()
+  assert.equal(items.length, 256)
+  assert.equal(items[0].event, 'ev-14')
+  items[0].event = 'tampered'
+  assert.equal(buf.entries()[0].event, 'ev-14')
 })
 
 test('unacknowledged dispatch storage has a hard count bound even during a rapid burst', async context => {

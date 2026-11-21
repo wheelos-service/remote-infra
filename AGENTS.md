@@ -26,6 +26,7 @@
 - `frontend-optimization-roadmap.md` — Remaining alert-response and remote-driving readiness work that depends on backend capabilities
 - Release capabilities and limits: `docs/compatibility.md`; API payload contracts: `api/schemas/`
 - `vehicle-cyber.md` — Cyber/LiveKit module ownership, wire contract, and control safety invariants
+- `teleop-flows-and-exceptions.md` — End-to-end video, control, and feedback flowcharts plus stage-by-stage exception lookup tables
 - `video-freshness-verification.md` — Target browser `requestVideoFrameCallback` / source capture-time verification logic and layered freshness gates
 - `remote-control-resilience.md` — Viewing recovery, `Lossy` control channel, and `PAUSED_HOLD` / 1-step `Re-Arm` resilience design
 - `troubleshooting.md` — Common startup, test, and deployment problems

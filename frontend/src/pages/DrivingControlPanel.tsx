@@ -5,6 +5,7 @@ import { ControlSessionClient, isControlReady } from '../lib/control-session-cli
 import { applyControlSafetyStrategy, type ControlSafetyEvent } from '../lib/control-safety'
 import { CONTROL_TIMING } from '../lib/control-timing'
 import type { ControlCommand } from '../lib/control-protocol'
+import type { TeleopDiagnosticsBuffer } from '../lib/teleop-diagnostics'
 import {
   ControlInput, GamepadInput, bindGamepadInput, bindKeyboardInput,
   toV2ControlCommand, v2GamepadMapping, type GamepadView, type GamepadMapping,
@@ -17,12 +18,13 @@ function withinBudget(promise: Promise<void>, message: string): Promise<void> {
   ])
 }
 
-export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChange, onIntent }: {
+export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChange, onIntent, diagnostics }: {
   vehicleId: string
   bearer: string
   videoReady: boolean
   onBusyChange: (busy: boolean) => void
   onIntent: (vehicleId: string, command?: ControlCommand) => void
+  diagnostics?: TeleopDiagnosticsBuffer
 }) {
   const controller = useRef<ControlSessionClient | undefined>(undefined)
   const input = useRef<ControlInput | undefined>(undefined)
@@ -188,6 +190,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
   useEffect(() => {
     const active = controller.current
     if (videoReady) {
+      if (mediaPauseTimer.current) diagnostics?.record('video', 'media_pause_recovered')
       clearMediaPauseTimer()
       setMediaPaused(false)
       active?.setMediaReady(true)
@@ -205,6 +208,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
     // (only when already REMOTE and not emergency-braking) for up to 5s while
     // video recovers, before escalating to terminal media_lost.
     if (!mediaPauseTimer.current) {
+      diagnostics?.record('video', 'media_pause_hold', vehicleArbitrationRef.current?.state === 'REMOTE' ? 'remote_brake_20' : 'standby')
       setMediaPaused(true)
       if (!active.isEmergencyStop) {
         if (vehicleArbitrationRef.current?.state === 'REMOTE') {
@@ -233,7 +237,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       }, CONTROL_TIMING.mediaPauseGraceMs)
     }
     changed()
-  }, [videoReady, changed, clearMediaPauseTimer, onIntent, vehicleId])
+  }, [videoReady, changed, clearMediaPauseTimer, diagnostics, onIntent, vehicleId])
 
   const acquire = async () => {
     if (!mediaReady.current) return
@@ -275,6 +279,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
           const status = parsed.sources?.vehicle_status?.message
           const chassis = parsed.telemetry?.chassis?.message
           const preserveStatus = Boolean(parsed.sources_omitted && !status)
+          if (parsed.sources_omitted) diagnostics?.record('feedback', 'vehicle_state_sources_omitted', status ? 'kept_status' : 'omitted_all')
           setVehicleArbitration(previous => ({
             state: typeof status?.state === 'string' ? status.state : (preserveStatus ? previous?.state : undefined),
             safetyOverride: typeof status?.safety_override === 'string' ? status.safety_override : (preserveStatus ? previous?.safetyOverride : undefined),
@@ -321,15 +326,17 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
   }
   const downloadDiagnostics = () => {
     const active = controller.current
-    if (!active) return
+    if (!active && !diagnostics) return
     const blob = new Blob([JSON.stringify({
-      protocol_version: 2, clock_domain: 'browser-performance', time_origin_ms: performance.timeOrigin,
-      events: active.diagnostics,
+      protocol_version: 2, vehicle_id: vehicleId, clock_domain: 'browser-performance',
+      time_origin_ms: performance.timeOrigin,
+      events: active?.diagnostics ?? [],
+      timeline_events: diagnostics?.entries() ?? [],
     }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = 'control-timing.json'
+    link.download = 'teleop-diagnostics.json'
     link.click()
     setTimeout(() => URL.revokeObjectURL(url), 0)
   }
@@ -435,8 +442,8 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       </p>
       {(message || controller.current?.error) && <p role="alert" className="mt-2 text-red-300">{controller.current?.error || message}</p>}
       {controller.current?.cleanupError && <p role="alert" className="mt-2 text-red-300">交接清理：{controller.current.cleanupError}</p>}
-      <button type="button" className={`${button} mt-2`} disabled={!controller.current}
-        onClick={downloadDiagnostics}>导出近期控制时序诊断</button>
+      <button type="button" className={`${button} mt-2`} disabled={!controller.current && !diagnostics}
+        onClick={downloadDiagnostics}>导出近期遥操作诊断</button>
       <div className="fixed inset-x-0 bottom-0 z-[60] flex flex-wrap items-center justify-end gap-3 border-t border-amber-800 bg-slate-950 p-3 text-xs">
         <span>{vehicleId} · {state} · {inputState.gamepadEnabled ? '手柄已启用' : '手柄未启用'}</span>
         <button type="button" disabled={!ready} className={button} onClick={() => input.current?.suspend('已发送停止，请重新启用手柄')}>停止并停用手柄</button>

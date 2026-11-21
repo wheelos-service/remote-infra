@@ -186,6 +186,7 @@ func (api *ViewingLeaseAPI) demand(w http.ResponseWriter, r *http.Request) {
 		writeViewingError(w, err)
 		return
 	}
+	teleopDemandRevision.WithLabelValues(demand.VehicleID).Set(float64(demand.Revision))
 	writeJSON(w, http.StatusOK, demand)
 }
 
@@ -198,6 +199,7 @@ func writeViewingError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errViewingLimit):
 		http.Error(w, err.Error(), http.StatusTooManyRequests)
 	default:
+		teleopGateway503Total.WithLabelValues("VIEWING_COORDINATION_UNAVAILABLE").Inc()
 		http.Error(w, "viewing coordination unavailable", http.StatusServiceUnavailable)
 	}
 }

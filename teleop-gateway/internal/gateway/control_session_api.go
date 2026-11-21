@@ -68,6 +68,7 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 	// session would leave a permanent vehicle fence and operator lock on
 	// release or expiry. Reject before reserving a token or writing any lease.
 	if claims.managed != nil && !simulationControlEnabled(vehicleID) {
+		teleopGateway503Total.WithLabelValues("MANAGED_NATIVE_HANDOVER_REQUIRED").Inc()
 		http.Error(w, "managed native control unavailable: handover support required", http.StatusServiceUnavailable)
 		return
 	}
@@ -232,6 +233,7 @@ func writeControlSessionError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrControlSessionOwner):
 		http.Error(w, err.Error(), http.StatusForbidden)
 	default:
+		teleopGateway503Total.WithLabelValues("CONTROL_SESSION_UNAVAILABLE").Inc()
 		http.Error(w, "control session unavailable", http.StatusServiceUnavailable)
 	}
 }

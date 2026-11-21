@@ -5,12 +5,18 @@ import { newViewingId, isVehicleVideoSender } from '../lib/viewing-api'
 import { teleopConfig } from '../lib/teleop-config'
 import { trackCameraName } from '../lib/camera-view'
 import { threeCamerasReady, type CameraFeedTrack } from '../lib/camera-feed'
+import type { TeleopDiagnosticsBuffer } from '../lib/teleop-diagnostics'
 import type { FrontCamera } from '../pages/ThreeCameraView'
 
 type CameraTracks = Partial<Record<FrontCamera, RemoteVideoTrack>>
 type CameraFailures = Partial<Record<FrontCamera, string>>
 
-export function useDrivingCameras(vehicleId: string, bearer: string, recoverViewing = false) {
+export function useDrivingCameras(
+  vehicleId: string,
+  bearer: string,
+  recoverViewing = false,
+  diagnostics?: TeleopDiagnosticsBuffer,
+) {
   const [tracks, setTracks] = useState<CameraTracks>({})
   const [failedCameras, setFailedCameras] = useState<CameraFailures>({})
   const [connected, setConnected] = useState(false)
@@ -122,20 +128,26 @@ export function useDrivingCameras(vehicleId: string, bearer: string, recoverView
           const camera = publication ? trackCameraName(publication.trackName) : undefined
           if (camera === 'left' || camera === 'center' || camera === 'right') {
             updateFailures({ ...activeFailures, [camera]: '订阅失败' })
+            diagnostics?.record('video', 'camera_subscription_failed', camera)
           }
           console.warn('相机订阅失败；该路画面不可用')
         })
         observer.on(RoomEvent.Reconnecting, () => {
           acceptTracks = false
+          diagnostics?.record('video', 'room_reconnecting')
           events.reconnecting()
         })
         observer.on(RoomEvent.Reconnected, () => {
           acceptTracks = true
           updateFailures({})
+          diagnostics?.record('video', 'room_reconnected')
           events.reconnected()
           subscribeExisting()
         })
-        observer.on(RoomEvent.Disconnected, events.disconnected)
+        observer.on(RoomEvent.Disconnected, () => {
+          diagnostics?.record('video', 'room_disconnected')
+          events.disconnected()
+        })
         return {
           connect: async () => {
             await observer.connect(teleopConfig.livekitUrl, token, { autoSubscribe: false })
@@ -169,10 +181,14 @@ export function useDrivingCameras(vehicleId: string, bearer: string, recoverView
       } : undefined,
       onConnected: () => {
         if (disposed) return
+        diagnostics?.record('video', 'video_connected')
         setConnected(true)
         setRecovering(false)
       },
-      onError: failure,
+      onError: cause => {
+        diagnostics?.record('video', 'video_failed')
+        failure(cause)
+      },
       onCleanupError: () => {
         console.error('监看资源清理失败')
       },
@@ -188,6 +204,6 @@ export function useDrivingCameras(vehicleId: string, bearer: string, recoverView
       window.removeEventListener('pagehide', leave)
       void lifecycle.stop()
     }
-  }, [vehicleId, bearer, recoverViewing])
+  }, [vehicleId, bearer, recoverViewing, diagnostics])
   return { tracks, failedCameras, connected, recovering, error, playbackEpoch, reportFrame }
 }

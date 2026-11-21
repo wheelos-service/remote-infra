@@ -3,7 +3,9 @@
 ## When
 Read this guide before changing vehicle Cyber, real-time monitoring/control,
 LiveKit transport, the vehicle's Gateway token permissions, or Apollo
-`Guardian` / `Canbus` remote driving arbitration.
+`Guardian` / `Canbus` remote driving arbitration. For full end-to-end flowcharts
+and stage-by-stage exception tables, see
+[`teleop-flows-and-exceptions.md`](teleop-flows-and-exceptions.md).
 
 ## 5-Module Runtime Boundaries
 - Keep a single vehicle process and a single LiveKit room connection. Do not

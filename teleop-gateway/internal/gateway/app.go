@@ -41,6 +41,18 @@ var (
 		Name: "teleop_e2e_latency_p99_milliseconds",
 		Help: "P99 end-to-end remote-control command latency in milliseconds",
 	}, []string{"vehicle_id"})
+	teleopGateway503Total = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "teleop_gateway_503_total",
+		Help: "Total number of HTTP 503 responses grouped by diagnostic code",
+	}, []string{"code"})
+	teleopAuditEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "teleop_audit_events_total",
+		Help: "Total number of recorded teleop audit events grouped by event and result",
+	}, []string{"event", "result"})
+	teleopDemandRevision = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "teleop_media_demand_revision",
+		Help: "Latest observed MediaDemand revision per vehicle",
+	}, []string{"vehicle_id"})
 )
 
 type UserClaims struct {
@@ -190,7 +202,7 @@ func Run() {
 	// Metrics and vehicle telemetry endpoints.
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.Handle("/api/telemetry", AuthenticationMiddleware(http.HandlerFunc(handleTelemetry)))
-	mux.Handle("POST /api/audit/events", AuthenticationMiddleware(http.HandlerFunc(handleVehicleAudit)))
+	mux.Handle("POST /api/audit/events", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleVehicleAudit))))
 
 	log.Println("🚀 Industrial Teleop Gateway running on :8080")
 	log.Fatal(http.ListenAndServe(":8080", withRequestID(withCORS(mux))))
@@ -295,6 +307,9 @@ func handleAuthMe(w http.ResponseWriter, r *http.Request) {
 
 func recordAudit(ctx context.Context, event AuditEvent) {
 	event.RequestID, _ = ctx.Value(requestIDContextKey{}).(string)
+	if event.Event != "" && event.Result != "" {
+		teleopAuditEventsTotal.WithLabelValues(event.Event, event.Result).Inc()
+	}
 	if err := auditSink.Record(ctx, event); err != nil {
 		log.Printf("audit write failed: %v", err)
 	}

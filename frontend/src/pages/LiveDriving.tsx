@@ -3,6 +3,7 @@ import { useAuth } from '../app/AuthProvider'
 import { useVehicles } from '../hooks/use-vehicles'
 import { useDrivingCameras } from '../hooks/use-driving-cameras'
 import { threeCamerasReady, type CameraFeedTrack } from '../lib/camera-feed'
+import { TeleopDiagnosticsBuffer } from '../lib/teleop-diagnostics'
 import ThreeCameraView, { type FrontCamera } from './ThreeCameraView'
 import { DrivingControlPanel } from './DrivingControlPanel'
 import TeleopWorkbench from './TeleopWorkbench'
@@ -20,7 +21,8 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
   vehicleId: string; bearer: string; onBusyChange: (busy: boolean) => void; onClose: () => void; observeOnly: boolean
   row: OverviewVehicle; onMonitor: () => void; controlDenied: boolean
 }) {
-  const cameras = useDrivingCameras(vehicleId, bearer, true)
+  const diagnostics = useRef(new TeleopDiagnosticsBuffer())
+  const cameras = useDrivingCameras(vehicleId, bearer, true, diagnostics.current)
   const [frames, setFrames] = useState<Partial<Record<FrontCamera, CameraFeedTrack>>>({})
   const [busy, setBusy] = useState(false)
   const { reportFrame } = cameras
@@ -29,7 +31,9 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
     setFrames(previous => {
       if (!live && previous[name] !== track) return previous
       const current = live ? track : undefined
-      return previous[name] === current ? previous : { ...previous, [name]: current }
+      if (previous[name] === current) return previous
+      diagnostics.current.record('video', live ? 'camera_live' : 'camera_stalled', name)
+      return { ...previous, [name]: current }
     })
   }, [reportFrame])
   const onBusy = useCallback((value: boolean) => { setBusy(value); onBusyChange(value) }, [onBusyChange])
@@ -55,7 +59,7 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
       onBack={onClose} onMonitor={onMonitor} videoStatus={`${cameras.error ? '监看已结束' : cameras.recovering ? '正在恢复监看' : cameras.connected ? '已连接' : '未连接 / 正在连接'} · 三路：${videoReady ? '正在出帧' : `${liveCount}/3 路出帧`}`}
       cameraView={<ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} failedCameras={cameras.failedCameras} requireFrameCallback onFrame={onFrame} />}
       controlPanel={!observeOnly
-      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={videoReady} onBusyChange={onBusy} onIntent={onIntent} />
+      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={videoReady} onBusyChange={onBusy} onIntent={onIntent} diagnostics={diagnostics.current} />
       : <div className="space-y-2 text-xs text-amber-200">
           <button type="button" disabled aria-describedby="control-denied-reason"
             className="rounded border border-slate-700 px-3 py-2 opacity-40">申请控制权</button>

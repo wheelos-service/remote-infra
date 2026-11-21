@@ -1,5 +1,8 @@
 # Remote Control & Viewing Resilience Architecture
 
+> Full stage-by-stage flowcharts and exception lookup tables for video, control,
+> and feedback live in [`teleop-flows-and-exceptions.md`](teleop-flows-and-exceptions.md).
+
 ## Purpose
 
 Prevent brief wireless/WebRTC jitter from forcing operators through repeated full
