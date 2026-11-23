@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useAuth } from '../app/AuthProvider'
 import { useVehicles } from '../hooks/use-vehicles'
 import { useDrivingCameras } from '../hooks/use-driving-cameras'
-import { threeCamerasReady, type CameraFeedTrack } from '../lib/camera-feed'
+import { threeCamerasReady, type CameraFeedTrack, type CameraFrameStats } from '../lib/camera-feed'
 import { TeleopDiagnosticsBuffer } from '../lib/teleop-diagnostics'
 import ThreeCameraView, { type FrontCamera } from './ThreeCameraView'
 import { DrivingControlPanel } from './DrivingControlPanel'
@@ -36,6 +36,10 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
       return { ...previous, [name]: current }
     })
   }, [reportFrame])
+  const onStats = useCallback((name: FrontCamera, stats: CameraFrameStats) => {
+    diagnostics.current.record('video', 'camera_stats',
+      `${name}:ema=${stats.emaIntervalMs}ms,budget=${stats.stallBudgetMs}ms,max=${stats.maxIntervalMs}ms`)
+  }, [])
   const onBusy = useCallback((value: boolean) => { setBusy(value); onBusyChange(value) }, [onBusyChange])
   const onIntent = useCallback(() => {}, [])
   const liveCount = (['left', 'center', 'right'] as const).filter(
@@ -57,7 +61,7 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
       networkQuality={null} speedKph={row.speed ?? undefined} batteryPercent={row.battery ?? undefined}
       runModeLabel={row.modeLabel} locationLabel={row.locationReason} authenticated busy={busy} observeOnly={observeOnly}
       onBack={onClose} onMonitor={onMonitor} videoStatus={`${cameras.error ? '监看已结束' : cameras.recovering ? '正在恢复监看' : cameras.connected ? '已连接' : '未连接 / 正在连接'} · 三路：${videoReady ? '正在出帧' : `${liveCount}/3 路出帧`}`}
-      cameraView={<ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} failedCameras={cameras.failedCameras} requireFrameCallback onFrame={onFrame} />}
+      cameraView={<ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} failedCameras={cameras.failedCameras} requireFrameCallback onFrame={onFrame} onStats={onStats} />}
       controlPanel={!observeOnly
       ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={videoReady} onBusyChange={onBusy} onIntent={onIntent} diagnostics={diagnostics.current} />
       : <div className="space-y-2 text-xs text-amber-200">

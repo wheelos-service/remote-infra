@@ -51,12 +51,15 @@ Separate **physical motion safety** from **control-session ownership**:
        `session_id` / Ed25519 key binding; frontend retains the session and
        continues HTTP lease renewal.
      - **Recovery**: Once the control link (or 3 front cameras within 5 s)
-       recovers, neutral/brake (`throttle == 0`) packets restore `ACCEPTED` and
-       the operator manually re-enables the gamepad.
+       recovers, neutral/brake (`throttle == 0`) packets restore `ACCEPTED`;
+       transient `<= 5 s` pauses automatically re-enable the gamepad only if
+       the tab remains active/focused and the physical gamepad passes
+       `GamepadInput`'s `needsNeutral` + `enableHeld` safety gate (zero motion
+       until sticks are centered and enable is re-pressed).
      - **`> 1500 ms` / `> 5 s` video loss / lease loss / hardware `FAULT` / explicit exit**:
        Permanently lock/revoke the session, emit `STOP` (`Guardian HARD_ESTOP`),
-       and require full `handover` confirmation (`PENDING -> CONFIRMED`) before
-       any new control session.
+       automatically release & complete `handover` confirmation (`PENDING ->
+       CONFIRMED -> closed`) while keeping a persistent fault notice visible.
    - Future enhancement: consolidate workbench video and control `Room`
      lifecycles into a single authenticated Room if RBAC token separation is
      unified, and extend `PAUSED_HOLD` to longer windows (`8–15 s`) with an
@@ -162,13 +165,29 @@ Resolved across `apollo-base` (`v1`), `data/sdk-kit` (`v2`), and `livekit-infra`
        `Guardian` `HARD_ESTOP`) and recovers on neutral/brake (`throttle == 0`),
        before locking terminally at `1500 ms`.
      - **Real-camera & `503` resilience**: `media_backend` self-heals
-       single-camera >250 ms PTS jumps via per-camera IDR resync instead of
+       single-camera >500 ms PTS jumps via per-camera IDR resync instead of
        crashing `vehicle_media_worker`; `DemandGate` ignores duplicate-ms polls
        without dropping an unexpired lease; Gateway `ManagedRuntime` isolates
        `instanceMu` from `additiveMu` so admin writes never stall
        `/media-demand` or `/control/context`.
-   - **L2 / L3**: Long outages / explicit exit revoke + handover; CAN/chassis/
+   - **L2 / L3**: Long outages / explicit exit automatically release + complete
+     handover (`closed`) while keeping the fault banner visible; CAN/chassis/
      Monitor faults and `Space` trigger immediate `HARD_ESTOP`.
+9. **Gateway SSOT `timing_policy`, adaptive `T_frame_stall`, & weak-dependency video display**:
+   - Gateway `/control/acquire`, `/control/renew`, and `/control/context` emit
+     a single derived `timing_policy` contract (`control_tick_ms`,
+     `watchdog_pause_ms`, `watchdog_lock_ms`, `rtc_reconnect_grace_ms`,
+     `media_pause_grace_ms`, `ack_budget_ms`, `feedback_timeout_ms`,
+     `context_ttl_ms`) consumed with local safety clamps by both
+     `ControlSessionClient` and `ControlReceiver`.
+   - `camera-feed.ts` adapts `T_frame_stall` from each camera's measured
+     frame-interval EMA (`clamp(ema * 6, 900, 1500)` after 3 samples) and
+     emits `camera_stats` to `TeleopDiagnosticsBuffer`.
+   - `ThreeCameraView.tsx` treats `<video>` visibility as a weak dependency:
+     once a track renders its first frame (`hasRendered`), transient stalls
+     keep the last video frame visible with a compact corner badge instead of
+     blanking/hiding the slot, while `videoReady = false` continues to gate
+     takeover and drive L1 brake-hold.
 
 Remaining items before unattended/physical driving rollout:
 - Real-browser validation of `capture_time_us` -> `VideoFrameCallbackMetadata.captureTime`

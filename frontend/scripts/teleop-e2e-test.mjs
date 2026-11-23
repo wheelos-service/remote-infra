@@ -120,6 +120,16 @@ const server = http.createServer(async (req, res) => {
       token: `control-token-${sessionId}`,
       renew_after_ms: 5_000,
       server_time_ms: nowServer(),
+      timing_policy: {
+        control_tick_ms: 50,
+        watchdog_pause_ms: 300,
+        watchdog_lock_ms: 1500,
+        rtc_reconnect_grace_ms: 1200,
+        media_pause_grace_ms: 5000,
+        ack_budget_ms: 600,
+        feedback_timeout_ms: 1000,
+        context_ttl_ms: 5000,
+      },
     })
   }
 
@@ -380,6 +390,13 @@ test('E2E Exception Flows: L0 503 retries & maintenance reject, L1 video rebuild
   await lifecycle.start()
   assert.equal(state.viewingAcquireAttempts, 3, 'transient 503 should retry twice and succeed on 3rd attempt')
 
+  // L1 Reconnecting -> Reconnected completes recovery immediately when 3 tracks stay live
+  observerEvents.reconnecting()
+  assert.equal(recoverState, true)
+  observerEvents.reconnected()
+  lifecycle.frameRendered()
+  assert.equal(recoverState, false)
+
   // L1 Disconnected triggers /viewing/{id}/token refresh and Room rebuild without bumping expiry
   const initialExpiry = state.viewingLease.expires_at_ms
   observerEvents.disconnected()
@@ -479,6 +496,14 @@ test('E2E Exception Flows: L0 503 retries & maintenance reject, L1 video rebuild
     await new Promise(resolve => setTimeout(resolve, 20))
     assert.deepEqual(receiver.lastCommand, { steering: 0, throttle: 0, brake: 100, direction: 0 })
     assert.equal(ctrl.isEmergencyStop, true)
+    assert.equal(ctrl.timingPolicy.mediaPauseGraceMs, 5000)
+    // Simulate >5s media loss -> fail locks session -> auto-release completes handover to closed
+    controls.setAvailable(false)
+    ctrl.setMediaReady(false)
+    assert.equal(ctrl.state, 'locked')
+    await ctrl.release()
+    assert.equal(ctrl.state, 'closed')
+    assert.equal(state.handoverConfirmed, true)
   } finally {
     unbind()
     await ctrl.release()

@@ -1,44 +1,63 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { bindCameraFeed, type CameraFeedTrack } from '../lib/camera-feed'
+import { bindCameraFeed, type CameraFeedTrack, type CameraFrameStats } from '../lib/camera-feed'
 
 export type FrontCamera = 'left' | 'center' | 'right'
 export const frontCameras: { name: FrontCamera; label: string }[] = [
   { name: 'left', label: '前左' }, { name: 'center', label: '前中' }, { name: 'right', label: '前右' },
 ]
 
-function CameraSlot({ name, label, track, failure, requireFrameCallback, onFrame }: {
+function CameraSlot({ name, label, track, failure, requireFrameCallback, onFrame, onStats }: {
   name: FrontCamera; label: string; track?: CameraFeedTrack; failure?: string; requireFrameCallback?: boolean
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
+  onStats?: (name: FrontCamera, stats: CameraFrameStats) => void
 }) {
   const video = useRef<HTMLVideoElement>(null)
   const onFrameRef = useRef(onFrame)
+  const onStatsRef = useRef(onStats)
   onFrameRef.current = onFrame
+  onStatsRef.current = onStats
   const [live, setLive] = useState(false)
+  const [hasRendered, setHasRendered] = useState(false)
   useEffect(() => {
     setLive(false)
+    setHasRendered(false)
     onFrameRef.current?.(name, false, track)
     if (!track || !video.current) return
     return bindCameraFeed(track, video.current, (value) => {
       setLive(value)
+      if (value) setHasRendered(true)
       onFrameRef.current?.(name, value, track)
-    }, { requireFrameCallback })
+    }, {
+      requireFrameCallback,
+      onStats: stats => onStatsRef.current?.(name, stats),
+    })
   }, [name, track, requireFrameCallback])
   return <section data-camera={name} className="relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-slate-700 bg-black">
     <header className="flex justify-between gap-2 bg-slate-900 px-3 py-2 text-xs">
-      <span>{label}</span><span className={live ? 'text-emerald-300' : failure ? 'text-red-300' : 'text-amber-300'}>{live ? '正在出帧' : failure ? failure : track ? '停更 / 等待出帧' : '等待视频'}</span>
+      <span>{label}</span><span className={live ? 'text-emerald-300' : failure ? 'text-red-300' : 'text-amber-300'}>{live ? '正在出帧' : failure ? failure : track ? '卡顿 / 等待出帧' : '等待视频'}</span>
     </header>
     <div className="relative min-h-0 flex-1">
-      <video ref={video} className={`h-full w-full object-contain ${live ? '' : 'invisible'}`} />
-      {!live && <p className="absolute inset-0 flex items-center justify-center p-3 text-center text-xs text-amber-200">{failure ? `相机${failure} · 不可驾驶` : track ? '画面未更新 · 不可驾驶' : '未接入该相机'}</p>}
+      <video ref={video} className={`h-full w-full object-contain ${hasRendered ? '' : 'opacity-0'}`} />
+      {!live && hasRendered && (
+        <span className="pointer-events-none absolute right-2 top-2 rounded border border-amber-500/70 bg-amber-950/85 px-2 py-1 text-[11px] text-amber-200">
+          {failure ? `相机${failure} · 不可驾驶` : requireFrameCallback ? '画面卡顿 · 暂停发令' : '画面卡顿（监看）'}
+        </span>
+      )}
+      {!live && !hasRendered && (
+        <p className="absolute inset-0 flex items-center justify-center p-3 text-center text-xs text-amber-200">
+          {failure ? `相机${failure} · 不可驾驶` : track ? '等待首帧出画…' : '未接入该相机'}
+        </p>
+      )}
     </div>
   </section>
 }
 
-export default function ThreeCameraView({ vehicleId, tracks = {}, failedCameras = {}, requireFrameCallback = false, onFrame }: {
+export default function ThreeCameraView({ vehicleId, tracks = {}, failedCameras = {}, requireFrameCallback = false, onFrame, onStats }: {
   vehicleId: string; tracks?: Partial<Record<FrontCamera, CameraFeedTrack>>
   failedCameras?: Partial<Record<FrontCamera, string>>
   requireFrameCallback?: boolean
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
+  onStats?: (name: FrontCamera, stats: CameraFrameStats) => void
 }) {
   const [focused, setFocused] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
@@ -55,7 +74,7 @@ export default function ThreeCameraView({ vehicleId, tracks = {}, failedCameras 
       {frontCameras.map(camera => <div key={camera.name} className="flex min-h-0 min-w-0 [&>section]:flex-1"
         style={focused ? camera.name === 'center' ? { gridColumn: 1, gridRow: '1 / 3' }
           : { gridColumn: 2, gridRow: camera.name === 'left' ? 1 : 2 } : undefined}>
-        <CameraSlot {...camera} track={tracks[camera.name]} failure={failedCameras[camera.name]} requireFrameCallback={requireFrameCallback} onFrame={onFrame} />
+        <CameraSlot {...camera} track={tracks[camera.name]} failure={failedCameras[camera.name]} requireFrameCallback={requireFrameCallback} onFrame={onFrame} onStats={onStats} />
       </div>)}
     </div>
   </section>

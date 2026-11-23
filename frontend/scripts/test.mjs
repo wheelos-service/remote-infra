@@ -1080,6 +1080,75 @@ test('bindCameraFeed requires frame callback when requested and ignores frozen r
   } finally { stopMeta(); context.mock.timers.reset() }
 })
 
+test('bindCameraFeed adapts stall budget from measured frame interval EMA and emits stats', (context) => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  context.mock.timers.enable({ apis: ['setInterval'] })
+  let callback
+  const video = {
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    requestVideoFrameCallback: fn => { callback = fn; return 1 },
+    cancelVideoFrameCallback: () => {},
+  }
+  const states = []
+  const statsLog = []
+  const stop = cameraFeed.bindCameraFeed({ attach: () => {}, detach: () => {} }, video,
+    live => states.push(live), { requireFrameCallback: true, onStats: s => statsLog.push(s) })
+  try {
+    assert.equal(cameraFeed.adaptiveFrameStallMs(33, 2), cameraFeed.CAMERA_FRAME_TIMEOUT_MS)
+    assert.equal(cameraFeed.adaptiveFrameStallMs(33, 5), 900)
+    assert.equal(cameraFeed.adaptiveFrameStallMs(120, 5), 900)
+    assert.equal(cameraFeed.adaptiveFrameStallMs(200, 5), 1200)
+    assert.equal(cameraFeed.adaptiveFrameStallMs(500, 5), cameraFeed.CAMERA_FRAME_TIMEOUT_MS)
+
+    callback(now, { rtpTimestamp: 1 })
+    for (let i = 2; i <= 5; i++) {
+      now += 200
+      callback(now, { rtpTimestamp: i })
+    }
+    now += 1250
+    context.mock.timers.tick(100)
+    assert.deepEqual(states, [true, false], '5fps stream with 200ms EMA should detect stall around 1200ms instead of waiting 1500ms')
+    assert.ok(statsLog.length >= 1 && statsLog.at(-1).stallBudgetMs === 1200 && statsLog.at(-1).emaIntervalMs === 200)
+  } finally { stop(); context.mock.timers.reset() }
+})
+
+test('CONTROL_TIMING obeys strict ordering and resolveControlTiming clamps server timing_policy', async () => {
+  const { resolveControlTiming } = await loadBundle('control-timing')
+  assert.ok(CONTROL_TIMING.tickMs < 300)
+  assert.ok(300 < CONTROL_TIMING.rtcReconnectGraceMs)
+  assert.ok(CONTROL_TIMING.rtcReconnectGraceMs < 1500)
+  assert.ok(1500 < CONTROL_TIMING.mediaPauseGraceMs)
+
+  const custom = resolveControlTiming({
+    control_tick_ms: 40,
+    watchdog_pause_ms: 250,
+    watchdog_lock_ms: 1400,
+    rtc_reconnect_grace_ms: 1100,
+    media_pause_grace_ms: 4000,
+    ack_budget_ms: 500,
+    feedback_timeout_ms: 900,
+  })
+  assert.deepEqual(custom, {
+    tickMs: 40,
+    ackBudgetMs: 500,
+    feedbackTimeoutMs: 900,
+    rtcReconnectGraceMs: 1100,
+    mediaPauseGraceMs: 4000,
+  })
+  const clamped = resolveControlTiming({
+    control_tick_ms: 5,
+    watchdog_pause_ms: 5000,
+    watchdog_lock_ms: 99999,
+    rtc_reconnect_grace_ms: 99999,
+    media_pause_grace_ms: 99999,
+  })
+  assert.equal(clamped.tickMs, 20)
+  assert.equal(clamped.mediaPauseGraceMs, 10_000)
+  assert.ok(clamped.rtcReconnectGraceMs < 3000)
+})
+
 test('video loss fences v2 control and restored frames cannot rearm the session', async () => {
   const blocked = controllerFixture()
   blocked.controller.setMediaReady(false)
@@ -1322,7 +1391,7 @@ test('late publication completion locks and disconnects before a timer gets to r
   context.mock.method(performance, 'now', () => now)
   const f = controllerFixture()
   const publish = f.connection.publish
-  f.connection.publish = async body => { await publish(body); now += 250 }
+  f.connection.publish = async body => { await publish(body); now += CONTROL_TIMING.sendBudgetMs }
   try {
     await f.controller.acquire()
     f.accept()

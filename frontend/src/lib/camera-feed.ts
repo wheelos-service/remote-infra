@@ -3,11 +3,27 @@ export interface CameraFeedTrack {
   detach(element: HTMLVideoElement): HTMLMediaElement[]
 }
 
-export interface CameraFeedOptions {
-  requireFrameCallback?: boolean
+export interface CameraFrameStats {
+  emaIntervalMs: number
+  stallBudgetMs: number
+  maxIntervalMs: number
+  lastIntervalMs: number
 }
 
-export const CAMERA_FRAME_TIMEOUT_MS = 1000
+export interface CameraFeedOptions {
+  requireFrameCallback?: boolean
+  onStats?: (stats: CameraFrameStats) => void
+}
+
+export const CAMERA_FRAME_TIMEOUT_MS = 1500
+const CAMERA_FRAME_MIN_STALL_MS = 900
+
+export function adaptiveFrameStallMs(emaIntervalMs: number, sampleCount: number): number {
+  if (sampleCount < 3 || !Number.isFinite(emaIntervalMs) || emaIntervalMs <= 0) {
+    return CAMERA_FRAME_TIMEOUT_MS
+  }
+  return Math.round(Math.min(CAMERA_FRAME_TIMEOUT_MS, Math.max(CAMERA_FRAME_MIN_STALL_MS, emaIntervalMs * 6)))
+}
 
 export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
   changed: (live: boolean) => void, options?: CameraFeedOptions): () => void {
@@ -16,14 +32,38 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
   let lastFrame = -Infinity
   let lastRtpTimestamp: number | undefined
   let lastPresentedFrames: number | undefined
+  let emaIntervalMs = 0
+  let maxIntervalMs = 0
+  let lastIntervalMs = 0
+  let intervalSamples = 0
+  let stallBudgetMs = CAMERA_FRAME_TIMEOUT_MS
   let frameId: number | undefined
+  const emitStats = () => {
+    options?.onStats?.({
+      emaIntervalMs: Math.round(emaIntervalMs),
+      stallBudgetMs,
+      maxIntervalMs: Math.round(maxIntervalMs),
+      lastIntervalMs: Math.round(lastIntervalMs),
+    })
+  }
   const report = (value: boolean) => {
     if (stopped || live === value) return
     live = value
+    if (!value && intervalSamples > 0) emitStats()
     changed(value)
   }
   const fresh = () => {
-    lastFrame = performance.now()
+    const now = performance.now()
+    if (Number.isFinite(lastFrame)) {
+      const delta = Math.max(0, now - lastFrame)
+      lastIntervalMs = delta
+      maxIntervalMs = Math.max(maxIntervalMs, delta)
+      emaIntervalMs = intervalSamples === 0 ? delta : emaIntervalMs * 0.75 + delta * 0.25
+      intervalSamples++
+      stallBudgetMs = adaptiveFrameStallMs(emaIntervalMs, intervalSamples)
+      if (intervalSamples % 30 === 0) emitStats()
+    }
+    lastFrame = now
     report(true)
   }
   const frame = (_now?: number, metadata?: VideoFrameCallbackMetadata) => {
@@ -56,7 +96,7 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
   track.attach(video)
   if (hasCallback) frameId = video.requestVideoFrameCallback(frame)
   const timer = setInterval(() => {
-    if (performance.now() - lastFrame >= CAMERA_FRAME_TIMEOUT_MS) report(false)
+    if (performance.now() - lastFrame >= stallBudgetMs) report(false)
   }, 100)
   return () => {
     if (stopped) return

@@ -18,10 +18,11 @@ type acquireControlRequest struct {
 }
 
 type controlSessionResponse struct {
-	Session      ControlSession `json:"session"`
-	Token        string         `json:"token,omitempty"`
-	RenewAfterMS int64          `json:"renew_after_ms,omitempty"`
-	ServerTimeMS int64          `json:"server_time_ms,omitempty"`
+	Session      ControlSession       `json:"session"`
+	Token        string               `json:"token,omitempty"`
+	RenewAfterMS int64                `json:"renew_after_ms,omitempty"`
+	ServerTimeMS int64                `json:"server_time_ms,omitempty"`
+	TimingPolicy *ControlTimingPolicy `json:"timing_policy,omitempty"`
 }
 
 func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
@@ -115,11 +116,13 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		OperatorID: session.OperatorID, VehicleID: session.VehicleID, SessionID: session.SessionID,
 		Event: "control_acquire", Result: "success",
 	})
+	policy := defaultControlTimingPolicy()
 	writeJSON(w, http.StatusOK, controlSessionResponse{
 		Session:      session,
 		Token:        token,
 		RenewAfterMS: controlLeases.ttl.Milliseconds() / 2,
 		ServerTimeMS: now.UnixMilli(),
+		TimingPolicy: &policy,
 	})
 }
 
@@ -148,10 +151,12 @@ func handleRenewControl(w http.ResponseWriter, r *http.Request) {
 		OperatorID: session.OperatorID, VehicleID: session.VehicleID, SessionID: session.SessionID,
 		Event: "control_renew", Result: "success",
 	})
+	policy := defaultControlTimingPolicy()
 	writeJSON(w, http.StatusOK, controlSessionResponse{
 		Session:      session,
 		RenewAfterMS: controlLeases.ttl.Milliseconds() / 2,
 		ServerTimeMS: time.Now().UnixMilli(),
+		TimingPolicy: &policy,
 	})
 }
 

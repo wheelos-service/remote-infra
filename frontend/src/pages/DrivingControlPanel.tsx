@@ -34,9 +34,12 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
   const safetyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const mediaPauseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const hiddenAt = useRef<number | undefined>(undefined)
+  const wasGamepadEnabledBeforePause = useRef(false)
+  const autoReleasedFor = useRef<ControlSessionClient | undefined>(undefined)
   mediaReady.current = videoReady
   const [, render] = useState(0)
   const [message, setMessage] = useState('')
+  const [faultNotice, setFaultNotice] = useState('')
   const [mediaPaused, setMediaPaused] = useState(false)
   const [vehicleArbitration, setVehicleArbitration] = useState<{
     state?: string; safetyOverride?: string; errorCode?: string; reason?: string; drivingMode?: string; speedMps?: number; steeringPct?: number
@@ -54,10 +57,26 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
     if (mediaPauseTimer.current) clearTimeout(mediaPauseTimer.current)
     mediaPauseTimer.current = undefined
   }, [])
+  const releaseSession = useCallback(async (active: ControlSessionClient | undefined = controller.current) => {
+    clearMediaPauseTimer()
+    setMediaPaused(false)
+    const drained = input.current?.suspendAndWait('正在释放控制权') ?? Promise.resolve()
+    await withinBudget(drained, 'Input neutralization timed out').catch(() => undefined)
+    let failure: unknown
+    try {
+      if (active) await withinBudget(active.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs),
+        'Safe publication timed out')
+    }
+    catch (error) { failure = error }
+    try { await active?.release() }
+    catch (error) { failure ??= error }
+    if (failure && mounted.current) setMessage(failure instanceof Error ? failure.message : 'Handover pending')
+  }, [clearMediaPauseTimer])
   const applySafetyEvent = useCallback((event: ControlSafetyEvent,
       active: ControlSessionClient | undefined = controller.current): void => {
     applyControlSafetyStrategy(event, {
       disarm: (safetyEvent, decision) => {
+        if (safetyEvent !== 'rtc_reconnecting') wasGamepadEnabledBeforePause.current = false
         input.current?.suspend(decision.message)
         if (safetyEvent === 'page_hidden') hiddenAt.current = Date.now()
         if (decision.escalateAfterMs && decision.escalateTo) {
@@ -73,6 +92,11 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       observe: (safetyEvent, decision) => {
         if (safetyEvent === 'rtc_reconnected') {
           if (decision.message) input.current?.suspend(decision.message)
+          if (wasGamepadEnabledBeforePause.current && active?.state === 'ready' &&
+              mediaReady.current && !active.isEmergencyStop && !document.hidden && document.hasFocus()) {
+            wasGamepadEnabledBeforePause.current = false
+            gamepad.current?.setEnabled(true)
+          }
           return
         }
         const restored = safetyEvent === 'page_visible' || (safetyEvent === 'window_focus' && !document.hidden)
@@ -89,6 +113,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       },
       release: (_safetyEvent, decision) => {
         hiddenAt.current = undefined
+        wasGamepadEnabledBeforePause.current = false
         clearSafetyTimer()
         clearMediaPauseTimer()
         setMediaPaused(false)
@@ -112,6 +137,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       },
       fault: (_safetyEvent, decision) => {
         hiddenAt.current = undefined
+        wasGamepadEnabledBeforePause.current = false
         clearSafetyTimer()
         clearMediaPauseTimer()
         setMediaPaused(false)
@@ -123,6 +149,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
   const triggerEmergencyStop = useCallback(() => {
     const active = controller.current
     if (!active || active.state !== 'ready') return
+    wasGamepadEnabledBeforePause.current = false
     if (input.current?.isAvailable) {
       input.current.emergencyStop()
       return
@@ -139,13 +166,21 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
   }, [onIntent, vehicleId])
   const changed = useCallback(() => {
     if (!mounted.current) return
-    const state = controller.current?.state
+    const active = controller.current
+    const state = active?.state
     const ready = isControlReady(state, mediaReady.current)
     if (input.current?.isAvailable !== ready) input.current?.setAvailable(ready)
     if (!ready) onIntent(vehicleId)
+    if (active && state === 'locked' && autoReleasedFor.current !== active) {
+      autoReleasedFor.current = active
+      wasGamepadEnabledBeforePause.current = false
+      const reason = active.error || '控制已中断'
+      setFaultNotice(`已自动安全停车并释放控制：${reason}`)
+      void releaseSession(active)
+    }
     onBusyChange(Boolean(state && state !== 'closed' && state !== 'idle'))
     render((n) => n + 1)
-  }, [onBusyChange, onIntent, vehicleId])
+  }, [onBusyChange, onIntent, releaseSession, vehicleId])
 
   useEffect(() => {
     mounted.current = true
@@ -195,9 +230,15 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       setMediaPaused(false)
       active?.setMediaReady(true)
       changed()
+      if (wasGamepadEnabledBeforePause.current && active?.state === 'ready' &&
+          !active.isEmergencyStop && !document.hidden && document.hasFocus()) {
+        wasGamepadEnabledBeforePause.current = false
+        gamepad.current?.setEnabled(true)
+      }
       return
     }
     if (!active || active.state !== 'ready') {
+      wasGamepadEnabledBeforePause.current = false
       clearMediaPauseTimer()
       setMediaPaused(false)
       active?.setMediaReady(false)
@@ -205,9 +246,10 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       return
     }
     // L1 pause grace: immediately stop user inputs and hold gentle service brake
-    // (only when already REMOTE and not emergency-braking) for up to 5s while
-    // video recovers, before escalating to terminal media_lost.
+    // (only when already REMOTE and not emergency-braking) up to server contract
+    // mediaPauseGraceMs while video recovers, before escalating to auto-release.
     if (!mediaPauseTimer.current) {
+      wasGamepadEnabledBeforePause.current ||= Boolean(input.current?.isGamepadEnabled)
       diagnostics?.record('video', 'media_pause_hold', vehicleArbitrationRef.current?.state === 'REMOTE' ? 'remote_brake_20' : 'standby')
       setMediaPaused(true)
       if (!active.isEmergencyStop) {
@@ -230,11 +272,12 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       mediaPauseTimer.current = setTimeout(() => {
         mediaPauseTimer.current = undefined
         if (!mediaReady.current && controller.current === active && active.state === 'ready') {
+          wasGamepadEnabledBeforePause.current = false
           setMediaPaused(false)
           active.setMediaReady(false)
           changed()
         }
-      }, CONTROL_TIMING.mediaPauseGraceMs)
+      }, active.timingPolicy.mediaPauseGraceMs)
     }
     changed()
   }, [videoReady, changed, clearMediaPauseTimer, diagnostics, onIntent, vehicleId])
@@ -247,6 +290,9 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       return
     }
     setMessage('')
+    setFaultNotice('')
+    wasGamepadEnabledBeforePause.current = false
+    autoReleasedFor.current = undefined
     clearMediaPauseTimer()
     setMediaPaused(false)
     setVehicleArbitration(undefined)
@@ -298,6 +344,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       if (!['releasing', 'pending', 'closed'].includes(next.state)) applySafetyEvent('rtc_disconnected', next)
     })
     room.on(RoomEvent.Reconnecting, () => {
+      wasGamepadEnabledBeforePause.current = Boolean(input.current?.isGamepadEnabled)
       next.setRtcReconnecting(true)
       applySafetyEvent('rtc_reconnecting', next)
     })
@@ -309,21 +356,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       if (mounted.current) setMessage(error instanceof Error ? error.message : 'Control acquire failed')
     }
   }
-  const release = async () => {
-    clearMediaPauseTimer()
-    setMediaPaused(false)
-    const drained = input.current?.suspendAndWait('正在释放控制权') ?? Promise.resolve()
-    await withinBudget(drained, 'Input neutralization timed out').catch(() => undefined)
-    let failure: unknown
-    try {
-      if (controller.current) await withinBudget(controller.current.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs),
-        'Safe publication timed out')
-    }
-    catch (error) { failure = error }
-    try { await controller.current?.release() }
-    catch (error) { failure ??= error }
-    if (failure && mounted.current) setMessage(failure instanceof Error ? failure.message : 'Handover pending')
-  }
+  const release = () => releaseSession()
   const downloadDiagnostics = () => {
     const active = controller.current
     if (!active && !diagnostics) return
@@ -395,8 +428,8 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       <p className="mt-2">{videoReady
         ? '三路画面正在出帧'
         : mediaPaused
-          ? '画面短暂中断：已保持温和制动并停用输入（5s 内恢复无需重申控制）'
-          : '三路画面未就绪：禁止启用输入；画面恢复不会自动恢复控制'}</p>
+          ? '画面短暂中断：已保持温和制动（5s 内恢复且手柄回中后直接续控）'
+          : '三路画面未就绪：禁止申请或恢复输出'}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <select aria-label="控制手柄" className="rounded border border-amber-800 bg-slate-950 p-2"
           value={pad?.selectedIndex ?? ''} disabled={!ready} onChange={(event) => {
@@ -440,13 +473,18 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
           } · 制动 ${controller.current.feedback.command.brake}% · 方向 ${controller.current.feedback.command.direction}`
           : '等待反馈'}
       </p>
-      {(message || controller.current?.error) && <p role="alert" className="mt-2 text-red-300">{controller.current?.error || message}</p>}
+      {(faultNotice || message || controller.current?.error) && (
+        <p role="alert" className="mt-2 text-red-300">{faultNotice || controller.current?.error || message}</p>
+      )}
       {controller.current?.cleanupError && <p role="alert" className="mt-2 text-red-300">交接清理：{controller.current.cleanupError}</p>}
       <button type="button" className={`${button} mt-2`} disabled={!controller.current && !diagnostics}
         onClick={downloadDiagnostics}>导出近期遥操作诊断</button>
       <div className="fixed inset-x-0 bottom-0 z-[60] flex flex-wrap items-center justify-end gap-3 border-t border-amber-800 bg-slate-950 p-3 text-xs">
         <span>{vehicleId} · {state} · {inputState.gamepadEnabled ? '手柄已启用' : '手柄未启用'}</span>
-        <button type="button" disabled={!ready} className={button} onClick={() => input.current?.suspend('已发送停止，请重新启用手柄')}>停止并停用手柄</button>
+        <button type="button" disabled={!ready} className={button} onClick={() => {
+          wasGamepadEnabledBeforePause.current = false
+          input.current?.suspend('已发送停止，请重新启用手柄')
+        }}>停止并停用手柄</button>
         <button type="button" disabled={state !== 'ready'} className="rounded border border-red-500 bg-red-950 px-4 py-2 disabled:opacity-40" onClick={triggerEmergencyStop}>制动（Space）</button>
       </div>
     </section>

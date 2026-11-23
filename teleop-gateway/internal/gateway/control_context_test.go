@@ -53,6 +53,12 @@ func TestDeviceControlContextAndSimulationFence(t *testing.T) {
 	if acquired.ServerTimeMS <= 0 {
 		t.Fatalf("acquire response missing server_time_ms: %+v", acquired)
 	}
+	if acquired.TimingPolicy == nil ||
+		acquired.TimingPolicy.ControlTickMS >= acquired.TimingPolicy.WatchdogPauseMS ||
+		acquired.TimingPolicy.WatchdogPauseMS >= acquired.TimingPolicy.RTCReconnectGraceMS ||
+		acquired.TimingPolicy.RTCReconnectGraceMS >= acquired.TimingPolicy.WatchdogLockMS {
+		t.Fatalf("acquire timing_policy violated ordering invariants: %+v", acquired.TimingPolicy)
+	}
 	parts := strings.Split(acquired.Token, ".")
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -70,7 +76,8 @@ func TestDeviceControlContextAndSimulationFence(t *testing.T) {
 	var context DeviceControlContext
 	if json.Unmarshal(result.Body.Bytes(), &context) != nil || context.State != "ACTIVE" ||
 		context.TTLMS <= 0 || context.Revision != 1 || context.Session == nil ||
-		context.Session.ClientInstanceID != "browser-test" {
+		context.Session.ClientInstanceID != "browser-test" || context.TimingPolicy == nil ||
+		context.TimingPolicy.WatchdogLockMS != 1500 {
 		t.Fatal("invalid active context", result.Body.String())
 	}
 	ack := fmt.Sprintf(`{"session_id":%q,"revision":1}`, acquired.Session.SessionID)

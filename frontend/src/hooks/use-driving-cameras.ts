@@ -31,7 +31,7 @@ export function useDrivingCameras(
     let disposed = false
     let frameEpoch = 0
     let observerEpoch = 0
-    const rendered = new Set<FrontCamera>()
+    const liveTracks = new Map<FrontCamera, CameraFeedTrack>()
     let activeTracks: CameraTracks = {}
     let activeFailures: CameraFailures = {}
     const updateTracks = (next: CameraTracks) => {
@@ -49,17 +49,45 @@ export function useDrivingCameras(
       updateFailures(next)
     }
     const removeTrack = (track?: Track) => {
-      if (track) updateTracks(Object.fromEntries(Object.entries(activeTracks).filter(([, value]) => value !== track)))
+      if (!track) return
+      for (const [cam, liveTrack] of liveTracks) {
+        if (liveTrack === track) liveTracks.delete(cam)
+      }
+      updateTracks(Object.fromEntries(Object.entries(activeTracks).filter(([, value]) => value !== track)))
+    }
+    const checkRecovery = () => {
+      if (disposed || !recoverViewing) return
+      if (threeCamerasReady(Object.fromEntries(
+        (['left', 'center', 'right'] as const).map(name => [
+          name,
+          Boolean(activeTracks[name]) && liveTracks.get(name) === activeTracks[name],
+        ]),
+      ))) {
+        lifecycle.frameRendered()
+      }
     }
     setTracks({})
     setFailedCameras({})
-    playbackRef.current = undefined
+    playbackRef.current = {
+      onFrame: (camera, live, track) => {
+        if (disposed) return
+        if (live) {
+          if (activeTracks[camera] === track) {
+            liveTracks.set(camera, track)
+            checkRecovery()
+          }
+        } else if (liveTracks.get(camera) === track) {
+          liveTracks.delete(camera)
+        }
+      },
+    }
     setPlaybackEpoch(undefined)
     setConnected(false)
     setRecovering(false)
     setError('')
     const failure = (cause: unknown) => {
       if (disposed) return
+      liveTracks.clear()
       updateTracks({})
       updateFailures({})
       playbackRef.current = undefined
@@ -71,7 +99,7 @@ export function useDrivingCameras(
       vehicleId, bearer, clientInstanceId: newViewingId(),
       createObserver: (token, events) => {
         if (++observerEpoch > 1 && !disposed) {
-          rendered.clear()
+          liveTracks.clear()
           updateTracks({})
           updateFailures({})
           setPlaybackEpoch(frameEpoch)
@@ -140,9 +168,24 @@ export function useDrivingCameras(
         observer.on(RoomEvent.Reconnected, () => {
           acceptTracks = true
           updateFailures({})
+          const present = new Set<Track>()
+          for (const participant of observer.remoteParticipants.values()) {
+            if (!isVehicleVideoSender(participant.identity, vehicleId)) continue
+            for (const publication of participant.trackPublications.values()) {
+              if (publication.track && !publication.isMuted) present.add(publication.track)
+            }
+          }
+          const prunedEntries = Object.entries(activeTracks).filter(([, track]) => track && present.has(track))
+          if (prunedEntries.length !== Object.keys(activeTracks).length) {
+            for (const [cam, liveTrack] of liveTracks) {
+              if (!present.has(liveTrack as unknown as Track)) liveTracks.delete(cam)
+            }
+            updateTracks(Object.fromEntries(prunedEntries))
+          }
           diagnostics?.record('video', 'room_reconnected')
           events.reconnected()
           subscribeExisting()
+          checkRecovery()
         })
         observer.on(RoomEvent.Disconnected, () => {
           diagnostics?.record('video', 'room_disconnected')
@@ -161,23 +204,9 @@ export function useDrivingCameras(
       },
       onRecovering: recoverViewing ? () => {
         if (disposed) return
-        const id = ++frameEpoch
-        rendered.clear()
+        ++frameEpoch
         setConnected(false)
         setRecovering(true)
-        playbackRef.current = { onFrame: (camera, live, track) => {
-          if (disposed || id !== frameEpoch || activeTracks[camera] !== track) return
-          if (!live) {
-            rendered.delete(camera)
-            return
-          }
-          rendered.add(camera)
-          if (threeCamerasReady(Object.fromEntries(
-            (['left', 'center', 'right'] as const).map(name => [name, rendered.has(name) && Boolean(activeTracks[name])]),
-          ))) {
-            lifecycle.frameRendered()
-          }
-        } }
       } : undefined,
       onConnected: () => {
         if (disposed) return

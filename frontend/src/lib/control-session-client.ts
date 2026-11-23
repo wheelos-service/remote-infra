@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { CONTROL_TIMING } from './control-timing'
+import { CONTROL_TIMING, resolveControlTiming, type ResolvedControlTiming } from './control-timing'
 import { controlSafetyDecision } from './control-safety'
 import { organizationHeaders, requestOrganization } from './organization-context'
 import {
@@ -15,11 +15,22 @@ const sessionSchema = z.object({
   sender_identity: z.string(),
   status: z.literal('ACTIVE'),
 })
+const timingPolicySchema = z.object({
+  control_tick_ms: z.number().int().positive().optional(),
+  watchdog_pause_ms: z.number().int().positive().optional(),
+  watchdog_lock_ms: z.number().int().positive().optional(),
+  rtc_reconnect_grace_ms: z.number().int().positive().optional(),
+  media_pause_grace_ms: z.number().int().positive().optional(),
+  ack_budget_ms: z.number().int().positive().optional(),
+  feedback_timeout_ms: z.number().int().positive().optional(),
+  context_ttl_ms: z.number().int().positive().optional(),
+}).optional()
 const responseSchema = z.object({
   session: sessionSchema,
   token: z.string().min(1).optional(),
   renew_after_ms: z.number().int().min(CONTROL_TIMING.leaseRenewMinMs).max(CONTROL_TIMING.leaseRenewMaxMs),
   server_time_ms: z.number().int().safe().positive().optional(),
+  timing_policy: timingPolicySchema,
 })
 export type ControllerState = 'idle' | 'acquiring' | 'connecting' | 'ready' | 'locked' | 'releasing' | 'pending' | 'closed'
 
@@ -97,6 +108,7 @@ export class ControlSessionClient {
   private mediaReady = true
   private rtcReconnecting = false
   private rtcReconnectDeadline = 0
+  private timing: ResolvedControlTiming = resolveControlTiming()
   private releaseTask?: Promise<void>
   private readonly instanceId = crypto.randomUUID()
   private readonly organizationId = requestOrganization()
@@ -118,6 +130,10 @@ export class ControlSessionClient {
 
   get clockOffset(): number {
     return this.clockOffsetMs
+  }
+
+  get timingPolicy(): ResolvedControlTiming {
+    return this.timing
   }
 
   get isEmergencyStop(): boolean {
@@ -223,6 +239,7 @@ export class ControlSessionClient {
         }
       }
       const data = responseSchema.parse(response)
+      if (data.timing_policy) this.timing = resolveControlTiming(data.timing_policy)
       this.calibrateClock(data.server_time_ms, started, performance.now())
       this.session = data.session
       if (data.session.vehicle_id !== this.vehicleId ||
@@ -252,7 +269,7 @@ export class ControlSessionClient {
       if (!this.canContinue()) return
       if (performance.now() >= this.leaseDeadline) throw new Error('Control lease expired while connecting')
       this.connectedAt = performance.now()
-      this.timer = setInterval(() => { void this.tick() }, CONTROL_TIMING.tickMs)
+      this.timer = setInterval(() => { void this.tick() }, this.timing.tickMs)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Control connection failed'
       // Explicit HTTP rejections (400/403/409/503) before any session exists
@@ -327,7 +344,7 @@ export class ControlSessionClient {
     if (reconnecting) {
       if (!this.rtcReconnecting) {
         this.rtcReconnecting = true
-        this.rtcReconnectDeadline = now + CONTROL_TIMING.rtcReconnectGraceMs
+        this.rtcReconnectDeadline = now + this.timing.rtcReconnectGraceMs
       }
       return
     }
@@ -406,7 +423,7 @@ export class ControlSessionClient {
       return true
     }
     if (this.feedback
-      ? now - this.lastFeedback > CONTROL_TIMING.feedbackTimeoutMs
+      ? now - this.lastFeedback > this.timing.feedbackTimeoutMs
       : now - this.connectedAt > CONTROL_TIMING.initialFeedbackTimeoutMs) {
       this.fail(controlSafetyDecision('feedback_timeout').message, 'authority_or_feedback_timeout')
       return false
@@ -416,7 +433,7 @@ export class ControlSessionClient {
       return false
     }
     const oldest = this.pendingCommands[0]
-    if (oldest && now - oldest.dispatchedAt >= CONTROL_TIMING.ackBudgetMs) {
+    if (oldest && now - oldest.dispatchedAt >= this.timing.ackBudgetMs) {
       this.fail('Control acknowledgement progress timed out', 'ack_timeout')
       return false
     }
@@ -516,6 +533,7 @@ export class ControlSessionClient {
         return
       }
       if (performance.now() >= started + data.renew_after_ms * 2) throw new Error('Renewed lease already expired')
+      if (data.timing_policy) this.timing = resolveControlTiming(data.timing_policy)
       this.calibrateClock(data.server_time_ms, started, performance.now())
       this.leaseDeadline = started + data.renew_after_ms * 2
       this.renewAt = started + data.renew_after_ms
