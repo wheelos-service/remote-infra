@@ -27,17 +27,19 @@ var (
 )
 
 type ControlSession struct {
-	ProtocolVersion  int                  `json:"protocol_version,omitempty"`
-	ClientInstanceID string               `json:"client_instance_id,omitempty"`
-	SenderIdentity   string               `json:"sender_identity,omitempty"`
-	SessionID        string               `json:"session_id"`
-	VehicleID        string               `json:"vehicle_id"`
-	OperatorID       string               `json:"operator_id"`
-	OperatorTenant   string               `json:"operator_tenant,omitempty"`
-	PublicKeyB64     string               `json:"public_key_b64"`
-	Status           ControlSessionStatus `json:"status"`
-	CreatedAtMS      int64                `json:"created_at_ms"`
-	ExpiresAtMS      int64                `json:"expires_at_ms"`
+	ContractVersion    int                  `json:"contract_version,omitempty"`
+	ReceiverInstanceID string               `json:"receiver_instance_id,omitempty"`
+	ProtocolVersion    int                  `json:"protocol_version,omitempty"`
+	ClientInstanceID   string               `json:"client_instance_id,omitempty"`
+	SenderIdentity     string               `json:"sender_identity,omitempty"`
+	SessionID          string               `json:"session_id"`
+	VehicleID          string               `json:"vehicle_id"`
+	OperatorID         string               `json:"operator_id"`
+	OperatorTenant     string               `json:"operator_tenant,omitempty"`
+	PublicKeyB64       string               `json:"public_key_b64"`
+	Status             ControlSessionStatus `json:"status"`
+	CreatedAtMS        int64                `json:"created_at_ms"`
+	ExpiresAtMS        int64                `json:"expires_at_ms"`
 }
 
 var acquireControlSessionScript = redis.NewScript(`
@@ -47,6 +49,7 @@ end
 -- Guards never expire with a driving lease: expiry is not a physical handover.
 local pending = redis.call('HGET', KEYS[3], 'session')
 if pending or redis.call('EXISTS', KEYS[4]) == 1 then return -1 end
+if ARGV[5] ~= '' and redis.call('GET',KEYS[5]) ~= ARGV[5] then return -2 end
 local revision = tonumber(redis.call('HGET', KEYS[3], 'revision') or '0')
 if not revision or revision >= 9007199254740991 then
   return redis.error_reply('invalid handover revision')
@@ -74,6 +77,7 @@ if session.session_id ~= ARGV[1] or session.operator_id ~= ARGV[2] or session.st
 end
 if redis.call('HGET', KEYS[3], 'state') ~= 'ACTIVE'
   or redis.call('GET', KEYS[4]) ~= ARGV[1] then return 0 end
+if session.contract_version == 3 and redis.call('GET',KEYS[5]) ~= session.receiver_instance_id then return -2 end
 session.expires_at_ms = tonumber(ARGV[3])
 redis.call('SET', KEYS[1], cjson.encode(session), 'XX', 'PX', ARGV[4])
 redis.call('SET', KEYS[2], ARGV[5], 'XX', 'PX', ARGV[4])
@@ -109,17 +113,20 @@ func (s *ControlLeaseStore) AcquireControlSession(ctx context.Context, session C
 		ctx,
 		s.client,
 		[]string{controlLeaseKey(session.VehicleID), controlSessionIndexKey(session.SessionID),
-			controlHandoverKey(session.VehicleID), operatorControlKey(session.OperatorTenant, session.OperatorID)},
+			controlHandoverKey(session.VehicleID), operatorControlKey(session.OperatorTenant, session.OperatorID), receiverKey(session.VehicleID)},
 		payload,
 		s.ttl.Milliseconds(),
 		session.VehicleID,
-		session.SessionID,
+		session.SessionID, session.ReceiverInstanceID,
 	).Int()
 	if err != nil {
 		return fmt.Errorf("acquire control session: %w", err)
 	}
 	if result == 0 {
 		return ErrControlLeaseHeld
+	}
+	if result == -2 {
+		return errReceiverUnavailable
 	}
 	if result < 0 {
 		return ErrControlHandoverPending
@@ -157,7 +164,7 @@ func (s *ControlLeaseStore) RenewControlSession(ctx context.Context, sessionID, 
 		ctx,
 		s.client,
 		[]string{controlLeaseKey(session.VehicleID), controlSessionIndexKey(sessionID),
-			controlHandoverKey(session.VehicleID), operatorControlKey(session.OperatorTenant, session.OperatorID)},
+			controlHandoverKey(session.VehicleID), operatorControlKey(session.OperatorTenant, session.OperatorID), receiverKey(session.VehicleID)},
 		sessionID,
 		operatorID,
 		expiresAt,
@@ -169,6 +176,9 @@ func (s *ControlLeaseStore) RenewControlSession(ctx context.Context, sessionID, 
 	}
 	if result == 0 {
 		return ControlSession{}, ErrControlSessionNotFound
+	}
+	if result == -2 {
+		return ControlSession{}, errReceiverUnavailable
 	}
 	if result < 0 {
 		return ControlSession{}, ErrControlSessionOwner

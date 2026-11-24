@@ -11,7 +11,10 @@ import (
 	"github.com/google/uuid"
 )
 
+var errReceiverUnavailable = errors.New("CONTROL_RECEIVER_UNAVAILABLE")
+
 type acquireControlRequest struct {
+	ContractVersion  int    `json:"contract_version"`
 	PublicKeyB64     string `json:"public_key_b64"`
 	ProtocolVersion  int    `json:"protocol_version"`
 	ClientInstanceID string `json:"client_instance_id"`
@@ -52,7 +55,7 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 	if readErr != nil || rejectDuplicateJSONFields(raw) != nil ||
 		json.Unmarshal(raw, &request) != nil || json.Unmarshal(raw, &fields) != nil ||
 		fields["public_key_b64"] == nil ||
-		!(len(fields) == 1 || (len(fields) == 3 && request.ProtocolVersion == 2 &&
+		!(len(fields) == 1 || ((len(fields) == 3 || len(fields) == 4 && request.ContractVersion == 3) && request.ProtocolVersion == 2 &&
 			fields["client_instance_id"] != nil && telemetryIdentifier.MatchString(request.ClientInstanceID))) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
@@ -65,15 +68,11 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "managed control requires v2", http.StatusForbidden)
 		return
 	}
-	// Managed native handover ACKs are not implemented. Acquiring such a
-	// session would leave a permanent vehicle fence and operator lock on
-	// release or expiry. Reject before reserving a token or writing any lease.
-	if claims.managed != nil && !simulationControlEnabled(vehicleID) {
-		teleopGateway503Total.WithLabelValues("MANAGED_NATIVE_HANDOVER_REQUIRED").Inc()
-		http.Error(w, "managed native control unavailable: handover support required", http.StatusServiceUnavailable)
+	native := request.ContractVersion == 3 && !simulationControlEnabled(vehicleID)
+	if native && !nativeBenchEnabled(vehicleID) || !native && claims.managed != nil && !simulationControlEnabled(vehicleID) {
+		writeDiagnosticError(w, r, "managed native control unavailable: handover support required", "MANAGED_NATIVE_HANDOVER_REQUIRED", http.StatusServiceUnavailable)
 		return
 	}
-
 	now := time.Now()
 	session := ControlSession{
 		SessionID:      uuid.NewString(),
@@ -89,6 +88,15 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		session.ProtocolVersion = 2
 		session.ClientInstanceID = request.ClientInstanceID
 		session.SenderIdentity = "control-" + session.SessionID
+	}
+	if native {
+		instance, err := controlLeases.client.Get(r.Context(), receiverKey(vehicleID)).Result()
+		if err != nil || !nativeInstance.MatchString(instance) {
+			writeDiagnosticError(w, r, errReceiverUnavailable.Error(), errReceiverUnavailable.Error(), 503)
+			return
+		}
+		session.ContractVersion = 3
+		session.ReceiverInstanceID = instance
 	}
 	if lkApiKey == "" || lkApiSecret == "" {
 		http.Error(w, "control token configuration unavailable", http.StatusServiceUnavailable)
@@ -135,6 +143,10 @@ func handleRenewControl(w http.ResponseWriter, r *http.Request) {
 	}
 	if claims.managed != nil && current.ProtocolVersion != 2 {
 		http.Error(w, "managed renewal requires v2", http.StatusForbidden)
+		return
+	}
+	if current.ContractVersion == 3 && !nativeBenchEnabled(current.VehicleID) {
+		writeControlSessionError(w, errReceiverUnavailable)
 		return
 	}
 	session, err := controlLeases.RenewControlSession(r.Context(), r.PathValue("session_id"), claims.Name)
@@ -222,6 +234,8 @@ func isEd25519PublicKey(encoded string) bool {
 
 func writeControlSessionError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, errReceiverUnavailable):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	case errors.Is(err, ErrControlLeaseHeld), errors.Is(err, ErrControlHandoverPending):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, ErrControlSessionNotFound):

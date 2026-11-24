@@ -12,6 +12,8 @@ const sessionSchema = z.object({
   vehicle_id: z.string(),
   protocol_version: z.literal(2),
   client_instance_id: z.string(),
+  contract_version: z.literal(3).optional(),
+  receiver_instance_id: z.string().regex(/^[a-f0-9]{32}$/).optional(),
   sender_identity: z.string(),
   status: z.literal('ACTIVE'),
 })
@@ -120,6 +122,7 @@ export class ControlSessionClient {
     private readonly connection: ControlConnection,
     private readonly changed: () => void,
     private readonly request: typeof fetch = (input, init) => fetch(input, init),
+    private readonly verifyVideo?: () => boolean,
   ) {}
 
   // Bounded, local diagnostics only. Never include credentials, signed bodies,
@@ -134,6 +137,10 @@ export class ControlSessionClient {
 
   get timingPolicy(): ResolvedControlTiming {
     return this.timing
+  }
+
+  get neutralAcknowledged(): boolean {
+    return !this.verifyVideo || (this.feedback?.accepted_sequence ?? 0) > 0
   }
 
   get isEmergencyStop(): boolean {
@@ -187,6 +194,9 @@ export class ControlSessionClient {
                 if (reason.includes('handover support required')) {
                   detail = '受管实车控制暂未开放（缺少实车交接确认支持）'
                   retryable = false
+                } else if (reason.includes('CONTROL_RECEIVER_UNAVAILABLE')) {
+                  detail = '车端控制接收器未就绪，请检查车端连接'
+                  retryable = false
                 } else if (reason.includes('MANAGED_MAINTENANCE_REQUIRED') || reason.includes('maintenance')) {
                   detail = '平台处于维护排空窗口，暂不可申请或续约控制'
                   retryable = false
@@ -211,7 +221,7 @@ export class ControlSessionClient {
 
   async acquire(): Promise<void> {
     if (this.state !== 'idle') throw new Error('Controller is already in use')
-    if (!this.mediaReady) throw new Error('Three camera feeds are not ready')
+    if (!this.mediaReady || this.verifyVideo && !this.verifyVideo()) throw new Error('Three camera feeds are not ready')
     this.acquiring = true
     this.error = ''
     this.state = 'acquiring'
@@ -226,7 +236,7 @@ export class ControlSessionClient {
         started = performance.now()
         try {
           response = await this.api(`/api/vehicles/${encodeURIComponent(this.vehicleId)}/control/acquire`, {
-            protocol_version: 2, client_instance_id: this.instanceId, public_key_b64: publicKey,
+            ...(this.verifyVideo ? {contract_version: 3} : {}), protocol_version: 2, client_instance_id: this.instanceId, public_key_b64: publicKey,
           })
           break
         } catch (error) {
@@ -242,7 +252,8 @@ export class ControlSessionClient {
       if (data.timing_policy) this.timing = resolveControlTiming(data.timing_policy)
       this.calibrateClock(data.server_time_ms, started, performance.now())
       this.session = data.session
-      if (data.session.vehicle_id !== this.vehicleId ||
+      if (this.verifyVideo && (data.session.contract_version !== 3 || !data.session.receiver_instance_id) ||
+          data.session.vehicle_id !== this.vehicleId ||
           data.session.client_instance_id !== this.instanceId ||
           data.session.sender_identity !== `control-${data.session.session_id}` || !data.token) {
         throw new Error('Control session binding mismatch')
@@ -308,6 +319,11 @@ export class ControlSessionClient {
       return
     }
     if (data.session_id !== this.session.session_id || data.vehicle_id !== this.vehicleId) return
+    if (this.session.receiver_instance_id ? data.receiver_instance_id !== this.session.receiver_instance_id || data.simulation === true :
+        data.simulation === undefined) {
+      this.fail('Incompatible vehicle feedback', 'invalid_feedback')
+      return
+    }
     if (this.feedback && (data.receiver_instance_id !== this.feedback.receiver_instance_id ||
         data.revision !== this.feedback.revision || data.simulation !== this.feedback.simulation || data.accepted_sequence < this.feedback.accepted_sequence)) {
       this.fail('Receiver changed; release and acquire a new session', 'receiver_changed')
@@ -360,9 +376,22 @@ export class ControlSessionClient {
     }
   }
 
+  private videoHoldRevision = -1
+
+  setVideoHold(command: ControlCommand): void {
+    if (command.throttle !== 0 || command.direction !== 0 || command.brake !== 20) throw new Error('Invalid pause hold')
+    this.setCommand(command)
+    this.videoHoldRevision = this.intentRevision
+  }
+
   setCommand(command: ControlCommand): void {
     if (this.state !== 'ready' || !this.mediaReady) throw new Error('Vehicle control is not ready')
+    this.videoHoldRevision = -1
     const next = controlCommandSchema.parse(command)
+    const neutral = next.steering === 0 && next.throttle === 0 && next.direction === 0
+    if (!this.neutralAcknowledged && !(neutral && (next.brake === 0 || next.brake === 100))) {
+      throw new Error('Waiting for signed standby acknowledgement')
+    }
     if (next.steering === this.command.steering && next.throttle === this.command.throttle &&
         next.brake === this.command.brake && next.direction === this.command.direction) return
     this.command = next
@@ -467,6 +496,12 @@ export class ControlSessionClient {
       if (!this.canContinue() || this.state !== 'ready' || !this.checkDeadlines(performance.now())) return
       if (intentRevision !== this.intentRevision) {
         this.record('superseded', sequence)
+        return
+      }
+      if (this.verifyVideo && !this.verifyVideo() && intentRevision !== this.videoHoldRevision && !this.isEmergencyStop &&
+          (signedCommand.throttle !== 0 || signedCommand.direction !== 0 || signedCommand.steering !== 0 || signedCommand.brake !== 0)) {
+        // An expired frame cannot authorize a pending signature. The edge watchdog takes over.
+        this.fail('Generated camera freshness expired', 'media_lost')
         return
       }
       if (this.pendingCommands.length >= MAX_PENDING_COMMANDS) {

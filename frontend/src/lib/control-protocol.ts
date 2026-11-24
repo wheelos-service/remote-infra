@@ -22,7 +22,7 @@ export const controlFeedbackSchema = z.object({
   status: z.enum(['DISABLED', 'READY', 'ACCEPTED', 'APPLIED', 'PAUSED', 'LOCKED']),
   reason: z.string().max(64),
   last_rejection: z.string().max(64),
-  simulation: z.boolean(),
+  simulation: z.boolean().optional(),
   command: controlCommandSchema.nullable(),
 }).strict()
 export type ControlFeedback = z.infer<typeof controlFeedbackSchema>

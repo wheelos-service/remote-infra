@@ -109,6 +109,7 @@ const server = http.createServer(async (req, res) => {
       session_id: sessionId,
       vehicle_id: 'car-e2e',
       protocol_version: 2,
+      ...(body.contract_version === 3 ? {contract_version: 3, receiver_instance_id: state.nativeReceiver} : {}),
       client_instance_id: body.client_instance_id,
       sender_identity: `control-${sessionId}`,
       status: 'ACTIVE',
@@ -263,6 +264,41 @@ class FakeReceiver {
     return this.readyFeedback(msg.session_id)
   }
 }
+
+test('native bench requires a matching neutral ACK before enabling takeover', async () => {
+  resetState()
+  const receiver = new FakeReceiver()
+  state.nativeReceiver = receiver.instanceId
+  const nativeFeedback = body => {
+    const feedback = JSON.parse(new TextDecoder().decode(body))
+    delete feedback.simulation
+    if (feedback.status === 'APPLIED') feedback.status = 'ACCEPTED'
+    return new TextEncoder().encode(JSON.stringify(feedback))
+  }
+  const client = new ControlSessionClient('car-e2e', gatewayOrigin, 'test-bearer', {
+    connect: async () => {},
+    publish: async body => {
+      const response = receiver.accept(state.controlSession.public_key_b64, body, Date.now() + state.clockSkewMs)
+      client.acceptFeedback('vehicle-car-e2e', true, nativeFeedback(response))
+    },
+    disconnect: async () => {},
+  }, () => {}, fetch, () => true)
+  await client.acquire()
+  try {
+    client.acceptFeedback('vehicle-car-e2e', true, nativeFeedback(receiver.readyFeedback(state.controlSession.session_id)))
+    const hold = {steering: 0, throttle: 0, brake: 20, direction: 0}
+    assert.equal(client.neutralAcknowledged, false)
+    assert.throws(() => client.setCommand(hold), /standby acknowledgement/)
+    await client.tick()
+    assert.deepEqual(receiver.lastCommand, {steering: 0, throttle: 0, brake: 0, direction: 0})
+    assert.equal(client.neutralAcknowledged, true)
+    client.setCommand(hold)
+    await client.tick()
+    assert.deepEqual(receiver.lastCommand, hold)
+  } finally {
+    await client.release()
+  }
+})
 
 test.after(() => server.close())
 

@@ -1,4 +1,5 @@
 export interface CameraFeedTrack {
+  getRTCStatsReport?(): Promise<RTCStatsReport | undefined>
   attach(element: HTMLVideoElement): HTMLMediaElement
   detach(element: HTMLVideoElement): HTMLMediaElement[]
 }
@@ -14,6 +15,7 @@ export interface CameraFrameStats {
 export interface CameraFeedOptions {
   requireFrameCallback?: boolean
   maxResidenceMs?: number
+  onPresented?: (count: number | undefined) => void
   onFrame?: () => void
   onStats?: (stats: CameraFrameStats) => void
 }
@@ -76,6 +78,7 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
   const frame = (now?: number, metadata?: VideoFrameCallbackMetadata) => {
     if (stopped) return
     const callbackNow = typeof now === 'number' && Number.isFinite(now) ? now : performance.now()
+    options?.onPresented?.(metadata?.presentedFrames)
     let progressed = true
     if (metadata) {
       if (typeof metadata.rtpTimestamp === 'number') {
@@ -91,6 +94,7 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
         lastResidenceMs = Math.max(0, renderTime - metadata.receiveTime, callbackNow - metadata.receiveTime)
         const residenceLimit = options?.maxResidenceMs ?? stallBudgetMs
         if (lastResidenceMs > residenceLimit) {
+          if (options?.maxResidenceMs !== undefined) report(false)
           progressed = false
           if (rejectedSamples++ % 30 === 0) emitStats()
         }

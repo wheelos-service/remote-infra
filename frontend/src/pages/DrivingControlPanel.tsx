@@ -18,9 +18,11 @@ function withinBudget(promise: Promise<void>, message: string): Promise<void> {
   ])
 }
 
-export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChange, onIntent, diagnostics }: {
+export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo, receiverReady = true, onBusyChange, onIntent, diagnostics }: {
   vehicleId: string
   bearer: string
+  receiverReady?: boolean
+  verifyVideo?: () => boolean
   videoReady: boolean
   onBusyChange: (busy: boolean) => void
   onIntent: (vehicleId: string, command?: ControlCommand) => void
@@ -34,7 +36,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
   const safetyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const mediaPauseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const hiddenAt = useRef<number | undefined>(undefined)
-  const wasGamepadEnabledBeforePause = useRef(false)
   const autoReleasedFor = useRef<ControlSessionClient | undefined>(undefined)
   mediaReady.current = videoReady
   const [, render] = useState(0)
@@ -76,7 +77,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       active: ControlSessionClient | undefined = controller.current): void => {
     applyControlSafetyStrategy(event, {
       disarm: (safetyEvent, decision) => {
-        if (safetyEvent !== 'rtc_reconnecting') wasGamepadEnabledBeforePause.current = false
         input.current?.suspend(decision.message)
         if (safetyEvent === 'page_hidden') hiddenAt.current = Date.now()
         if (decision.escalateAfterMs && decision.escalateTo) {
@@ -92,11 +92,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       observe: (safetyEvent, decision) => {
         if (safetyEvent === 'rtc_reconnected') {
           if (decision.message) input.current?.suspend(decision.message)
-          if (wasGamepadEnabledBeforePause.current && active?.state === 'ready' &&
-              mediaReady.current && !active.isEmergencyStop && !document.hidden && document.hasFocus()) {
-            wasGamepadEnabledBeforePause.current = false
-            gamepad.current?.setEnabled(true)
-          }
           return
         }
         const restored = safetyEvent === 'page_visible' || (safetyEvent === 'window_focus' && !document.hidden)
@@ -113,7 +108,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       },
       release: (_safetyEvent, decision) => {
         hiddenAt.current = undefined
-        wasGamepadEnabledBeforePause.current = false
         clearSafetyTimer()
         clearMediaPauseTimer()
         setMediaPaused(false)
@@ -137,7 +131,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       },
       fault: (_safetyEvent, decision) => {
         hiddenAt.current = undefined
-        wasGamepadEnabledBeforePause.current = false
         clearSafetyTimer()
         clearMediaPauseTimer()
         setMediaPaused(false)
@@ -149,7 +142,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
   const triggerEmergencyStop = useCallback(() => {
     const active = controller.current
     if (!active || active.state !== 'ready') return
-    wasGamepadEnabledBeforePause.current = false
     if (input.current?.isAvailable) {
       input.current.emergencyStop()
       return
@@ -168,14 +160,13 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
     if (!mounted.current) return
     const active = controller.current
     const state = active?.state
-    const ready = isControlReady(state, mediaReady.current)
+    const ready = isControlReady(state, mediaReady.current) && Boolean(active?.neutralAcknowledged)
     if (input.current?.isAvailable !== ready) input.current?.setAvailable(ready)
     if (!ready) onIntent(vehicleId)
     if (active && state === 'locked' && autoReleasedFor.current !== active) {
       autoReleasedFor.current = active
-      wasGamepadEnabledBeforePause.current = false
       const reason = active.error || '控制已中断'
-      setFaultNotice(`已自动安全停车并释放控制：${reason}`)
+      setFaultNotice(`已停止发令，正在释放控制权：${reason}`)
       void releaseSession(active)
     }
     onBusyChange(Boolean(state && state !== 'closed' && state !== 'idle'))
@@ -230,15 +221,9 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       setMediaPaused(false)
       active?.setMediaReady(true)
       changed()
-      if (wasGamepadEnabledBeforePause.current && active?.state === 'ready' &&
-          !active.isEmergencyStop && !document.hidden && document.hasFocus()) {
-        wasGamepadEnabledBeforePause.current = false
-        gamepad.current?.setEnabled(true)
-      }
       return
     }
     if (!active || active.state !== 'ready') {
-      wasGamepadEnabledBeforePause.current = false
       clearMediaPauseTimer()
       setMediaPaused(false)
       active?.setMediaReady(false)
@@ -249,7 +234,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
     // (only when already REMOTE and not emergency-braking) up to server contract
     // mediaPauseGraceMs while video recovers, before escalating to auto-release.
     if (!mediaPauseTimer.current) {
-      wasGamepadEnabledBeforePause.current ||= Boolean(input.current?.isGamepadEnabled)
       diagnostics?.record('video', 'media_pause_hold', vehicleArbitrationRef.current?.state === 'REMOTE' ? 'remote_brake_20' : 'standby')
       setMediaPaused(true)
       if (!active.isEmergencyStop) {
@@ -259,7 +243,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
             ? Math.round(Math.max(-100, Math.min(100, -steerPct)))
             : 0
           const holdCommand: ControlCommand = { steering: matchedSteer, throttle: 0, brake: 20, direction: 0 }
-          active.setCommand(holdCommand)
+          active.setVideoHold(holdCommand)
           onIntent(vehicleId, holdCommand)
           void active.tick()
         } else {
@@ -272,7 +256,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       mediaPauseTimer.current = setTimeout(() => {
         mediaPauseTimer.current = undefined
         if (!mediaReady.current && controller.current === active && active.state === 'ready') {
-          wasGamepadEnabledBeforePause.current = false
           setMediaPaused(false)
           active.setMediaReady(false)
           changed()
@@ -291,20 +274,25 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
     }
     setMessage('')
     setFaultNotice('')
-    wasGamepadEnabledBeforePause.current = false
     autoReleasedFor.current = undefined
     clearMediaPauseTimer()
     setMediaPaused(false)
     setVehicleArbitration(undefined)
-    const room = new Room({ adaptiveStream: false, dynacast: false })
+    // On the pinned SFU a data-only controller needs a publisher transport.
+    const room = new Room({ adaptiveStream: false, dynacast: false, singlePeerConnection: false })
     const next = new ControlSessionClient(vehicleId, teleopConfig.gatewayUrl, bearer, {
-      connect: async (token) => { await room.connect(teleopConfig.livekitUrl, token, { autoSubscribe: false }) },
+      connect: async token => {
+        await room.connect(teleopConfig.livekitUrl, token, { autoSubscribe: false })
+        // Negotiate SCTP before starting the signed-command ACK deadline.
+        await room.localParticipant.publishData(new Uint8Array(), {reliable: false, topic: 'vehicle.control.transport-ready',
+          destinationIdentities: [`vehicle-${vehicleId}`]})
+      },
       publish: async (body) => {
         await room.localParticipant.publishData(new Uint8Array(body), { reliable: false, topic: 'vehicle.control.v2',
           destinationIdentities: [`vehicle-${vehicleId}`] })
       },
       disconnect: async () => { await room.disconnect() },
-    }, changed)
+    }, changed, undefined, verifyVideo)
     next.setMediaReady(mediaReady.current)
     controller.current = next
     room.on(RoomEvent.DataReceived, (body, participant, kind, topic) => {
@@ -344,7 +332,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       if (!['releasing', 'pending', 'closed'].includes(next.state)) applySafetyEvent('rtc_disconnected', next)
     })
     room.on(RoomEvent.Reconnecting, () => {
-      wasGamepadEnabledBeforePause.current = Boolean(input.current?.isGamepadEnabled)
       next.setRtcReconnecting(true)
       applySafetyEvent('rtc_reconnecting', next)
     })
@@ -364,6 +351,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       protocol_version: 2, vehicle_id: vehicleId, clock_domain: 'browser-performance',
       time_origin_ms: performance.timeOrigin,
       events: active?.diagnostics ?? [],
+      camera_windows: diagnostics?.videoWindows ?? [],
       timeline_events: diagnostics?.entries() ?? [],
     }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -386,15 +374,17 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
     void active.tick()
   }
   const state = controller.current?.state ?? 'idle'
-  const ready = isControlReady(state, videoReady)
+  const ready = isControlReady(state, videoReady) && Boolean(controller.current?.neutralAcknowledged)
   const busy = state !== 'closed' && state !== 'idle'
   const button = 'rounded border border-amber-600 px-3 py-2 disabled:opacity-40'
   return (
     <section className="rounded-xl border border-amber-700 bg-amber-950/20 p-3 text-xs text-amber-100">
       <p className="font-semibold">远程驾驶控制</p>
       <p className="mt-1">目标：{vehicleId || '未选择'} · 状态：{state}</p>
+      {verifyVideo && <p>{receiverReady ? '车端 native-v3 接收器在线' : '等待车端 native-v3 接收器心跳'}
+        {state === 'ready' && !controller.current?.neutralAcknowledged && ' · 正在验证中立指令回执'}</p>}
       <div className="mt-3 flex flex-wrap gap-2">
-        <button type="button" disabled={!vehicleId || busy || !videoReady} onClick={() => void acquire()} className={button}>申请控制权</button>
+        <button type="button" disabled={!vehicleId || busy || !videoReady || !receiverReady} onClick={() => void acquire()} className={button}>申请控制权</button>
         <button type="button" disabled={!ready || vehicleArbitration?.state === 'REMOTE'} onClick={requestTakeover} className={button}>
           {vehicleArbitration?.state === 'REMOTE' ? '车端已接管 REMOTE' : '请求接管（制动保持）'}
         </button>
@@ -428,7 +418,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       <p className="mt-2">{videoReady
         ? '三路画面正在出帧'
         : mediaPaused
-          ? '画面短暂中断：已保持温和制动（5s 内恢复且手柄回中后直接续控）'
+          ? '画面短暂中断：已保持温和制动（恢复后需手动重新启用手柄）'
           : '三路画面未就绪：禁止申请或恢复输出'}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <select aria-label="控制手柄" className="rounded border border-amber-800 bg-slate-950 p-2"
@@ -450,7 +440,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       <p className="mt-2">挡位和自动驾驶模式请求未接入 v2，不开放对应手柄动作；不回退到 v1。</p>
       <p className="mt-2">仅开放手柄比例控制，不支持键盘驾驶；前三相机无后视覆盖，倒车前需确认后方环境。</p>
       <p className="mt-2">反馈序号：{controller.current?.feedback?.accepted_sequence ?? '—'}；
-        {controller.current?.feedback?.reason ?? '等待车端 v2 SDK'}。反馈表示车端接收状态，底盘执行以车辆实测为准。失焦、断线或反馈超时停止发令；交接完成前禁止切换。</p>
+        {controller.current?.feedback?.reason ?? '等待本次会话反馈'}。反馈表示车端接收状态，底盘执行以车辆实测为准。失焦、断线或反馈超时停止发令；交接完成前禁止切换。</p>
       {vehicleArbitration && (vehicleArbitration.state || vehicleArbitration.drivingMode) && (
         <p className="mt-1 text-amber-200" data-testid="vehicle-arbitration-status">
           车端仲裁：{vehicleArbitration.state ?? '未知'}
@@ -482,7 +472,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, onBusyChang
       <div className="fixed inset-x-0 bottom-0 z-[60] flex flex-wrap items-center justify-end gap-3 border-t border-amber-800 bg-slate-950 p-3 text-xs">
         <span>{vehicleId} · {state} · {inputState.gamepadEnabled ? '手柄已启用' : '手柄未启用'}</span>
         <button type="button" disabled={!ready} className={button} onClick={() => {
-          wasGamepadEnabledBeforePause.current = false
           input.current?.suspend('已发送停止，请重新启用手柄')
         }}>停止并停用手柄</button>
         <button type="button" disabled={state !== 'ready'} className="rounded border border-red-500 bg-red-950 px-4 py-2 disabled:opacity-40" onClick={triggerEmergencyStop}>制动（Space）</button>

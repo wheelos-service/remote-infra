@@ -222,7 +222,14 @@ def prepare(state):
 }}
 """)
     volume = lambda name, target: f"{state / name}:{target}:ro"
+    bench_file = state / "native-bench-vehicles.json"
+    bench_vehicles = json.loads(bench_file.read_text()) if bench_file.exists() else []
+    if not isinstance(bench_vehicles, list) or any(
+            not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", v)
+            for v in bench_vehicles):
+        raise RuntimeError("invalid generated-camera bench vehicle list")
     env = {
+        "NATIVE_BENCH_VEHICLES_JSON": json.dumps(bench_vehicles),
         "LIVEKIT_API_KEY": "teleop", "LIVEKIT_API_SECRET": values["livekit"],
         "LIVEKIT_URL": "http://livekit:7880", "REDIS_URL": "redis:6379",
         "AUTH_MODE": "oidc", "OIDC_ISSUER": AUTH, "OIDC_AUDIENCE": values["browser_id"],

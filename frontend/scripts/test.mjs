@@ -27,6 +27,7 @@ const { outputFiles } = await esbuild.build({
     { in: 'src/lib/teleop-diagnostics.ts', out: 'teleop-diagnostics' },
     { in: 'src/lib/control-input-adapter.ts', out: 'control-input-adapter' },
     { in: 'src/lib/camera-view.ts', out: 'camera-view' },
+    { in: 'src/lib/bench-camera.ts', out: 'bench-camera' },
     { in: 'src/lib/camera-feed.ts', out: 'camera-feed' },
     { in: 'src/lib/fleet-map.ts', out: 'fleet-map' },
     { in: 'src/lib/mock-fleet.ts', out: 'mock-fleet' },
@@ -3311,4 +3312,24 @@ test('independent vehicle observers keep their own lease and Room cleanup lifecy
   await second.lifecycle.stop()
   assert.equal(second.calls.disconnected, 1)
   assert.deepEqual(second.calls.released[0], ['fleet-2', secondSessionId, 'original-bearer'])
+})
+
+test('generated-camera bench rejects corrupted, stale, wrong-camera and previous-Gateway frames', async () => {
+  const { generatedFrameStamp, captureDeadline } = await loadBundle('bench-camera')
+  // Fixed wire vector from the SDK's pixel encoder for right, epoch 12345, stamp 3200.
+  const bytes = Buffer.from('b2000030390000000c809c1a', 'hex')
+  const pixels = new Uint8ClampedArray(384)
+  for (let i = 0; i < 96; ++i) pixels[4*i] = bytes[i >> 3] & (128 >> (i % 8)) ? 240 : 16
+  assert.equal(generatedFrameStamp(pixels, 2, 12345), 3200)
+  assert.equal(generatedFrameStamp(pixels, 1, 12345), undefined)
+  assert.equal(generatedFrameStamp(pixels, 2, 12344), undefined)
+  pixels[88] ^= 255
+  assert.equal(generatedFrameStamp(pixels, 2, 12345), undefined)
+  const clock = {epoch: 12345, started: 0, received: 50, elapsed_ms: 3000}
+  const deadline = captureDeadline(clock, 3200, 250)
+  assert.ok(deadline > 1190 && deadline < 1200)
+  for (const gap of [1574, 1850, 2610, 13329, 14653, 16120])
+    assert.equal(captureDeadline(clock, 3200, 250 + gap), 0)
+  assert.equal(captureDeadline(clock, 5000, 250), 0)
+  assert.equal(captureDeadline(clock, 19000, 16000), 0)
 })

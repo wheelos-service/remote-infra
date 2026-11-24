@@ -230,3 +230,55 @@ func TestControlChainServer(t *testing.T) {
 	}
 	t.Fatal("control chain runner did not stop fixture")
 }
+
+func TestNativeBenchControlAndHandover(t *testing.T) {
+	f := newControlContextFixture(t)
+	path := "/api/vehicles/car-2/control"
+	instance := "0123456789abcdef0123456789abcdef"
+	other := "1123456789abcdef0123456789abcdef"
+	body := `{"contract_version":3,"protocol_version":2,"client_instance_id":"bench-test","public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`
+	f.request(t, "GET", path+"/bench-clock", "controller", "", 403)
+	f.request(t, "POST", path+"/acquire", "controller", body, 503)
+	t.Setenv("NATIVE_BENCH_VEHICLES_JSON", `["car-2"]`)
+	f.request(t, "GET", path+"/bench-clock", "device1", "", 403)
+	f.request(t, "GET", path+"/bench-clock", "controller", "", 200)
+	f.request(t, "GET", path+"/context/native-v3-percent/"+instance, "device1", "", 403)
+	f.request(t, "GET", path+"/context", "device2", "", 200)
+	f.request(t, "POST", path+"/acquire", "controller", body, 503)
+	poll := func() {
+		t.Helper()
+		r := f.request(t, "GET", path+"/context/native-v3-percent/"+instance, "device2", "", 200)
+		var v map[string]any
+		if json.Unmarshal(r.Body.Bytes(), &v) != nil || v["contract_version"] != 3.0 || v["simulation"] != nil || v["timing_policy"] == nil {
+			t.Fatal("unexpected receiver contract", v)
+		}
+	}
+	poll()
+	clock := f.request(t, "GET", path+"/bench-clock", "controller", "", 200)
+	var ready struct {
+		TTL int64 `json:"receiver_ttl_ms"`
+	}
+	if json.Unmarshal(clock.Body.Bytes(), &ready) != nil || ready.TTL <= 0 || ready.TTL > 5000 {
+		t.Fatal("receiver readiness missing")
+	}
+	f.redis.FastForward(6 * time.Second)
+	f.request(t, "POST", path+"/acquire", "controller", body, 503)
+	poll()
+	r := f.request(t, "POST", path+"/acquire", "controller", body, 200)
+	var sess controlSessionResponse
+	if json.Unmarshal(r.Body.Bytes(), &sess) != nil || sess.Session.ReceiverInstanceID != instance {
+		t.Fatal("unbound session")
+	}
+	pathID := "/api/control/" + sess.Session.SessionID
+	ack := fmt.Sprintf(`{"revision":1,"session_id":%q,"edge_revocation_applied":true,"vehicle_handover_confirmed":true}`, sess.Session.SessionID)
+	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", ack, 409)
+	f.request(t, "POST", pathID+"/renew", "controller", "{}", 200)
+	f.request(t, "POST", pathID+"/release", "controller", "{}", 202)
+	f.request(t, "POST", path+"/handover/ack/"+other, "device2", ack, 409)
+	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", strings.Replace(ack, `"revision":1`, `"revision":2`, 1), 409)
+	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", strings.Replace(ack, `confirmed":true`, `confirmed":false`, 1), 202)
+	f.request(t, "POST", path+"/acquire", "controller", body, 409)
+	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", ack, 204)
+	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", ack, 204)
+	f.request(t, "POST", path+"/acquire", "controller", body, 200)
+}

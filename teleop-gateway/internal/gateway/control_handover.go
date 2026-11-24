@@ -93,11 +93,13 @@ local revision = redis.call('HGET', KEYS[1], 'revision')
 if revision ~= ARGV[1] then return 0 end
 local raw = redis.call('HGET', KEYS[1], 'session')
 if not raw then
+  if (redis.call('HGET',KEYS[1],'confirmed_receiver') or '') ~= ARGV[4] then return 0 end
   if redis.call('HGET', KEYS[1], 'confirmed_session') == ARGV[2] then return 1 end
   return 0
 end
 local session = cjson.decode(raw)
-if session.session_id ~= ARGV[2] then return 0 end
+if session.session_id ~= ARGV[2] or (session.receiver_instance_id or '') ~= ARGV[4] then return 0 end
+if ARGV[4] ~= '' and redis.call('GET',KEYS[3]) ~= ARGV[4] then return 0 end
 -- Explicit release or lease expiry must precede physical acknowledgement.
 local active = redis.call('GET', KEYS[2])
 if active and redis.call('PTTL', KEYS[2]) > 0 then return -1 end
@@ -112,7 +114,7 @@ if ARGV[3] ~= '1' then
 end
 redis.call('DEL', operatorKey)
 redis.call('HDEL', KEYS[1], 'session', 'operator_key')
-redis.call('HSET', KEYS[1], 'state', 'CONFIRMED', 'confirmed_session', ARGV[2])
+redis.call('HSET', KEYS[1], 'state', 'CONFIRMED', 'confirmed_session', ARGV[2], 'confirmed_receiver',ARGV[4])
 return 1
 `)
 
@@ -121,13 +123,17 @@ func (s *ControlLeaseStore) AcknowledgeHandover(ctx context.Context, vehicleID, 
 }
 
 func (s *ControlLeaseStore) ReportHandover(ctx context.Context, vehicleID, sessionID string, revision int64, vehicleConfirmed bool) error {
+	return s.reportReceiverHandover(ctx, vehicleID, sessionID, revision, vehicleConfirmed, "")
+}
+
+func (s *ControlLeaseStore) reportReceiverHandover(ctx context.Context, vehicleID, sessionID string, revision int64, vehicleConfirmed bool, instance string) error {
 	confirmed := "0"
 	if vehicleConfirmed {
 		confirmed = "1"
 	}
 	result, err := acknowledgeHandoverScript.Run(ctx, s.client,
-		[]string{controlHandoverKey(vehicleID), controlLeaseKey(vehicleID)},
-		revision, sessionID, confirmed).Int()
+		[]string{controlHandoverKey(vehicleID), controlLeaseKey(vehicleID), receiverKey(vehicleID)},
+		revision, sessionID, confirmed, instance).Int()
 	if err != nil {
 		return fmt.Errorf("acknowledge handover: %w", err)
 	}

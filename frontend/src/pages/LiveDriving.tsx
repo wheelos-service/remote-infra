@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useAuth } from '../app/AuthProvider'
 import { useVehicles } from '../hooks/use-vehicles'
 import { useDrivingCameras } from '../hooks/use-driving-cameras'
-import { threeCamerasReady, type CameraFrameStats } from '../lib/camera-feed'
+import { type CameraFeedTrack, type CameraFrameStats } from '../lib/camera-feed'
 import { isSingleFront, type FrontCamera } from '../lib/camera-view'
 import { TeleopDiagnosticsBuffer } from '../lib/teleop-diagnostics'
 import ThreeCameraView from './ThreeCameraView'
@@ -18,8 +18,7 @@ import { overviewVehicle, type OverviewVehicle } from '../lib/fleet-overview'
 import type { MonitorListState } from '../lib/vehicle-monitor'
 import { canControlVehicle, hasVehicleContext } from '../lib/organization-context'
 
-// Source capture timestamps have not yet been verified across the media path.
-const SOURCE_VIDEO_FRESHNESS_VERIFIED = false
+import { useBenchCameras } from '../hooks/use-bench-cameras'
 
 function viewingStatus(cameras: ReturnType<typeof useDrivingCameras>) {
   const single = isSingleFront(cameras.tracks)
@@ -35,8 +34,9 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
   row: OverviewVehicle; onMonitor: () => void; controlDenied: boolean
 }) {
   const diagnostics = useRef(new TeleopDiagnosticsBuffer())
-  const drivingEnabled = !observeOnly && SOURCE_VIDEO_FRESHNESS_VERIFIED
   const cameras = useDrivingCameras(vehicleId, bearer, true, diagnostics.current)
+  const bench = useBenchCameras(vehicleId, bearer, !observeOnly, cameras.connected, cameras.tracks, cameras.frames, diagnostics.current)
+  const drivingEnabled = !observeOnly && bench.eligible
   const [busy, setBusy] = useState(false)
   const { reportFrame, reportProgress } = cameras
   const onStats = useCallback((name: FrontCamera, stats: CameraFrameStats) => {
@@ -46,9 +46,10 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
   }, [])
   const onBusy = useCallback((value: boolean) => { setBusy(value); onBusyChange(value) }, [onBusyChange])
   const onIntent = useCallback(() => {}, [])
-  const videoReady = cameras.connected && threeCamerasReady(Object.fromEntries(
-    (['left', 'center', 'right'] as const).map(name => [name, Boolean(cameras.tracks[name]) && cameras.frames[name] === cameras.tracks[name]]),
-  ))
+  const trackChanged = useCallback((camera: FrontCamera, live: boolean, track?: CameraFeedTrack) => {
+    if (!live) bench.invalidate(track)
+    reportFrame(camera, live, track)
+  }, [bench.invalidate, reportFrame])
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       if (busy) { event.preventDefault(); event.returnValue = '' }
@@ -62,9 +63,9 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
       networkQuality={null} speedKph={row.speed ?? undefined} batteryPercent={row.battery ?? undefined}
       runModeLabel={row.modeLabel} locationLabel={row.locationReason} authenticated busy={busy} observeOnly={!drivingEnabled}
       onBack={onClose} onMonitor={onMonitor} videoStatus={viewingStatus(cameras)}
-      cameraView={<ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} frames={cameras.frames} failedCameras={cameras.failedCameras} requireFrameCallback={drivingEnabled} onFrame={reportFrame} onProgress={reportProgress} onStats={onStats} />}
+      cameraView={<ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} frames={cameras.frames} failedCameras={cameras.failedCameras} requireFrameCallback={drivingEnabled} onFrame={trackChanged} onProgress={reportProgress} onStats={onStats} onPresented={bench.present} onSample={drivingEnabled ? bench.sample : undefined} />}
       controlPanel={drivingEnabled
-      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={videoReady} onBusyChange={onBusy} onIntent={onIntent} diagnostics={diagnostics.current} />
+      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={bench.ready} verifyVideo={bench.check} receiverReady={bench.receiverReady} onBusyChange={onBusy} onIntent={onIntent} diagnostics={diagnostics.current} />
       : <div className="space-y-2 text-xs text-amber-200">
           <button type="button" disabled aria-describedby="control-denied-reason"
             className="rounded border border-slate-700 px-3 py-2 opacity-40">申请控制权</button>

@@ -8,13 +8,19 @@ export const frontCameras: { name: 'left' | 'center' | 'right'; label: string }[
   { name: 'left', label: '前左' }, { name: 'center', label: '前中' }, { name: 'right', label: '前右' },
 ]
 
-function CameraSlot({ name, label, track, live, failure, requireFrameCallback, onFrame, onProgress, onStats }: {
+function CameraSlot({ name, label, track, live, failure, requireFrameCallback, onFrame, onProgress, onStats, onSample, onPresented }: {
   name: FrontCamera; label: string; track?: CameraFeedTrack; live: boolean; failure?: string; requireFrameCallback?: boolean
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
   onProgress?: (name: FrontCamera, track: CameraFeedTrack) => void
+  onPresented?: (name: FrontCamera, track: CameraFeedTrack, count?: number) => void
+  onSample?: (name: FrontCamera, track: CameraFeedTrack, video: HTMLVideoElement) => void
   onStats?: (name: FrontCamera, stats: CameraFrameStats) => void
 }) {
   const video = useRef<HTMLVideoElement>(null)
+  const presentedRef = useRef(onPresented)
+  presentedRef.current = onPresented
+  const sampleRef = useRef(onSample)
+  sampleRef.current = onSample
   const onFrameRef = useRef(onFrame)
   const onStatsRef = useRef(onStats)
   const onProgressRef = useRef(onProgress)
@@ -31,7 +37,12 @@ function CameraSlot({ name, label, track, live, failure, requireFrameCallback, o
       onFrameRef.current?.(name, value, track)
     }, {
       requireFrameCallback,
-      onFrame: () => onProgressRef.current?.(name, track),
+      maxResidenceMs: requireFrameCallback ? 1000 : undefined,
+      onPresented: count => presentedRef.current?.(name, track, count),
+      onFrame: () => {
+        if (video.current) sampleRef.current?.(name, track, video.current)
+        onProgressRef.current?.(name, track)
+      },
       onStats: stats => onStatsRef.current?.(name, stats),
     })
   }, [name, track, requireFrameCallback])
@@ -55,13 +66,15 @@ function CameraSlot({ name, label, track, live, failure, requireFrameCallback, o
   </section>
 }
 
-export default function ThreeCameraView({ vehicleId, tracks = {}, frames = {}, failedCameras = {}, requireFrameCallback = false, onFrame, onProgress, onStats }: {
+export default function ThreeCameraView({ vehicleId, tracks = {}, frames = {}, failedCameras = {}, requireFrameCallback = false, onFrame, onProgress, onStats, onSample, onPresented }: {
   vehicleId: string; tracks?: Partial<Record<FrontCamera, CameraFeedTrack>>
   frames?: Partial<Record<FrontCamera, CameraFeedTrack>>
   failedCameras?: Partial<Record<FrontCamera, string>>
   requireFrameCallback?: boolean
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
   onProgress?: (name: FrontCamera, track: CameraFeedTrack) => void
+  onPresented?: (name: FrontCamera, track: CameraFeedTrack, count?: number) => void
+  onSample?: (name: FrontCamera, track: CameraFeedTrack, video: HTMLVideoElement) => void
   onStats?: (name: FrontCamera, stats: CameraFrameStats) => void
 }) {
   const [focused, setFocused] = useState(false)
@@ -83,7 +96,7 @@ export default function ThreeCameraView({ vehicleId, tracks = {}, frames = {}, f
       {displayedCameras.map(camera => <div key={camera.name} className="flex min-h-0 min-w-0 [&>section]:flex-1"
         style={!singleFront && focused ? camera.name === 'center' ? { gridColumn: 1, gridRow: '1 / 3' }
           : { gridColumn: 2, gridRow: camera.name === 'left' ? 1 : 2 } : undefined}>
-        <CameraSlot {...camera} track={tracks[camera.name]} live={Boolean(tracks[camera.name]) && frames[camera.name] === tracks[camera.name]} failure={failedCameras[camera.name]} requireFrameCallback={requireFrameCallback} onFrame={onFrame} onProgress={onProgress} onStats={onStats} />
+        <CameraSlot {...camera} track={tracks[camera.name]} live={Boolean(tracks[camera.name]) && frames[camera.name] === tracks[camera.name]} failure={failedCameras[camera.name]} requireFrameCallback={requireFrameCallback} onFrame={onFrame} onProgress={onProgress} onStats={onStats} onSample={onSample} onPresented={onPresented} />
       </div>)}
     </div>
   </section>

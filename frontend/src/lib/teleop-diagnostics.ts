@@ -1,3 +1,5 @@
+import type { BenchVideoWindow } from './bench-video-stats'
+
 export type TeleopDiagnosticChannel = 'video' | 'control' | 'feedback'
 
 export interface TeleopDiagnosticEntry {
@@ -12,6 +14,12 @@ const MAX_TIMELINE_ENTRIES = 256
 // Bounded in-browser ring buffer exported only to a local JSON download.
 // Never store tokens, private keys, signatures, or raw command values here.
 export class TeleopDiagnosticsBuffer {
+  readonly videoWindows: BenchVideoWindow[] = []
+  recordWindow(window: BenchVideoWindow) {
+    this.videoWindows.push(window)
+    if (this.videoWindows.length > 360) this.videoWindows.shift()
+  }
+
   private readonly items: TeleopDiagnosticEntry[] = []
 
   record(channel: TeleopDiagnosticChannel, event: string, detail?: string): void {
@@ -30,5 +38,6 @@ export class TeleopDiagnosticsBuffer {
 
   clear(): void {
     this.items.length = 0
+    this.videoWindows.length = 0
   }
 }
