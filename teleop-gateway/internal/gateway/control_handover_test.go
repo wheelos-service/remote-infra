@@ -161,14 +161,13 @@ func TestControlHandoverDeviceAcknowledgementGate(t *testing.T) {
 func TestControlHTTPReleaseIsPendingAndACLIsRechecked(t *testing.T) {
 	f := newTelemetryFixture(t)
 	previousLeases, previousAuth, previousIDs := controlLeases, vehicleAuthorizer, vehicleIdentities
-	previousVideo, previousSink, previousKey, previousSecret := videoSessions, auditSink, lkApiKey, lkApiSecret
+	previousSink, previousKey, previousSecret := auditSink, lkApiKey, lkApiSecret
 	controlLeases, vehicleAuthorizer, vehicleIdentities = f.api.leases, f.api.authorizer, f.api.identities
-	videoSessions = NewVideoSessionStore(f.client, 0)
 	auditSink = NewJSONAuditSink(io.Discard)
 	lkApiKey, lkApiSecret = "test", "control-test-only-signing-key-not-a-production-credential"
 	t.Cleanup(func() {
 		controlLeases, vehicleAuthorizer, vehicleIdentities = previousLeases, previousAuth, previousIDs
-		videoSessions, auditSink, lkApiKey, lkApiSecret = previousVideo, previousSink, previousKey, previousSecret
+		auditSink, lkApiKey, lkApiSecret = previousSink, previousKey, previousSecret
 	})
 	for pattern, handler := range map[string]http.HandlerFunc{
 		"POST /api/vehicles/{vehicle_id}/control/acquire": handleAcquireControl,

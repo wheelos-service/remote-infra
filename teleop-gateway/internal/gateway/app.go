@@ -25,7 +25,6 @@ var (
 	lkApiKey          = os.Getenv("LIVEKIT_API_KEY")
 	lkApiSecret       = os.Getenv("LIVEKIT_API_SECRET")
 	controlLeases     *ControlLeaseStore
-	videoSessions     *VideoSessionStore
 	vehicleRegistry   *VehicleRegistry
 	authenticator     Authenticator
 	vehicleAuthorizer *VehicleAuthorizer
@@ -121,7 +120,6 @@ func Run() {
 	if err := controlLeases.Ping(context.Background()); err != nil {
 		log.Fatalf("connect control lease store: %v", err)
 	}
-	videoSessions = NewVideoSessionStore(controlLeases.client, videoGracePeriod())
 	if os.Getenv("OPERATIONS_DB_PATH") == ":memory:" {
 		log.Fatal("operations database must be persistent outside tests")
 	}
@@ -209,16 +207,12 @@ func Run() {
 }
 
 func registerSessionAndTokenRoutes(mux *http.ServeMux) {
-	mux.Handle("/api/token/operator", AuthenticationMiddleware(http.HandlerFunc(handleOperatorConnect)))
 	mux.Handle("/api/token/vehicle", AuthenticationMiddleware(http.HandlerFunc(handleVehicleConnect)))
 	mux.Handle("POST /api/vehicles/{vehicle_id}/control/acquire", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleAcquireControl))))
 	mux.Handle("GET /api/vehicles/{vehicle_id}/control", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleGetControl))))
 	mux.Handle("POST /api/control/{session_id}/renew", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleRenewControl))))
 	mux.Handle("POST /api/control/{session_id}/release", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleReleaseControl))))
 	mux.Handle("GET /api/auth/me", AuthenticationMiddleware(http.HandlerFunc(handleAuthMe)))
-	mux.Handle("POST /api/vehicles/{vehicle_id}/video/acquire", AuthenticationMiddleware(http.HandlerFunc(handleAcquireVideo)))
-	mux.Handle("POST /api/video/{session_id}/release", AuthenticationMiddleware(http.HandlerFunc(handleReleaseVideo)))
-	mux.Handle("GET /api/vehicles/{vehicle_id}/video", AuthenticationMiddleware(http.HandlerFunc(handleGetVideo)))
 	registerControlHandover(mux)
 	registerDeviceControl(mux)
 	registerDeviceAuthCheck(mux)
@@ -330,59 +324,7 @@ func parseDevToken(tok string) *UserClaims {
 }
 
 // ==========================================
-// 3. Operator connection and control data channel
-// ==========================================
-func handleOperatorConnect(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userClaims := ctx.Value("user").(*UserClaims)
-
-	operatorID := userClaims.Name
-	vehicleID := r.URL.Query().Get("vid")
-	if vehicleID == "" {
-		http.Error(w, "Missing vehicle ID (vid)", http.StatusBadRequest)
-		return
-	}
-	access, err := resolveOperatorAccess(userClaims, r.URL.Query().Get("access"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
-		return
-	}
-	permission := ObservePermission
-	if access == ControllerAccess {
-		permission = ControlPermission
-		if userClaims.managed != nil {
-			http.Error(w, "managed control requires an allowlisted v2 simulation session", http.StatusForbidden)
-			return
-		}
-	}
-	if !vehicleAuthorizer.Authorize(userClaims, vehicleID, permission) {
-		http.Error(w, "forbidden: vehicle ACL denied", http.StatusForbidden)
-		return
-	}
-
-	lkToken, err := issueOperatorToken(vehicleID, operatorID, access)
-	if err != nil {
-		http.Error(w, "failed to issue LiveKit token", http.StatusInternalServerError)
-		return
-	}
-	if !reserveManagedToken(w, r, lkToken) {
-		return
-	}
-	recordAudit(r.Context(), AuditEvent{OperatorID: operatorID, VehicleID: vehicleID, Event: "login", Result: "success"})
-	recordAudit(r.Context(), AuditEvent{OperatorID: operatorID, VehicleID: vehicleID, Event: "vehicle_access", Result: "success"})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"token":       lkToken,
-		"operator_id": operatorID,
-		"mode":        access,
-		"can_control": access == ControllerAccess,
-		"msg":         "Authenticated and joined the vehicle room",
-	})
-}
-
-// ==========================================
-// 4. Vehicle machine-to-machine connection
+// 3. Vehicle machine-to-machine connection
 // ==========================================
 func handleVehicleConnect(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")

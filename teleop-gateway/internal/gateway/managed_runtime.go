@@ -438,7 +438,7 @@ func resolveVehicleClaims(claims *UserClaims, fallback *VehicleIdentityResolver)
 
 func managedStartsSession(r *http.Request) bool {
 	path := r.URL.Path
-	if path == "/api/token/operator" || path == "/api/token/vehicle" {
+	if path == "/api/token/vehicle" {
 		return true
 	}
 	if r.Method != http.MethodPost {
@@ -447,8 +447,7 @@ func managedStartsSession(r *http.Request) bool {
 	if strings.Contains(path, "/viewing/") && strings.HasSuffix(path, "/token") {
 		return true
 	}
-	return (strings.Contains(path, "/control/") || strings.Contains(path, "/viewing/") ||
-		strings.Contains(path, "/video/")) &&
+	return (strings.Contains(path, "/control/") || strings.Contains(path, "/viewing/")) &&
 		(strings.HasSuffix(path, "/acquire") || strings.HasSuffix(path, "/renew"))
 }
 
@@ -610,12 +609,12 @@ func (m *ManagedRuntime) checkDrained(ctx context.Context) error {
 	if !m.maintenance {
 		return errManagedDrain
 	}
-	if controlLeases == nil || videoSessions == nil || m.roomsEmpty == nil {
+	if controlLeases == nil || m.roomsEmpty == nil {
 		return errors.New("managed drain dependencies unavailable")
 	}
 	client := controlLeases.client
 	for _, pattern := range []string{"control:*", "operator-control:*", "control-handover:*",
-		"video_session:*", "video_viewer:*", "viewing:*:active"} {
+		"viewing:*:active"} {
 		var cursor uint64
 		for {
 			keys, next, err := client.Scan(ctx, cursor, pattern, 100).Result()
@@ -630,14 +629,6 @@ func (m *ManagedRuntime) checkDrained(ctx context.Context) error {
 						return err
 					}
 					if handover.State != "CONFIRMED" && handover.State != "NONE" {
-						return errManagedDrain
-					}
-				case strings.HasPrefix(key, "video_session:"):
-					session, err := videoSessions.Get(ctx, strings.TrimPrefix(key, "video_session:"))
-					if err != nil {
-						return err
-					}
-					if session.ViewerCount != 0 || session.ControllerSessionID != "" || session.Mode != VideoStandby {
 						return errManagedDrain
 					}
 				case strings.HasPrefix(key, "viewing:"):

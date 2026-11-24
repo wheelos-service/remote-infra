@@ -2,6 +2,9 @@
 
 > 本文档基于当前 `livekit-infra`（`v1`）与 `apollo-base`（`v1` + `data/sdk-kit` `v2`）真实代码编写，集中展示**正常流程**、**分阶段异常定位**与**对应代码锚点**，便于后续排障、评审与演进。
 
+> **当前发布限制**：浏览器工作台只允许监看，包括模拟；第三节描述现有控制代码，
+> 不表示浏览器或实车驾驶已经开放。浏览器限制不保护其他 API 客户端。
+
 ---
 
 ## 一、快速索引：故障等级总览
@@ -10,7 +13,7 @@
 | --- | --- | --- | --- |
 | **L0** | 瞬时抖动 / 可恢复 HTTP 异常 | `< 300 ms` DataChannel 丢包、单次 `503`/`429`/超时、`DemandGate` 同毫秒重复回包 | 无感吸收或有界重试；不刹车、不断会 |
 | **L1** | 短时可恢复中断（`0.3 s – 5 s`） | `RoomEvent.Reconnecting`、DataChannel `300–1500 ms` 暂停、画面停更 `< 5 s`、单相机断流 | 先停用驾驶输入并温和制动保持（`20%–25%`），窗口内恢复后由操作员手动重使能手柄 |
-| **L2** | 有界超时 / 主动退出 / 策略拒接 | 断流 `> 1.5 s`、画面失联 `> 5 s`、`15 s` Room 重建失败、租约过期、`409`/维护 `503` | 锁死会话并撤销控制，车端 `STOP`（`50%` 制动），完成交接确认后重新申请 |
+| **L2** | 有界超时 / 主动退出 / 策略拒接 | 断流 `> 1.5 s`、画面失联 `> 5 s`、`15 s` Room 重建失败、租约过期、`409`/维护 `503` | 控制故障走锁闭及交接；只读监看故障停止监看和释放观看租约，不等同于撤销控制 |
 | **L3** | 安全关键 / 硬件故障 / 急停 | `Space` 或急停按钮（`brake=100`）、CAN 超时、底盘故障、`SystemStatus` 急停、人工接管 | 无条件抢占执行 `HARD_ESTOP`（含驻车锁）或退回 `MANUAL`，车速归零且故障清除后经 `RESET` 解除 |
 
 ---
@@ -26,35 +29,126 @@ flowchart LR
   V3["V3 车端需求轮询<br/>MediaService::PollDemand (1s)<br/>DemandGate (<=5s 有界截止)"]
   V4["V4 车端按需采集与唤醒<br/>CameraGstCapture (3路 NVENC)<br/>EncodedIngress (2帧) + eventfd"]
   V5["V5 隔离推流进程<br/>vehicle_media_worker (FD 3/4)<br/>发布 camera-left/center/right"]
-  V6["V6 浏览器解码与门控<br/>useDrivingCameras + rVFC<br/>三路出帧 => videoReady=true"]
+  V6["V6 浏览器解码与门控<br/>useDrivingCameras + rVFC<br/>源帧新鲜度未验证，仅监看"]
 
   V1 -->|"POST /viewing/acquire<br/>POST /viewing/{id}/renew"| V2
   V2 -->|"GET /media-demand"| V3
   V3 -->|"generation / VideoRequired"| V4
-  V4 -->|"eventfd 零等待唤醒<br/>每次最多排空 6 帧"| V5
+  V4 -->|"eventfd 唤醒<br/>每批最多排空 12 帧"| V5
   V5 -->|"LiveKit SFU WebRTC<br/>H.264 + capture_time_us"| V6
 ```
 
 - **正常态关键不变量**：
   - `V1/V2`：续约仅延长 Redis TTL，不递增 `MediaDemand.revision`，防止车端重启媒体 Worker；只有新加入、主动释放或过期才推进 `revision`。
   - `V4`：仅当 `VideoRequired() == true` 时启动硬件采集管线；无人观看且无控车时自动关闭全部 GStreamer 分支。
-  - `V6`：驾驶模式启用 `requireFrameCallback: true`，必须三路同时有 `rtpTimestamp`/`presentedFrames` 推进才置 `videoReady = true`。
+  - `V6`：源帧新鲜度尚未完成端到端验证，工作台禁用驾驶（包括模拟），仅允许监看；浏览器门控不保护其他 API 客户端。
 
 ### 2.2 视频链路分阶段异常速查表
 
 | 阶段 | 异常场景 | 等级 | 处理逻辑 | 代码锚点 |
 | --- | --- | --- | --- | --- |
-| **V1/V2** | `acquire`/`renew` 遇瞬时 `503`/`429`/网络超时 | **L0** | `acquire` 最多短重试 2 次；`renew` 在本地截止期前指数退避重试 | `frontend/src/lib/viewing-api.ts`<br/>`frontend/src/lib/viewing-lifecycle.ts` |
+| **V1/V2** | `acquire`/`renew` 遇瞬时 `503`/`429`/网络错误 | **L0** | 监看 `acquire` 对非超时的可重试错误最多短重试 2 次；请求超时直接失败。`renew` 在本地截止期前对可重试错误退避 | `frontend/src/lib/viewing-api.ts`<br/>`frontend/src/lib/viewing-lifecycle.ts` |
 | **V1/V2** | 维护排空 `503`（`MANAGED_MAINTENANCE_REQUIRED`）或 `409` 过期/释放 | **L2** | 立即停止重试并关闭监看，提示重新申请；不复用旧 `viewing_session_id` | `frontend/src/lib/viewing-api.ts`<br/>`teleop-gateway/internal/gateway/viewing_lease_api.go` |
 | **V2** | Gateway Postgres 单实例锁或管理写阻塞导致 `503` | **L0** | `instanceMu` 与 `additiveMu` 分离 + `1.5s` `PingContext` 超时，避免管理写阻塞 `/media-demand` | `teleop-gateway/internal/gateway/managed_runtime.go` |
 | **V3** | 车端 `PollDemand` 遇到 `503` 或同毫秒 `server_time_ms` 重复包 | **L0** | 捕获异常并忽略同毫秒/过期回包，**不调用 `Fail()`**，保留未过期的 5s `deadline` | `apollo-base/modules/teleop/src/media/media_service.cc`<br/>`apollo-base/modules/teleop/src/media/media_demand.cc` |
-| **V3** | 浏览器崩溃或断网超过 `5s`（车端）/ `30s`（Gateway） | **L2** | `DemandGate::Current` 到期停推并关闭采集管线；`ViewingLease` 30s TTL 自动回收 | `apollo-base/modules/teleop/src/media/media_demand.cc`<br/>`teleop-gateway/internal/gateway/viewing_lease.go` |
-| **V4** | 单路相机卡顿 `>5s` / GStreamer Bus 错误 / IPC 阻塞丢帧 | **L1** | 仅关闭并 `2s` 重试故障分支，调用 `Discontinuity(cam)` 请求该路 IDR，**不连坐兄弟相机** | `apollo-base/modules/teleop/src/camera_gst/camera_gst_capture.cc`<br/>`apollo-base/data/sdk-kit/livekit/encoded_video.cc` |
+| **V3** | 浏览器崩溃或无法续约 | **L2** | Gateway 中该观看租约在最后一次成功续约后最多 30s 到期；只要车端仍能向 Gateway 取得有效需求，车端不会因为浏览器断网直接在 5s 后停推。无其他需求时，后续轮询使其停推 | `apollo-base/modules/teleop/src/media/media_demand.cc`<br/>`teleop-gateway/internal/gateway/viewing_lease.go` |
+| **V3** | 车端无法取得 Gateway 需求 | **L2** | 保留既有、尚未过期的授权，但不延长原截止；最多 5s 的授权到期后停止 worker 和采集 | `apollo-base/modules/teleop/src/media/media_service.cc`<br/>`apollo-base/modules/teleop/src/media/media_demand.cc` |
+| **V4** | 单路相机无编码帧 `>5s` / GStreamer Bus 错误 | **L1** | 仅关闭并 `2s` 重试故障分支，调用 `Discontinuity(cam)` 请求该路 IDR，**不连坐兄弟相机** | `apollo-base/modules/teleop/src/camera_gst/camera_gst_capture.cc`<br/>`apollo-base/data/sdk-kit/livekit/encoded_video.cc` |
 | **V5** | 单路编码 PTS 倒退或漂移 `>500 ms` | **L1** | `media_backend` 仅置该路 `waiting_keyframe[cam]=true`、清 `base_pts[cam]` 并请求 IDR，**不崩溃 Worker** | `apollo-base/data/sdk-kit/livekit/media_backend.cc` |
-| **V5** | `vehicle_media_worker` 自身异常退出 | **L2** | `MediaService` 立刻 `Invalidate("media_worker_failed")` 锁闭控制，停机 `1s` 后在有效需求下重启 | `apollo-base/modules/teleop/src/media/media_service.cc` |
-| **V6** | LiveKit `RoomEvent.Reconnecting`（短时 ICE 抖动） | **L1** | **保留现有 `tracks` 与 `<video>` DOM**（避免强制重等 3 路 IDR 黑屏），`Reconnected` 后同步已有出帧状态并解除恢复锁 | `frontend/src/hooks/use-driving-cameras.ts` |
-| **V6** | 单路/多路停更（自适应 `T_frame_stall ∈ [900, 1500] ms`）或 `waiting`/`stalled` | **L1→L2** | `ThreeCameraView` 首帧后**弱依赖保留画面不黑屏**，仅右上角提示；`DrivingControlPanel` 保持 5s 温和保刹（5s 内恢复由手柄 `needsNeutral` 直接续控），超时自动释放交接 | `frontend/src/lib/camera-feed.ts`<br/>`frontend/src/pages/ThreeCameraView.tsx`<br/>`frontend/src/pages/DrivingControlPanel.tsx` |
-| **V6** | LiveKit `RoomEvent.Disconnected` 或 `TrackSubscriptionFailed` | **L1→L2** | `15 s` 恢复窗口内通过 `POST /viewing/{id}/token` 换票重建最多 3 次 Room（递增 `playbackEpoch`）；三路全出帧才退出 `recovering` | `frontend/src/lib/viewing-lifecycle.ts`<br/>`frontend/src/hooks/use-driving-cameras.ts` |
+| **V5** | `vehicle_media_worker` 自身异常退出 | **L2** | `MediaService` 立刻 `Invalidate("media_worker_failed")` 锁闭控制；仅在有效需求下有抖动地退避重启 | `apollo-base/modules/teleop/src/media/media_service.cc` |
+| **V6** | LiveKit `RoomEvent.Reconnecting`（短时 ICE 抖动） | **L1** | 保留现有 `tracks` 与 `<video>` DOM；传输恢复后重新等待各轨道进度，旧帧不算当前出帧。传输连接与画面可用分别显示 | `frontend/src/hooks/use-driving-cameras.ts` |
+| **V6** | 单路/多路停更（自适应 `T_frame_stall ∈ [900, 1500] ms`） | **L1→L2** | `waiting`/`stalled` 不立即触发失活，由帧进度超时判定；首帧后保留最后画面并提示卡顿。控制代码有单独门控，但当前浏览器只读 | `frontend/src/lib/camera-feed.ts`<br/>`frontend/src/pages/ThreeCameraView.tsx` |
+| **V6** | LiveKit `RoomEvent.Disconnected` | **L1→L2** | 可重试原因在 `15 s` 重建窗口内通过 `POST /viewing/{id}/token` 换票；移除、身份冲突等原因终止。传输恢复后单独等待画面 | `frontend/src/lib/viewing-lifecycle.ts`<br/>`frontend/src/hooks/use-driving-cameras.ts` |
+| **V6** | `TrackSubscriptionFailed` | **L1** | 监看标记故障轨道并按 `0.5/1/2s` 最多重试 3 次；不会仅因此重建 Room，耗尽后该路可能持续不可用 | `frontend/src/hooks/use-driving-cameras.ts` |
+
+### 2.3 双端断线恢复与待验证项
+
+#### 实际连接和当前行为
+
+```text
+浏览器 ──信令 / WebRTC── LiveKit ──信令 / WebRTC── 车端 worker
+   └────观看租约续期──── Gateway ────媒体需求轮询────┘
+```
+
+Gateway 管理权限和需求，LiveKit 承载信令及媒体；同一部署入口不意味着
+这些连接有相同故障状态。浏览器和车端各自连接 LiveKit，互相断线不会必然
+触发对方的 Room 重连。
+
+| 位置 | 当前恢复行为与限制 |
+| --- | --- |
+| 浏览器 ↔ LiveKit | JS SDK 自行恢复信令或媒体，必要时尝试完整重连；应用允许媒体 `Reconnecting` 最多 30s，SDK 失败或超时后在独立 15s 内换票重建。纯信令 `SignalReconnecting` 不启动媒体重连时限，信令恢复也会触发 `Reconnected`。 |
+| 车端 ↔ LiveKit | worker 在 SDK 报告 `Reconnecting` 时最多等 5s，成功后请求关键帧；断开或超时由父进程在需求有效时指数退避加抖动重启。当前代码没有证明原生 SDK 的所有重连细节，首次加入的 `join_retries=0` 也不能用于推断已建立连接的恢复策略。 |
+| 浏览器 ↔ Gateway | LiveKit 可以仍有画面，但续约只在原租约截止内重试；到期停止监看。维护、认证及租约失效不可当作普通网络故障无限重试。 |
+| 车端 ↔ Gateway | 既有需求授权最多保持到原 5s 截止；不可用或超时后即使 RTC 仍通也须停止。恢复后仅在 Gateway 仍有有效需求时启动。 |
+| 车端离线或所有轨道无帧 | 浏览器自身 Room 可能仍连接、租约仍续期，显示 `已连接 · 0/3 路出帧`；车端恢复后可重新发布。单路订阅失败不会自动重建 Room。 |
+
+原先 Room 恢复和画面恢复共用 15s 计时，车端晚到会导致不必要的租约释放；
+现在分别计时。仅车端离线不重建浏览器 Room，持续无画面则按 60s 资源策略
+结束监看。浏览器 `timeupdate` 回退只能说明播放进度，不能证明收到新帧或
+源帧新鲜。
+
+#### 实施后的职责与边界
+
+1. **租约独立于传输和画面**：沿用现有 30s 租约、10s 续期及车端最多 5s
+   的需求授权截止；到期、撤权、维护排空或用户退出立即关闭，不因重连延长
+   授权。token 刷新只在有效租约内执行，不续租；已签发的 JWT 不因缓存删除撤销。
+2. **LiveKit 优先恢复传输**：JS SDK 拥有当前 Room 的自动恢复；应用只在 SDK
+   最终 `Disconnected` 或明确的传输恢复上限到期后接管，先在本地使旧 Room
+   失效并发起有界清理，再串行换票和有界重建；清理卡住不能阻塞租约释放。
+   网络分区时无法保证服务端立即移除旧 participant，遇身份冲突应终止并提示，
+   不能声称远端已清理。用 epoch、取消标记和单一 in-flight 操作阻止旧回调、
+   旧 token 响应及迟到的 `connect()` 复活 Room。纯信令中断单独显示/记录；
+   不因仍有媒体帧的信令短抖动立即销毁 Room。
+3. **画面状态与 Room 分离**：连接成功只表示传输连接，不表示有画面；分别显示
+   `连接中/重连中/已连接` 与 `等待画面/部分出帧/全部出帧/长时间无画面`。
+   仅车端或相机无帧不触发浏览器 Room 重建。保留现有单路失败重试和其他路
+   显示；监看有任一当前显示轨道进度即可标记画面可用。`timeupdate` 回退
+   明确标为弱证据，不用于驾驶或源帧新鲜度判断。
+4. **分别限定等待时间**：建议初始策略为 SDK 媒体 `Reconnecting` 最多 30s，
+   之后有独立 15s、最多 3 次的应用重建预算；纯信令恢复且媒体仍出帧时由
+   SDK 自己的重试策略处理，不套用媒体重连时限。这是待真实网络验证的应用
+   策略，不是 SDK 默认值，也不能覆盖授权截止。初次 Room 连接限时 15s。
+   首次连上 Room 后，连续 60s 无任何当前显示轨道进度则提示并停止监看、
+   尽力释放租约，需用户重新申请；部分画面正常时不启动全路无画面终止。
+   无帧计时跨 Room 重连连续计算，不由重连、轨道发布或旧帧重置；重建次数
+   也跨无帧期间的多次断连累计，直到出现当前画面进度才重置。授权失效和用户
+   退出始终优先。此时限是资源策略建议，不是安全或可用性保证。
+5. **按终止原因处理**：主动退出、`PARTICIPANT_REMOVED`、`DUPLICATE_IDENTITY`、
+   `ROOM_DELETED`/`ROOM_CLOSED` 默认终止并提示，不自动重新进入；网络、服务重启
+   等临时错误可在预算内重建，未知原因保守地有界处理。每次换票由 Gateway
+   重新授权；具体枚举映射以锁定的 SDK 版本为准，不依赖浏览器分类作为撤权机制。
+6. **车端独立且有界**：保留 worker 最多 5s SDK 恢复窗口及失效时现有控制失效
+   处理；不为了画面恢复延长车端安全期限。父进程对连续失败采用有上限的指数
+   退避加抖动（首次 1–1.5s，上限 30s），ACTIVE 稳定 10s 后重置；等待期间持续检查授权、停止信号和代次，
+   无需求时取消重试。恢复后继续按现有规则请求关键帧。为父进程反馈排空
+   加单批上限，避免持续反馈占用授权和控制循环。
+7. **不改变控制安全边界**：观看恢复不自动恢复控制权或发令；保留控制会话、
+   车端 watchdog、Guardian 和交接的独立机制。不合并 observer/control Room、
+   不引入第二个媒体 broker 或额外车端连接。源帧时间与真实设备验证完成前，
+   浏览器保持只读；其他 API 客户端需要独立的服务端安全方案。
+
+#### 验证与剩余验收
+
+1. 已在 `frontend/src/lib/viewing-lifecycle.ts` 将租约、SDK 传输恢复和应用重建
+   的计时/终止原因分离；在 `frontend/src/hooks/use-driving-cameras.ts` 与
+   `frontend/src/lib/camera-view.ts` 独立跟踪当前轨道画面进度及无帧期限，
+   在工作台和监控页复用同一状态及展示逻辑。确保重连后旧 Room、旧轨道、
+   已取消 timer 和迟到 HTTP 响应不能改变新状态或泄漏资源。
+2. 已在 `apollo-base/modules/teleop/src/media/media_service.cc` 实施需求约束下的
+   退避和有界反馈批处理，保留 `data/sdk-kit/livekit/media_backend.cc` 的
+   关键帧恢复和单车单 Room；原生 SDK 版本在真实断网时发出的状态仍待核实。
+3. 前端测试覆盖车端晚于传输恢复、无画面超时、终止原因、重建退避和迟到
+   Room 清理；车端测试覆盖退避上限及反馈洪泛下需求到期。隔离 Redis 验证
+   Gateway 租约及需求；真实 Chrome + LiveKit 的合成轨道覆盖浏览器信令及媒体
+   恢复、车辆参与者离开 16s 后再加入和 LiveKit 服务短暂中断。该浏览器联调的
+   Gateway 为模拟实现，不代表真实 Gateway/worker 端到端通过。
+4. 原生 worker 的 `--sdk-smoke` 已通过：从本机已有镜像临时提供 OpenSSL 1.1
+   库，仅验证 SDK 初始化、Room 和视频源/帧创建，不验证入会或发布。仍需真实
+   Gateway + Redis + LiveKit + 原生 worker 联调，以及目标环境的真实相机、
+   弱网/TURN、源帧时间与物理安全验证；模拟通过不等于实车通过。
+
+30s、15s 和 60s 为已实现的资源/恢复策略，需依据真实网络测量调整；不能以
+加长观察窗口替代安全授权或控制看门狗。
 
 ---
 

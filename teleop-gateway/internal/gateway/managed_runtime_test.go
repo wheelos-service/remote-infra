@@ -217,12 +217,12 @@ func newManagedFixture(t *testing.T) *managedFixture {
 		roomsEmpty: func(context.Context) error { return nil }}
 	previousRuntime, previousAuth := managedRuntime, authenticator
 	previousRegistry, previousAuthorizer, previousIdentities := vehicleRegistry, vehicleAuthorizer, vehicleIdentities
-	previousLeases, previousVideo, previousAudit := controlLeases, videoSessions, auditSink
+	previousLeases, previousAudit := controlLeases, auditSink
 	previousKey, previousSecret := lkApiKey, lkApiSecret
 	t.Cleanup(func() {
 		managedRuntime, authenticator = previousRuntime, previousAuth
 		vehicleRegistry, vehicleAuthorizer, vehicleIdentities = previousRegistry, previousAuthorizer, previousIdentities
-		controlLeases, videoSessions, auditSink = previousLeases, previousVideo, previousAudit
+		controlLeases, auditSink = previousLeases, previousAudit
 		lkApiKey, lkApiSecret = previousKey, previousSecret
 	})
 	managedRuntime = f.runtime
@@ -235,7 +235,6 @@ func newManagedFixture(t *testing.T) *managedFixture {
 	vehicleAuthorizer = &VehicleAuthorizer{}
 	vehicleIdentities = &VehicleIdentityResolver{bySubject: map[string]string{}, strict: true}
 	controlLeases = &ControlLeaseStore{client: f.client, ttl: time.Minute}
-	videoSessions = NewVideoSessionStore(f.client, 0)
 	auditSink = NewJSONAuditSink(io.Discard)
 	lkApiKey, lkApiSecret = "managed-test-key", "managed-test-secret-long-enough-for-tests"
 	(&VehicleTelemetryAPI{registry: vehicleRegistry, identities: vehicleIdentities,
@@ -363,9 +362,6 @@ func TestManagedRuntimePostgresIdentityAndResourceBoundaries(t *testing.T) {
 		t.Fatalf("member read baseline is incomplete or crossed organizations: %s", w.Body.String())
 	}
 	f.request(t, "GET", "/api/vehicles/car-one/state", "admin", "", "", 200)
-	f.request(t, "GET", "/api/token/operator?vid=car-one&access=controller", "admin", "", "", 403)
-	f.request(t, "GET", "/api/token/operator?vid=car-one&access=observer", "admin", "", "", 200)
-	f.request(t, "GET", "/api/token/operator?vid=car-one&access=controller", "operator", "", "", 403)
 	f.request(t, "POST", "/api/vehicles/car-one/control/acquire", "operator", "",
 		`{"public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`, 403)
 	f.request(t, "POST", "/api/vehicles/car-one/data/tasks", "operator", "", `{}`, 403)
@@ -373,13 +369,10 @@ func TestManagedRuntimePostgresIdentityAndResourceBoundaries(t *testing.T) {
 	f.request(t, "GET", "/api/vehicles/car-one/data/tasks/next", "device-one", "", "", 403)
 	f.request(t, "GET", "/api/vehicles/car-two/device-auth-check", "device-one", "", "", 403)
 	f.request(t, "GET", "/api/vehicles/car-one/device-auth-check", "device-one", "", "", 204)
-	f.request(t, "GET", "/api/vehicles/car-two/video", "device-one", "", "", 403)
-	otherVideo, err := videoSessions.AcquireViewer(context.Background(), "car-other")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.request(t, "POST", "/api/video/"+otherVideo.SessionID+"/release", "viewer", "", "", 403)
-	f.request(t, "POST", "/api/video/"+otherVideo.SessionID+"/release", "device-one", "", "", 403)
+	f.request(t, "POST", "/api/vehicles/car-other/viewing/acquire", "viewer", "",
+		fmt.Sprintf(`{"request_id":%q,"client_instance_id":%q}`, uuid.NewString(), uuid.NewString()), 403)
+	f.request(t, "POST", "/api/vehicles/car-one/viewing/acquire", "device-one", "",
+		fmt.Sprintf(`{"request_id":%q,"client_instance_id":%q}`, uuid.NewString(), uuid.NewString()), 403)
 	f.request(t, "POST", "/api/vehicles/car-one/state", "device-one", "",
 		telemetryBody("car-one", "managed-stream", 1), 204)
 	if len(vehicleRegistry.byID) != 0 || len(vehicleIdentities.bySubject) != 0 {
@@ -475,7 +468,8 @@ func TestManagedRuntimePostgresMemberBaselineAndOperationScope(t *testing.T) {
 	}
 	for _, subject := range []string{"operator", "viewer", "roleless", "admin"} {
 		f.request(t, "GET", "/api/vehicles/car-later/state", subject, "", "", 200)
-		f.request(t, "GET", "/api/token/operator?vid=car-later&access=observer", subject, "", "", 200)
+		f.request(t, "POST", "/api/vehicles/car-later/viewing/acquire", subject, "",
+			fmt.Sprintf(`{"request_id":%q,"client_instance_id":%q}`, uuid.NewString(), uuid.NewString()), 200)
 		f.request(t, "GET", "/api/vehicles/car-other/state", subject, f.orgID, "", 403)
 		f.request(t, "POST", "/api/vehicles/car-later/control/acquire", subject, "", `{}`, 403)
 	}
@@ -523,7 +517,8 @@ func TestManagedRuntimePostgresMemberBaselineAndOperationScope(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.request(t, "GET", "/api/vehicles/car-later/state", "operator", "", "", 403)
-		f.request(t, "GET", "/api/token/operator?vid=car-later&access=observer", "operator", "", "", 403)
+		f.request(t, "POST", "/api/vehicles/car-later/viewing/acquire", "operator", "",
+			fmt.Sprintf(`{"request_id":%q,"client_instance_id":%q}`, uuid.NewString(), uuid.NewString()), 403)
 		if _, err := f.db.Exec("UPDATE "+lifecycle.table+" SET status='active' WHERE "+lifecycle.condition, lifecycle.args...); err != nil {
 			t.Fatal(err)
 		}
@@ -803,12 +798,7 @@ func TestManagedRuntimePostgresTokenHorizonAndDrainSurviveRestart(t *testing.T) 
 	if _, err := f.runtime.BeforeMutation(ctx, f.orgID); !errors.Is(err, errManagedDrain) {
 		t.Fatalf("normal serving accepted management write: %v", err)
 	}
-	for _, row := range []struct{ path, subject string }{
-		{"/api/token/operator?vid=car-one&access=observer", "viewer"},
-		{"/api/token/vehicle?vid=car-one", "device-one"},
-	} {
-		f.request(t, "GET", row.path, row.subject, "", "", 200)
-	}
+	f.request(t, "GET", "/api/token/vehicle?vid=car-one", "device-one", "", "", 200)
 	horizon, err := f.store.TokenExpiry(ctx, "")
 	if err != nil || time.Until(horizon) < 29*time.Minute {
 		t.Fatalf("vehicle token was not persistently tracked: %s %v", horizon, err)
@@ -823,11 +813,9 @@ func TestManagedRuntimePostgresTokenHorizonAndDrainSurviveRestart(t *testing.T) 
 		t.Fatalf("restart bypassed old-token drain: %v", err)
 	}
 	f.runtime.maintenance = true
-	f.request(t, "GET", "/api/token/operator?vid=car-one&access=observer", "viewer", "", "", 503)
 	f.request(t, "GET", "/api/token/vehicle?vid=car-one", "device-one", "", "", 503)
 	f.request(t, "POST", "/api/vehicles/car-one/control/acquire", "operator", "", `{}`, 503)
 	f.request(t, "POST", "/api/vehicles/car-one/viewing/acquire", "viewer", "", `{}`, 503)
-	f.request(t, "POST", "/api/vehicles/car-one/video/acquire", "viewer", "", `{}`, 503)
 	f.request(t, "GET", "/api/vehicles/car-one/device-auth-check", "device-one", "", "", 204)
 	if _, err := f.db.Exec(`UPDATE authz_token_horizons SET expires_at=now()-interval '1 second'`); err != nil {
 		t.Fatal(err)
@@ -1100,7 +1088,6 @@ func TestManagedRuntimeOIDCPostgresHTTPPilot(t *testing.T) {
 		t.Fatalf("HTTP list did not honor own-organization read baseline: %s", payload)
 	}
 	request("POST", "/api/vehicles/car-one/control/acquire", "pilot-operator", peopleScope, `{}`, 403)
-	request("GET", "/api/token/operator?vid=http-car&access=observer", "pilot-operator", peopleScope, "", 200)
 	request("GET", "/api/token/vehicle?vid=http-car", "http-device", "teleop:vehicle", "", 200)
 	viewing, _ := json.Marshal(map[string]string{"request_id": uuid.NewString(), "client_instance_id": uuid.NewString()})
 	request("POST", "/api/vehicles/http-car/viewing/acquire", "pilot-operator", peopleScope, string(viewing), 200)

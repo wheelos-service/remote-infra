@@ -26,14 +26,19 @@ lifetimes.
   returns HTTP 503 before creating authority. Supported v2 simulation control
   requires an explicit disposable-simulator allowlist; the release defaults to
   an empty list. Never put a physical vehicle in that list to bypass the gate.
+- **Browser driving is currently disabled, including simulation.** Source video
+  freshness has not been verified through the camera, LiveKit, and target
+  browser. The workbench remains available for observation. This frontend
+  restriction does not enforce safety on other API clients or revoke an
+  existing control session.
 - Task dispatch and event acknowledgement are unavailable in managed mode.
   Read-only fleet/operational views do not imply those actions are enabled.
 - Permission changes take effect in stored authorization, but existing media
   cleanup is best effort. An administration response does not prove immediate
   participant eviction or physical handover.
-- The retained legacy video-session API has weaker ownership checks than the
-  current viewing API. Legacy session IDs are not an isolation boundary;
-  use the primary frontend and do not rely on the legacy API for user isolation.
+- Removing a cached vehicle media token does not revoke a previously issued
+  LiveKit JWT. Maintenance and permission changes must honor the recorded token
+  expiry and room-drain checks.
 - SQLite operational history has a single Gateway owner. Multi-host scaling
   and automatic record rotation are outside this release.
 - Server verification does not test real vehicle cameras, actuators, or safety.

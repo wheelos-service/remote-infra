@@ -5,9 +5,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/livekit/protocol/auth"
+	"github.com/redis/go-redis/v9"
 )
 
 type ViewingLeaseAPI struct {
@@ -177,14 +179,99 @@ func (api *ViewingLeaseAPI) release(w http.ResponseWriter, r *http.Request) {
 	api.mutate(w, r, "release")
 }
 
+var mediaTokenCacheScript = redis.NewScript(`
+if redis.call('HGET', KEYS[1], 'epoch') ~= ARGV[1] or
+   redis.call('HGET', KEYS[1], 'revision') ~= ARGV[2] then
+  return {'stale'}
+end
+if ARGV[3] == 'read' then
+  local token = redis.call('GET', KEYS[2])
+  local prefix = ARGV[6] .. '\n'
+  if token and string.sub(token, 1, #prefix) == prefix and
+     redis.call('PTTL', KEYS[2]) > 120000 then
+    return {'ok', string.sub(token, #prefix + 1)}
+  end
+else
+  redis.call('SET', KEYS[2], ARGV[6] .. '\n' .. ARGV[4], 'PX', ARGV[5])
+end
+return {'ok', ''}
+`)
+
+func (api *ViewingLeaseAPI) cachedVehicleMediaToken(w http.ResponseWriter, r *http.Request, demand MediaDemand) (string, bool) {
+	vehicleID := demand.VehicleID
+	key := vehicleMediaTokenKey(vehicleID)
+	keys := []string{"viewing:" + vehicleID + ":demand", key}
+	scope := "static"
+	if claims, _ := r.Context().Value("user").(*UserClaims); claims != nil && claims.managed != nil {
+		scope = "managed:" + claims.Organization
+	}
+	cache := func(op, token string, ttl time.Duration) ([]string, error) {
+		return mediaTokenCacheScript.Run(r.Context(), api.store.client, keys,
+			demand.Epoch, demand.Revision, op, token, ttl.Milliseconds(), scope).StringSlice()
+	}
+	result, err := cache("read", "", 0)
+	if err != nil || len(result) != 2 || result[0] != "ok" {
+		http.Error(w, "viewing coordination changed or unavailable", http.StatusServiceUnavailable)
+		return "", false
+	}
+	if result[1] != "" {
+		if verifier, parseErr := auth.ParseAPIToken(result[1]); parseErr == nil {
+			claims, grants, verifyErr := verifier.Verify(lkApiSecret)
+			if verifyErr == nil && claims.Subject == "vehicle-"+vehicleID &&
+				claims.Expiry != nil && time.Until(claims.Expiry.Time()) > 2*time.Minute &&
+				grants.Video != nil && grants.Video.Room == "teleop-"+vehicleID && grants.Video.RoomJoin &&
+				grants.Video.GetCanPublish() && grants.Video.GetCanPublishData() && grants.Video.GetCanSubscribe() {
+				return result[1], true
+			}
+		}
+	}
+	token, err := issueVehicleToken(vehicleID)
+	if err != nil {
+		return "", true
+	}
+	if !reserveManagedToken(w, r, token) {
+		return "", false
+	}
+	verifier, err := auth.ParseAPIToken(token)
+	if err != nil {
+		http.Error(w, "invalid vehicle media token", http.StatusInternalServerError)
+		return "", false
+	}
+	claims, _, err := verifier.Verify(lkApiSecret)
+	if err != nil || claims.Expiry == nil {
+		http.Error(w, "invalid vehicle media token expiry", http.StatusInternalServerError)
+		return "", false
+	}
+	cacheTTL := time.Until(claims.Expiry.Time()) - 2*time.Minute
+	if cacheTTL < time.Millisecond {
+		http.Error(w, "vehicle media token expires too soon", http.StatusServiceUnavailable)
+		return "", false
+	}
+	result, err = cache("write", token, cacheTTL)
+	if err != nil || len(result) != 2 || result[0] != "ok" {
+		http.Error(w, "viewing coordination changed or unavailable", http.StatusServiceUnavailable)
+		return "", false
+	}
+	return token, true
+}
+
 func (api *ViewingLeaseAPI) demand(w http.ResponseWriter, r *http.Request) {
 	if !api.authorize(w, r, true) {
 		return
 	}
-	demand, err := api.store.Demand(r.Context(), r.PathValue("vehicle_id"))
+	vehicleID := r.PathValue("vehicle_id")
+	demand, err := api.store.Demand(r.Context(), vehicleID)
 	if err != nil {
 		writeViewingError(w, err)
 		return
+	}
+	if demand.RTCRequired && lkApiKey != "" && lkApiSecret != "" &&
+		!(managedRuntime != nil && managedRuntime.maintenance) {
+		token, ok := api.cachedVehicleMediaToken(w, r, demand)
+		if !ok {
+			return
+		}
+		demand.MediaToken = token
 	}
 	teleopDemandRevision.WithLabelValues(demand.VehicleID).Set(float64(demand.Revision))
 	writeJSON(w, http.StatusOK, demand)

@@ -142,11 +142,10 @@ test('static context opens the same platform without managed membership and resp
   const drive = api.render(member, '/?page=drive&driveVehicle=car-one', entries)
   assert.match(drive, /data-testid="live-driving-workbench"/)
   assert.doesNotMatch(drive, /当前角色无驾驶权限|模拟控制|不连接实车执行器/)
-  assert.match(drive, /远程驾驶控制/)
+  assert.match(drive, /源视频新鲜度尚未验证，仅可监看/)
+  assert.match(drive, /<button[^>]*disabled=""[^>]*>申请控制权/)
+  assert.doesNotMatch(drive, /远程驾驶控制/)
   assert.doesNotMatch(drive, /启用键盘 WASD/)
-  assert.match(drive, /启用手柄/)
-  assert.match(drive, /手柄检测与映射/)
-  assert.match(drive, /制动（Space）/)
   const observer = api.render({
     ...member, operator: { Roles: ['admin'] },
     authorizationContext: { ...context, control_vehicle_ids: [] },

@@ -2,6 +2,9 @@
 
 > Full stage-by-stage flowcharts and exception lookup tables for video, control,
 > and feedback live in [`teleop-flows-and-exceptions.md`](teleop-flows-and-exceptions.md).
+> The current browser workbench is observation-only, including simulation. The
+> dual-end disconnect handling and remaining validation are in section 2.3 of
+> that document; browser gating does not protect other API clients.
 
 ## Purpose
 
@@ -16,11 +19,12 @@ Separate **physical motion safety** from **control-session ownership**:
 1. **Viewing Recovery (Read-Only)**:
    - HTTP viewing leases (`POST /viewing/.../renew`) are completely decoupled
      from LiveKit `Room` connectivity.
-   - During transient `RoomEvent.Reconnecting`, let the LiveKit SDK recover. On
-     `RoomEvent.Disconnected`, rebuild the `Room` with bounded backoff retries
-     using `POST /viewing/{id}/token` (which mints a new join JWT without
-     extending the lease or mutating `MediaDemand` revision) inside a single
-     15-second recovery budget.
+   - During `RoomEvent.Reconnecting`, allow the LiveKit SDK up to 30 seconds.
+     After a retryable `Disconnected` or SDK timeout, rebuild the `Room` inside
+     a separate 15-second budget with bounded backoff and
+     `POST /viewing/{id}/token`, without extending the lease. Stop on terminal
+     removal or duplicate identity. Transport recovery does not prove frames;
+     60 seconds without displayed track progress ends read-only viewing.
    - Surface per-camera subscription failures and recovery counts (`x/3`) rather
      than silently hiding missing streams.
 
@@ -154,9 +158,9 @@ Resolved across `apollo-base` (`v1`), `data/sdk-kit` (`v2`), and `livekit-infra`
        standby). Emergency `Space` and the red brake button remain enabled
        whenever `controller.state === 'ready'`. `useDrivingCameras` preserves
        existing `<video>` tracks across `RoomEvent.Reconnecting` (only clearing
-       tracks/remounting on actual `Room` rebuild) and clears
-       `ViewingLifecycle.recovery` only once all three cameras simultaneously
-       render live frames.
+       tracks/remounting on actual `Room` rebuild). Current read-only viewing
+       tracks transport and current displayed frames independently; the
+       separate three-camera gate applies only to driving.
      - **Control link pause (`300 ms – 1500 ms` `PAUSED_HOLD`)**: When
        `RoomEvent.Reconnecting` fires, `ControlSessionClient` pauses outbound
        ticks up to `rtcReconnectGraceMs = 1200 ms`, while vehicle

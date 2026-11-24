@@ -390,7 +390,7 @@ test('E2E Exception Flows: L0 503 retries & maintenance reject, L1 video rebuild
   await lifecycle.start()
   assert.equal(state.viewingAcquireAttempts, 3, 'transient 503 should retry twice and succeed on 3rd attempt')
 
-  // L1 Reconnecting -> Reconnected completes recovery immediately when 3 tracks stay live
+  // Transport recovery does not claim that vehicle frames have recovered.
   observerEvents.reconnecting()
   assert.equal(recoverState, true)
   observerEvents.reconnected()
@@ -404,8 +404,6 @@ test('E2E Exception Flows: L0 503 retries & maintenance reject, L1 video rebuild
   assert.equal(state.tokenRefreshes, 1)
   assert.equal(rebuildCount, 2)
   assert.equal(state.viewingLease.expires_at_ms, initialExpiry)
-  assert.equal(recoverState, true)
-  lifecycle.frameRendered()
   assert.equal(recoverState, false)
 
   // 2. Maintenance 503 & 409 leave ControlSessionClient cleanly in idle (not locked)

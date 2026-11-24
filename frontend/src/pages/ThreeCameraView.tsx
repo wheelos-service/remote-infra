@@ -1,34 +1,37 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { bindCameraFeed, type CameraFeedTrack, type CameraFrameStats } from '../lib/camera-feed'
+import { isSingleFront } from '../lib/camera-view'
+import type { FrontCamera } from '../lib/camera-view'
 
-export type FrontCamera = 'left' | 'center' | 'right'
-export const frontCameras: { name: FrontCamera; label: string }[] = [
+export type { FrontCamera } from '../lib/camera-view'
+export const frontCameras: { name: 'left' | 'center' | 'right'; label: string }[] = [
   { name: 'left', label: '前左' }, { name: 'center', label: '前中' }, { name: 'right', label: '前右' },
 ]
 
-function CameraSlot({ name, label, track, failure, requireFrameCallback, onFrame, onStats }: {
-  name: FrontCamera; label: string; track?: CameraFeedTrack; failure?: string; requireFrameCallback?: boolean
+function CameraSlot({ name, label, track, live, failure, requireFrameCallback, onFrame, onProgress, onStats }: {
+  name: FrontCamera; label: string; track?: CameraFeedTrack; live: boolean; failure?: string; requireFrameCallback?: boolean
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
+  onProgress?: (name: FrontCamera, track: CameraFeedTrack) => void
   onStats?: (name: FrontCamera, stats: CameraFrameStats) => void
 }) {
   const video = useRef<HTMLVideoElement>(null)
   const onFrameRef = useRef(onFrame)
   const onStatsRef = useRef(onStats)
+  const onProgressRef = useRef(onProgress)
   onFrameRef.current = onFrame
   onStatsRef.current = onStats
-  const [live, setLive] = useState(false)
+  onProgressRef.current = onProgress
   const [hasRendered, setHasRendered] = useState(false)
   useEffect(() => {
-    setLive(false)
     setHasRendered(false)
     onFrameRef.current?.(name, false, track)
     if (!track || !video.current) return
     return bindCameraFeed(track, video.current, (value) => {
-      setLive(value)
       if (value) setHasRendered(true)
       onFrameRef.current?.(name, value, track)
     }, {
       requireFrameCallback,
+      onFrame: () => onProgressRef.current?.(name, track),
       onStats: stats => onStatsRef.current?.(name, stats),
     })
   }, [name, track, requireFrameCallback])
@@ -52,29 +55,35 @@ function CameraSlot({ name, label, track, failure, requireFrameCallback, onFrame
   </section>
 }
 
-export default function ThreeCameraView({ vehicleId, tracks = {}, failedCameras = {}, requireFrameCallback = false, onFrame, onStats }: {
+export default function ThreeCameraView({ vehicleId, tracks = {}, frames = {}, failedCameras = {}, requireFrameCallback = false, onFrame, onProgress, onStats }: {
   vehicleId: string; tracks?: Partial<Record<FrontCamera, CameraFeedTrack>>
+  frames?: Partial<Record<FrontCamera, CameraFeedTrack>>
   failedCameras?: Partial<Record<FrontCamera, string>>
   requireFrameCallback?: boolean
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
+  onProgress?: (name: FrontCamera, track: CameraFeedTrack) => void
   onStats?: (name: FrontCamera, stats: CameraFrameStats) => void
 }) {
   const [focused, setFocused] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
+  const singleFront = isSingleFront(tracks)
+  const displayedCameras: { name: FrontCamera; label: string }[] = singleFront
+    ? [{ name: 'front', label: '前视（单路）' }]
+    : frontCameras
   return <section className={fullscreen ? 'fixed inset-0 z-50 flex flex-col bg-slate-950 p-4 pb-24 text-slate-100' : 'flex min-h-[300px] flex-col text-slate-100'}>
     <header className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
-      <span>{vehicleId} · 三路独立画面 · 未拼接 · 无后视覆盖</span>
+      <span>{vehicleId} · {singleFront ? '单路前视画面' : '三路独立画面 · 未拼接'} · 无后视覆盖</span>
       <div className="flex gap-2">
         <button type="button" disabled={!tracks.center} onClick={() => setFocused(value => !value)} className="rounded border border-slate-700 px-3 py-2 disabled:opacity-40">{focused ? '恢复三路布局' : '放大中间'}</button>
         <button type="button" onClick={() => setFullscreen(value => !value)} className="rounded border border-slate-700 px-3 py-2">{fullscreen ? '退出全屏' : '全屏查看'}</button>
       </div>
     </header>
-    <div className={`grid min-h-[260px] flex-1 gap-1 ${focused ? 'grid-cols-[minmax(0,2fr)_minmax(0,1fr)] grid-rows-2' : 'grid-cols-3'}`}
-      style={fullscreen ? undefined : { aspectRatio: focused ? '16 / 9' : '16 / 6' }}>
-      {frontCameras.map(camera => <div key={camera.name} className="flex min-h-0 min-w-0 [&>section]:flex-1"
-        style={focused ? camera.name === 'center' ? { gridColumn: 1, gridRow: '1 / 3' }
+    <div className={`grid min-h-[260px] flex-1 gap-1 ${singleFront ? 'grid-cols-1' : focused ? 'grid-cols-[minmax(0,2fr)_minmax(0,1fr)] grid-rows-2' : 'grid-cols-3'}`}
+      style={fullscreen ? undefined : { aspectRatio: singleFront || focused ? '16 / 9' : '16 / 6' }}>
+      {displayedCameras.map(camera => <div key={camera.name} className="flex min-h-0 min-w-0 [&>section]:flex-1"
+        style={!singleFront && focused ? camera.name === 'center' ? { gridColumn: 1, gridRow: '1 / 3' }
           : { gridColumn: 2, gridRow: camera.name === 'left' ? 1 : 2 } : undefined}>
-        <CameraSlot {...camera} track={tracks[camera.name]} failure={failedCameras[camera.name]} requireFrameCallback={requireFrameCallback} onFrame={onFrame} onStats={onStats} />
+        <CameraSlot {...camera} track={tracks[camera.name]} live={Boolean(tracks[camera.name]) && frames[camera.name] === tracks[camera.name]} failure={failedCameras[camera.name]} requireFrameCallback={requireFrameCallback} onFrame={onFrame} onProgress={onProgress} onStats={onStats} />
       </div>)}
     </div>
   </section>

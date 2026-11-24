@@ -14,10 +14,14 @@ interface ObserverEvents {
   current(): boolean
   reconnecting(): void
   reconnected(): void
-  disconnected(): void
+  disconnected(terminal?: boolean): void
 }
 
-const MEDIA_RECOVERY_MS = 15_000
+const CONNECTION_TIMEOUT_MS = 15_000
+const SDK_RECOVERY_MS = 30_000
+const REBUILD_RECOVERY_MS = 15_000
+const NO_VIDEO_MS = 60_000
+const RETIRE_ROOM_MS = 500
 const MAX_MEDIA_REBUILD_ATTEMPTS = 3
 const RENEW_GUARD_MS = 500
 
@@ -48,8 +52,15 @@ export class ViewingLifecycle {
   private observer?: Observer
   private roomEpoch = 0
   private roomConnected = false
+  private rebuildsSinceFrame = 0
   private recovery?: { deadlineMs: number; timer: ReturnType<typeof setTimeout>; rebuildAttempts: number }
+  private sdkRecoveryTimer?: ReturnType<typeof setTimeout>
+  private sdkRecoveryDeadline?: number
+  private videoTimer?: ReturnType<typeof setTimeout>
+  private lastVideoProgress?: number
   private rebuildTimer?: ReturnType<typeof setTimeout>
+  private retireTimer?: ReturnType<typeof setTimeout>
+  private cancelRetire?: () => void
   private renewalTimer?: ReturnType<typeof setTimeout>
   private expiryTimer?: ReturnType<typeof setTimeout>
   private connectionTimer?: ReturnType<typeof setTimeout>
@@ -94,7 +105,7 @@ export class ViewingLifecycle {
         } catch (error) {
           if (this.stopped || !this.options.onRecovering ||
               !(error instanceof ViewingRequestError) || !error.retryable ||
-              error.status === 0 || attempt >= 2) {
+              error.timedOut || attempt >= 2) {
             throw error
           }
           await new Promise<void>(resolve => setTimeout(resolve, 500 * 2 ** attempt))
@@ -113,20 +124,21 @@ export class ViewingLifecycle {
     }
   }
 
-  private async connect(token: string) {
-    const epoch = ++this.roomEpoch
+  private async connect(token: string, epoch = ++this.roomEpoch) {
     const current = () => epoch === this.roomEpoch && this.active &&
       (!this.recovery || performance.now() < this.recovery.deadlineMs)
     const observer = this.options.createObserver(token, {
       current,
       reconnecting: () => {
-        if (current()) this.beginRecovery()
+        if (current()) this.beginSdkRecovery()
       },
       reconnected: () => {
-        if (current()) this.roomConnected = true
+        if (current()) this.transportConnected()
       },
-      disconnected: () => {
-        if (current()) this.disconnected()
+      disconnected: (terminal) => {
+        if (!current()) return
+        if (terminal) this.fail(new Error('视频连接已终止，请重新申请监看'))
+        else this.disconnected()
       },
     })
     try {
@@ -145,7 +157,7 @@ export class ViewingLifecycle {
           new Promise<never>((_, reject) => {
             this.connectionTimer = setTimeout(
               () => reject(new Error('连接 LiveKit 超时，请检查网络后重试')),
-              MEDIA_RECOVERY_MS,
+              CONNECTION_TIMEOUT_MS,
             )
           }),
           new Promise<void>((resolve) => { this.cancelConnection = resolve }),
@@ -157,38 +169,85 @@ export class ViewingLifecycle {
         }
       }
       if (epoch !== this.roomEpoch || !this.guardActive() || !current()) return
-      this.roomConnected = true
-      if (!this.recovery) this.options.onConnected()
+      this.transportConnected()
     } catch (error) {
       if (epoch === this.roomEpoch) throw error
     }
   }
 
-  private beginRecovery() {
+  private beginSdkRecovery() {
     if (!this.options.onRecovering) {
       this.fail(new Error('视频连接中断；必须重新连接监看和申请控制'))
       return
     }
     this.roomConnected = false
-    if (!this.recovery) {
-      this.recovery = {
-        deadlineMs: performance.now() + MEDIA_RECOVERY_MS,
-        timer: setTimeout(() => this.fail(new Error('视频恢复超时，请重新申请监看')), MEDIA_RECOVERY_MS),
-        rebuildAttempts: 0,
-      }
+    if (!this.sdkRecoveryTimer && !this.recovery) {
+      this.sdkRecoveryDeadline = performance.now() + SDK_RECOVERY_MS
+      this.sdkRecoveryTimer = setTimeout(() => {
+        this.sdkRecoveryTimer = undefined
+        if (this.guardActive() && !this.roomConnected) this.disconnected()
+      }, SDK_RECOVERY_MS)
     }
     this.options.onRecovering()
+  }
+
+  private transportConnected() {
+    if (!this.guardActive()) return
+    if (this.sdkRecoveryDeadline !== undefined && performance.now() >= this.sdkRecoveryDeadline) {
+      this.disconnected()
+      return
+    }
+    clearTimeout(this.sdkRecoveryTimer)
+    this.sdkRecoveryTimer = undefined
+    this.sdkRecoveryDeadline = undefined
+    if (this.recovery) clearTimeout(this.recovery.timer)
+    this.recovery = undefined
+    clearTimeout(this.rebuildTimer)
+    this.rebuildTimer = undefined
+    const wasConnected = this.roomConnected
+    this.roomConnected = true
+    if (this.lastVideoProgress === undefined && this.options.onRecovering) {
+      this.lastVideoProgress = performance.now()
+      this.scheduleVideoTimeout()
+    }
+    if (!wasConnected) this.options.onConnected()
+  }
+
+  private scheduleVideoTimeout() {
+    if (this.stopped || this.lastVideoProgress === undefined) return
+    const remaining = NO_VIDEO_MS - (performance.now() - this.lastVideoProgress)
+    if (remaining <= 0) {
+      this.fail(new Error('长时间没有视频画面，请重新申请监看'))
+      return
+    }
+    this.videoTimer = setTimeout(() => this.scheduleVideoTimeout(), remaining)
   }
 
   private disconnected() {
     // Let an initial connect failure take the normal error path.
     if (!this.roomConnected && !this.recovery && this.cancelConnection) return
-    this.beginRecovery()
+    if (!this.options.onRecovering) {
+      this.fail(new Error('视频连接中断；必须重新连接监看和申请控制'))
+      return
+    }
+    this.roomConnected = false
+    clearTimeout(this.sdkRecoveryTimer)
+    this.sdkRecoveryTimer = undefined
+    this.sdkRecoveryDeadline = undefined
+    if (!this.recovery) {
+      this.recovery = {
+        deadlineMs: performance.now() + REBUILD_RECOVERY_MS,
+        timer: setTimeout(() => this.fail(new Error('视频恢复超时，请重新申请监看')), REBUILD_RECOVERY_MS),
+        rebuildAttempts: this.rebuildsSinceFrame,
+      }
+      this.options.onRecovering()
+    }
     if (!this.recovery || this.recovery.rebuildAttempts >= MAX_MEDIA_REBUILD_ATTEMPTS) {
       if (this.recovery) this.fail(new Error('视频重建失败，请重新申请监看'))
       return
     }
     const attempt = ++this.recovery.rebuildAttempts
+    this.rebuildsSinceFrame = attempt
     const epoch = ++this.roomEpoch
     clearTimeout(this.connectionTimer)
     clearTimeout(this.rebuildTimer)
@@ -197,24 +256,22 @@ export class ViewingLifecycle {
     this.cancelConnection = undefined
     const observer = this.observer
     this.observer = undefined
-    void this.disconnect(observer)
     const delay = attempt === 1 ? 0 : Math.min(500 * 2 ** (attempt - 2), 2_000)
-    if (delay > 0) {
+    void this.retire(observer).then(() => {
+      if (epoch !== this.roomEpoch || !this.guardActive() || !this.recovery) return
       if (performance.now() + delay >= this.recovery.deadlineMs) {
         this.fail(new Error('视频恢复超时，请重新申请监看'))
         return
       }
-      this.rebuildTimer = setTimeout(() => {
+      const start = () => {
         this.rebuildTimer = undefined
         if (epoch !== this.roomEpoch || this.stopped) return
         void this.rebuild(epoch).catch(error => {
           if (!this.stopped) this.fail(error)
         })
-      }, delay)
-      return
-    }
-    void this.rebuild(epoch).catch(error => {
-      if (!this.stopped) this.fail(error)
+      }
+      if (delay > 0) this.rebuildTimer = setTimeout(start, delay)
+      else start()
     })
   }
 
@@ -248,17 +305,28 @@ export class ViewingLifecycle {
     const response = await this.refreshTokenWithRetry(epoch)
     if (!response || epoch !== this.roomEpoch || !this.guardActive() ||
       !this.recovery || performance.now() >= this.recovery.deadlineMs) return
-    await this.connect(response.token)
+    try {
+      await this.connect(response.token, epoch)
+    } catch (error) {
+      if (this.stopped || epoch !== this.roomEpoch) return
+      if (error instanceof ViewingRequestError && !error.retryable) throw error
+      if (this.active && this.recovery && performance.now() < this.recovery.deadlineMs) {
+        this.disconnected()
+        return
+      }
+      throw error
+    }
   }
 
   frameRendered() {
-    if (!this.recovery || !this.roomConnected || !this.guardActive() ||
-      performance.now() >= this.recovery.deadlineMs) return
-    clearTimeout(this.recovery.timer)
-    clearTimeout(this.rebuildTimer)
-    this.rebuildTimer = undefined
-    this.recovery = undefined
-    this.options.onConnected()
+    if (!this.roomConnected || !this.guardActive() || this.lastVideoProgress === undefined) return
+    const now = performance.now()
+    if (now - this.lastVideoProgress >= NO_VIDEO_MS) {
+      this.fail(new Error('长时间没有视频画面，请重新申请监看'))
+      return
+    }
+    this.lastVideoProgress = now
+    this.rebuildsSinceFrame = 0
   }
 
   private schedule(lease: ViewingLease) {
@@ -319,6 +387,10 @@ export class ViewingLifecycle {
     clearTimeout(this.renewalTimer)
     clearTimeout(this.connectionTimer)
     clearTimeout(this.rebuildTimer)
+    clearTimeout(this.retireTimer)
+    this.cancelRetire?.()
+    clearTimeout(this.sdkRecoveryTimer)
+    clearTimeout(this.videoTimer)
     this.rebuildTimer = undefined
     if (this.recovery) clearTimeout(this.recovery.timer)
     this.cancelConnection?.()
@@ -334,6 +406,20 @@ export class ViewingLifecycle {
 
   private disconnect(observer?: Observer) {
     return Promise.resolve().then(() => observer?.disconnect()).catch(() => this.options.onCleanupError())
+  }
+
+  private async retire(observer?: Observer) {
+    if (!observer) return
+    await Promise.race([
+      this.disconnect(observer),
+      new Promise<void>(resolve => {
+        this.cancelRetire = resolve
+        this.retireTimer = setTimeout(resolve, RETIRE_ROOM_MS)
+      }),
+    ])
+    clearTimeout(this.retireTimer)
+    this.retireTimer = undefined
+    this.cancelRetire = undefined
   }
 
   private async release() {

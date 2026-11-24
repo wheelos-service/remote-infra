@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Room, RoomEvent, Track, type Participant, type RemoteParticipant, type RemoteTrackPublication, type RemoteVideoTrack, type TrackPublication } from 'livekit-client'
+import { DisconnectReason, Room, RoomEvent, Track, type Participant, type RemoteParticipant, type RemoteTrackPublication, type RemoteVideoTrack, type TrackPublication } from 'livekit-client'
 import { ViewingLifecycle } from '../lib/viewing-lifecycle'
 import { newViewingId, isVehicleVideoSender } from '../lib/viewing-api'
 import { teleopConfig } from '../lib/teleop-config'
-import { trackCameraName } from '../lib/camera-view'
-import { threeCamerasReady, type CameraFeedTrack } from '../lib/camera-feed'
+import { isSingleFront, trackCameraName } from '../lib/camera-view'
+import type { CameraFeedTrack } from '../lib/camera-feed'
 import type { TeleopDiagnosticsBuffer } from '../lib/teleop-diagnostics'
 import type { FrontCamera } from '../pages/ThreeCameraView'
 
 type CameraTracks = Partial<Record<FrontCamera, RemoteVideoTrack>>
 type CameraFailures = Partial<Record<FrontCamera, string>>
+
+function isSupportedCamera(name?: string): name is FrontCamera {
+  return name === 'front' || name === 'left' || name === 'center' || name === 'right'
+}
 
 export function useDrivingCameras(
   vehicleId: string,
@@ -19,21 +23,34 @@ export function useDrivingCameras(
 ) {
   const [tracks, setTracks] = useState<CameraTracks>({})
   const [failedCameras, setFailedCameras] = useState<CameraFailures>({})
+  const [frames, setFrames] = useState<Partial<Record<FrontCamera, CameraFeedTrack>>>({})
   const [connected, setConnected] = useState(false)
   const [recovering, setRecovering] = useState(false)
+  const [signalRecovering, setSignalRecovering] = useState(false)
   const [error, setError] = useState('')
   const [playbackEpoch, setPlaybackEpoch] = useState<number>()
-  const playbackRef = useRef<{ onFrame: (camera: FrontCamera, live: boolean, track: CameraFeedTrack) => void } | undefined>(undefined)
+  const playbackRef = useRef<{
+    onFrame: (camera: FrontCamera, live: boolean, track: CameraFeedTrack) => void
+    onProgress: (camera: FrontCamera, track: CameraFeedTrack) => void
+  } | undefined>(undefined)
   const reportFrame = useCallback((camera: FrontCamera, live: boolean, track?: CameraFeedTrack) => {
     if (track) playbackRef.current?.onFrame(camera, live, track)
+  }, [])
+  const reportProgress = useCallback((camera: FrontCamera, track: CameraFeedTrack) => {
+    playbackRef.current?.onProgress(camera, track)
   }, [])
   useEffect(() => {
     let disposed = false
     let frameEpoch = 0
     let observerEpoch = 0
-    const liveTracks = new Map<FrontCamera, CameraFeedTrack>()
+    let transportConnected = false
     let activeTracks: CameraTracks = {}
     let activeFailures: CameraFailures = {}
+    let activeFrames: Partial<Record<FrontCamera, CameraFeedTrack>> = {}
+    const updateFrames = (next: Partial<Record<FrontCamera, CameraFeedTrack>>) => {
+      activeFrames = next
+      setFrames(next)
+    }
     const updateTracks = (next: CameraTracks) => {
       activeTracks = next
       setTracks(next)
@@ -50,69 +67,74 @@ export function useDrivingCameras(
     }
     const removeTrack = (track?: Track) => {
       if (!track) return
-      for (const [cam, liveTrack] of liveTracks) {
-        if (liveTrack === track) liveTracks.delete(cam)
-      }
+      updateFrames(Object.fromEntries(Object.entries(activeFrames).filter(([, value]) => value !== track)))
       updateTracks(Object.fromEntries(Object.entries(activeTracks).filter(([, value]) => value !== track)))
-    }
-    const checkRecovery = () => {
-      if (disposed || !recoverViewing) return
-      if (threeCamerasReady(Object.fromEntries(
-        (['left', 'center', 'right'] as const).map(name => [
-          name,
-          Boolean(activeTracks[name]) && liveTracks.get(name) === activeTracks[name],
-        ]),
-      ))) {
-        lifecycle.frameRendered()
-      }
     }
     setTracks({})
     setFailedCameras({})
+    setFrames({})
     playbackRef.current = {
       onFrame: (camera, live, track) => {
         if (disposed) return
-        if (live) {
-          if (activeTracks[camera] === track) {
-            liveTracks.set(camera, track)
-            checkRecovery()
-          }
-        } else if (liveTracks.get(camera) === track) {
-          liveTracks.delete(camera)
+        if (!live && activeFrames[camera] === track) {
+          const next = { ...activeFrames }
+          delete next[camera]
+          updateFrames(next)
+          diagnostics?.record('video', 'camera_stalled', camera)
         }
+      },
+      onProgress: (camera, track) => {
+        if (disposed || !transportConnected || activeTracks[camera] !== track ||
+            (camera === 'front') !== isSingleFront(activeTracks)) return
+        if (activeFrames[camera] !== track) {
+          updateFrames({ ...activeFrames, [camera]: track })
+          diagnostics?.record('video', 'camera_live', camera)
+        }
+        lifecycle.frameRendered()
       },
     }
     setPlaybackEpoch(undefined)
     setConnected(false)
     setRecovering(false)
+    setSignalRecovering(false)
     setError('')
     const failure = (cause: unknown) => {
       if (disposed) return
-      liveTracks.clear()
+      transportConnected = false
       updateTracks({})
       updateFailures({})
+      updateFrames({})
       playbackRef.current = undefined
       setConnected(false)
       setRecovering(false)
+      setSignalRecovering(false)
       setError(cause instanceof Error ? cause.message : '视频连接失败')
     }
     const lifecycle = new ViewingLifecycle({
       vehicleId, bearer, clientInstanceId: newViewingId(),
       createObserver: (token, events) => {
         if (++observerEpoch > 1 && !disposed) {
-          liveTracks.clear()
           updateTracks({})
           updateFailures({})
+          updateFrames({})
           setPlaybackEpoch(frameEpoch)
         }
         const observer = new Room({ adaptiveStream: false, dynacast: false })
         let acceptTracks = true
+        const retryCounts = new Map<string, number>()
+        const retryTimers = new Set<ReturnType<typeof setTimeout>>()
+        const clearRetryTimers = () => {
+          for (const timer of retryTimers) clearTimeout(timer)
+          retryTimers.clear()
+        }
         const current = () => !disposed && events.current() && acceptTracks
         const addTrack = (track: Track, publication: TrackPublication, participant: Participant) => {
           if (!current() || !isVehicleVideoSender(participant.identity, vehicleId) ||
               track.kind !== Track.Kind.Video || publication.isMuted || publication.track !== track ||
               participant.trackPublications.get(publication.trackSid) !== publication) return
           const name = trackCameraName(publication.trackName)
-          if (name === 'left' || name === 'center' || name === 'right') {
+          if (isSupportedCamera(name)) {
+            retryCounts.delete(publication.trackSid)
             clearFailure(name)
             if (activeTracks[name] !== track) {
               updateTracks({ ...activeTracks, [name]: track as RemoteVideoTrack })
@@ -122,8 +144,7 @@ export function useDrivingCameras(
         const subscribe = (publication: RemoteTrackPublication, participant: RemoteParticipant) => {
           if (!current()) return
           const camera = trackCameraName(publication.trackName)
-          if (isVehicleVideoSender(participant.identity, vehicleId) &&
-              (camera === 'left' || camera === 'center' || camera === 'right')) {
+          if (isVehicleVideoSender(participant.identity, vehicleId) && isSupportedCamera(camera)) {
             publication.setSubscribed(true)
             if (publication.track) addTrack(publication.track, publication, participant)
           }
@@ -147,26 +168,48 @@ export function useDrivingCameras(
           if (publication.track) addTrack(publication.track, publication, participant)
         })
         observer.on(RoomEvent.TrackSubscriptionFailed, (trackSid, participant) => {
-          if (!current()) return
+          if (!current() || !isVehicleVideoSender(participant.identity, vehicleId)) return
           if (!recoverViewing) {
             lifecycle.fail(new Error('相机订阅失败；请重新连接监看'))
             return
           }
           const publication = participant.trackPublications.get(trackSid)
           const camera = publication ? trackCameraName(publication.trackName) : undefined
-          if (camera === 'left' || camera === 'center' || camera === 'right') {
+          if (isSupportedCamera(camera)) {
             updateFailures({ ...activeFailures, [camera]: '订阅失败' })
             diagnostics?.record('video', 'camera_subscription_failed', camera)
+            const attempt = (retryCounts.get(trackSid) ?? 0) + 1
+            if (attempt <= 3 && publication instanceof Object && 'setSubscribed' in publication) {
+              retryCounts.set(trackSid, attempt)
+              const timer = setTimeout(() => {
+                retryTimers.delete(timer)
+                if (!current() || participant.trackPublications.get(trackSid) !== publication ||
+                    publication.isMuted) return
+                const remotePub = publication as RemoteTrackPublication
+                remotePub.setSubscribed(false)
+                remotePub.setSubscribed(true)
+              }, 500 * 2 ** (attempt - 1))
+              retryTimers.add(timer)
+            }
           }
           console.warn('相机订阅失败；该路画面不可用')
         })
         observer.on(RoomEvent.Reconnecting, () => {
+          if (disposed || !events.current()) return
           acceptTracks = false
+          clearRetryTimers()
           diagnostics?.record('video', 'room_reconnecting')
           events.reconnecting()
         })
+        observer.on(RoomEvent.SignalReconnecting, () => {
+          if (disposed || !events.current()) return
+          setSignalRecovering(true)
+          diagnostics?.record('video', 'signal_reconnecting')
+        })
         observer.on(RoomEvent.Reconnected, () => {
+          if (disposed || !events.current()) return
           acceptTracks = true
+          setSignalRecovering(false)
           updateFailures({})
           const present = new Set<Track>()
           for (const participant of observer.remoteParticipants.values()) {
@@ -177,19 +220,19 @@ export function useDrivingCameras(
           }
           const prunedEntries = Object.entries(activeTracks).filter(([, track]) => track && present.has(track))
           if (prunedEntries.length !== Object.keys(activeTracks).length) {
-            for (const [cam, liveTrack] of liveTracks) {
-              if (!present.has(liveTrack as unknown as Track)) liveTracks.delete(cam)
-            }
             updateTracks(Object.fromEntries(prunedEntries))
           }
           diagnostics?.record('video', 'room_reconnected')
           events.reconnected()
           subscribeExisting()
-          checkRecovery()
         })
-        observer.on(RoomEvent.Disconnected, () => {
+        observer.on(RoomEvent.Disconnected, reason => {
+          if (disposed || !events.current()) return
           diagnostics?.record('video', 'room_disconnected')
-          events.disconnected()
+          events.disconnected(reason === DisconnectReason.CLIENT_INITIATED ||
+            reason === DisconnectReason.DUPLICATE_IDENTITY ||
+            reason === DisconnectReason.PARTICIPANT_REMOVED ||
+            reason === DisconnectReason.ROOM_DELETED || reason === DisconnectReason.ROOM_CLOSED)
         })
         return {
           connect: async () => {
@@ -197,6 +240,7 @@ export function useDrivingCameras(
             subscribeExisting()
           },
           disconnect: () => {
+            clearRetryTimers()
             observer.removeAllListeners()
             return observer.disconnect()
           },
@@ -205,11 +249,15 @@ export function useDrivingCameras(
       onRecovering: recoverViewing ? () => {
         if (disposed) return
         ++frameEpoch
+        transportConnected = false
+        updateFrames({})
         setConnected(false)
         setRecovering(true)
+        setSignalRecovering(false)
       } : undefined,
       onConnected: () => {
         if (disposed) return
+        transportConnected = true
         diagnostics?.record('video', 'video_connected')
         setConnected(true)
         setRecovering(false)
@@ -234,5 +282,5 @@ export function useDrivingCameras(
       void lifecycle.stop()
     }
   }, [vehicleId, bearer, recoverViewing, diagnostics])
-  return { tracks, failedCameras, connected, recovering, error, playbackEpoch, reportFrame }
+  return { tracks, frames, failedCameras, connected, recovering, signalRecovering, error, playbackEpoch, reportFrame, reportProgress }
 }

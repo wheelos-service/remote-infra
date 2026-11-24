@@ -12,11 +12,10 @@ import (
 
 func TestTeleopE2EViewingDemandControlHandoverAnd503Fences(t *testing.T) {
 	f := newTelemetryFixture(t)
-	previousLeases, previousVideo, previousSink := controlLeases, videoSessions, auditSink
+	previousLeases, previousSink := controlLeases, auditSink
 	previousAuthz, previousIdents := vehicleAuthorizer, vehicleIdentities
 	previousKey, previousSecret := lkApiKey, lkApiSecret
 	controlLeases = &ControlLeaseStore{client: f.client, ttl: 10 * time.Second}
-	videoSessions = NewVideoSessionStore(f.client, 0)
 	auditSink = NewJSONAuditSink(nopWriteCloser{})
 	authz, err := NewVehicleAuthorizer([]VehicleACL{
 		{UserID: "alice", TenantID: "tenant-a", VehicleID: "car-1", Permissions: []VehiclePermission{ObservePermission, ControlPermission}},
@@ -28,7 +27,7 @@ func TestTeleopE2EViewingDemandControlHandoverAnd503Fences(t *testing.T) {
 	vehicleAuthorizer, vehicleIdentities = authz, f.api.identities
 	lkApiKey, lkApiSecret = "e2e-key", "e2e-signing-secret-with-sufficient-length"
 	t.Cleanup(func() {
-		controlLeases, videoSessions, auditSink = previousLeases, previousVideo, previousSink
+		controlLeases, auditSink = previousLeases, previousSink
 		vehicleAuthorizer, vehicleIdentities = previousAuthz, previousIdents
 		lkApiKey, lkApiSecret = previousKey, previousSecret
 	})
@@ -53,19 +52,19 @@ func TestTeleopE2EViewingDemandControlHandoverAnd503Fences(t *testing.T) {
 	}
 	w = f.request(t, http.MethodGet, "/api/vehicles/car-1/media-demand", "device1", "", http.StatusOK)
 	var d1 MediaDemand
-	if err := json.Unmarshal(w.Body.Bytes(), &d1); err != nil || !d1.RTCRequired || !d1.VideoRequired || d1.ViewerCount != 1 {
+	if err := json.Unmarshal(w.Body.Bytes(), &d1); err != nil || !d1.RTCRequired || !d1.VideoRequired || d1.ViewerCount != 1 || d1.MediaToken == "" {
 		t.Fatalf("initial demand = %+v err=%v", d1, err)
 	}
 
-	// 2. Viewing renew keeps MediaDemand.Revision constant; /token keeps expiry unchanged
+	// 2. Viewing renew keeps MediaDemand.Revision constant and reuses cached MediaToken; /token keeps expiry unchanged
 	w = f.request(t, http.MethodPost, "/api/vehicles/car-1/viewing/"+vLease.ViewingSessionID+"/renew", "observer", "", http.StatusOK)
 	var renewedLease ViewingLease
 	_ = json.Unmarshal(w.Body.Bytes(), &renewedLease)
 	w = f.request(t, http.MethodGet, "/api/vehicles/car-1/media-demand", "device1", "", http.StatusOK)
 	var d2 MediaDemand
 	_ = json.Unmarshal(w.Body.Bytes(), &d2)
-	if d2.Revision != d1.Revision {
-		t.Fatalf("viewing renew bumped demand revision: %d -> %d", d1.Revision, d2.Revision)
+	if d2.Revision != d1.Revision || d2.MediaToken != d1.MediaToken {
+		t.Fatalf("viewing renew bumped demand revision or rotated cached token: %+v -> %+v", d1, d2)
 	}
 	w = f.request(t, http.MethodPost, "/api/vehicles/car-1/viewing/"+vLease.ViewingSessionID+"/token", "observer", "", http.StatusOK)
 	var refreshed struct {
@@ -121,7 +120,7 @@ func TestTeleopE2EViewingDemandControlHandoverAnd503Fences(t *testing.T) {
 	w = f.request(t, http.MethodGet, "/api/vehicles/car-1/media-demand", "device1", "", http.StatusOK)
 	var dOff MediaDemand
 	_ = json.Unmarshal(w.Body.Bytes(), &dOff)
-	if dOff.RTCRequired || dOff.VideoRequired || dOff.ControlRequired || dOff.ViewerCount != 0 {
+	if dOff.RTCRequired || dOff.VideoRequired || dOff.ControlRequired || dOff.ViewerCount != 0 || dOff.MediaToken != "" {
 		t.Fatalf("demand after release = %+v", dOff)
 	}
 

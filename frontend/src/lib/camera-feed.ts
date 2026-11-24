@@ -8,10 +8,13 @@ export interface CameraFrameStats {
   stallBudgetMs: number
   maxIntervalMs: number
   lastIntervalMs: number
+  lastResidenceMs?: number
 }
 
 export interface CameraFeedOptions {
   requireFrameCallback?: boolean
+  maxResidenceMs?: number
+  onFrame?: () => void
   onStats?: (stats: CameraFrameStats) => void
 }
 
@@ -35,7 +38,9 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
   let emaIntervalMs = 0
   let maxIntervalMs = 0
   let lastIntervalMs = 0
+  let lastResidenceMs: number | undefined
   let intervalSamples = 0
+  let rejectedSamples = 0
   let stallBudgetMs = CAMERA_FRAME_TIMEOUT_MS
   let frameId: number | undefined
   const emitStats = () => {
@@ -44,6 +49,7 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
       stallBudgetMs,
       maxIntervalMs: Math.round(maxIntervalMs),
       lastIntervalMs: Math.round(lastIntervalMs),
+      ...(lastResidenceMs !== undefined ? { lastResidenceMs: Math.round(lastResidenceMs) } : {}),
     })
   }
   const report = (value: boolean) => {
@@ -65,9 +71,11 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
     }
     lastFrame = now
     report(true)
+    options?.onFrame?.()
   }
-  const frame = (_now?: number, metadata?: VideoFrameCallbackMetadata) => {
+  const frame = (now?: number, metadata?: VideoFrameCallbackMetadata) => {
     if (stopped) return
+    const callbackNow = typeof now === 'number' && Number.isFinite(now) ? now : performance.now()
     let progressed = true
     if (metadata) {
       if (typeof metadata.rtpTimestamp === 'number') {
@@ -76,6 +84,16 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
       } else if (typeof metadata.presentedFrames === 'number') {
         progressed = metadata.presentedFrames !== lastPresentedFrames
         lastPresentedFrames = metadata.presentedFrames
+      }
+      if (progressed && typeof metadata.receiveTime === 'number' && Number.isFinite(metadata.receiveTime)) {
+        const renderTime = typeof metadata.presentationTime === 'number' && Number.isFinite(metadata.presentationTime)
+          ? metadata.presentationTime : callbackNow
+        lastResidenceMs = Math.max(0, renderTime - metadata.receiveTime, callbackNow - metadata.receiveTime)
+        const residenceLimit = options?.maxResidenceMs ?? stallBudgetMs
+        if (lastResidenceMs > residenceLimit) {
+          progressed = false
+          if (rejectedSamples++ % 30 === 0) emitStats()
+        }
       }
     }
     if (progressed) fresh()
@@ -87,12 +105,12 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
     if (!hasCallback && allowFallback && video.readyState >= 2) fresh()
   }
   const stalled = () => { lastFrame = -Infinity; report(false) }
-  const events = ['waiting', 'stalled', 'ended', 'error', 'emptied'] as const
+  const terminalEvents = ['ended', 'error', 'emptied'] as const
   video.muted = true
   video.autoplay = true
   video.playsInline = true
   if (allowFallback) video.addEventListener('timeupdate', progress)
-  for (const event of events) video.addEventListener(event, stalled)
+  for (const event of terminalEvents) video.addEventListener(event, stalled)
   track.attach(video)
   if (hasCallback) frameId = video.requestVideoFrameCallback(frame)
   const timer = setInterval(() => {
@@ -105,7 +123,7 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
     clearInterval(timer)
     if (frameId !== undefined) video.cancelVideoFrameCallback(frameId)
     if (allowFallback) video.removeEventListener('timeupdate', progress)
-    for (const event of events) video.removeEventListener(event, stalled)
+    for (const event of terminalEvents) video.removeEventListener(event, stalled)
     track.detach(video)
   }
 }

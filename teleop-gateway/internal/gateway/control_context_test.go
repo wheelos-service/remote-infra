@@ -17,14 +17,13 @@ func newControlContextFixture(t *testing.T) *telemetryFixture {
 	t.Helper()
 	f := newTelemetryFixture(t)
 	oldLeases, oldAuth, oldIDs := controlLeases, vehicleAuthorizer, vehicleIdentities
-	oldVideo, oldSink, oldKey, oldSecret := videoSessions, auditSink, lkApiKey, lkApiSecret
+	oldSink, oldKey, oldSecret := auditSink, lkApiKey, lkApiSecret
 	controlLeases, vehicleAuthorizer, vehicleIdentities = f.api.leases, f.api.authorizer, f.api.identities
-	videoSessions = NewVideoSessionStore(f.client, 0)
 	auditSink = NewJSONAuditSink(io.Discard)
 	lkApiKey, lkApiSecret = "edge-integration-test", "disposable-loopback-only-test-secret"
 	t.Cleanup(func() {
 		controlLeases, vehicleAuthorizer, vehicleIdentities = oldLeases, oldAuth, oldIDs
-		videoSessions, auditSink, lkApiKey, lkApiSecret = oldVideo, oldSink, oldKey, oldSecret
+		auditSink, lkApiKey, lkApiSecret = oldSink, oldKey, oldSecret
 	})
 	for pattern, handler := range map[string]http.HandlerFunc{
 		"POST /api/vehicles/{vehicle_id}/control/acquire": handleAcquireControl,

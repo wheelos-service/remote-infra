@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -109,7 +110,7 @@ func TestViewingExpiryRenewalAndControlAuthority(t *testing.T) {
 		}
 	}
 	// A stale legacy controller reference must not retain media demand.
-	if err := store.client.Set(ctx, videoSessionKey("car-1"), `{"controller_session_id":"stale"}`, 0).Err(); err != nil {
+	if err := store.client.Set(ctx, "video_session:car-1", `{"controller_session_id":"stale"}`, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
 	server.SetTime(time.UnixMilli(renewed.ExpiresAtMS))
@@ -276,6 +277,9 @@ func TestViewingRealRedis(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &ViewingLeaseStore{client: client}
+	previousKey, previousSecret := lkApiKey, lkApiSecret
+	lkApiKey, lkApiSecret = "test-key", "viewing-real-redis-signing-key-not-for-production"
+	t.Cleanup(func() { lkApiKey, lkApiSecret = previousKey, previousSecret })
 	vehicleID, sid := "test-"+uuid.NewString(), uuid.NewString()
 	prefix := "viewing:" + vehicleID
 	t.Cleanup(func() {
@@ -312,13 +316,149 @@ func TestViewingRealRedis(t *testing.T) {
 	if _, err := store.mutate(ctx, "acquire", vehicleID, "test-owner", activeSID); err != nil {
 		t.Fatal(err)
 	}
+	activeDemand := demandFor(t, store, vehicleID)
+	api := &ViewingLeaseAPI{store: store}
+	if token, ok := api.cachedVehicleMediaToken(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), activeDemand); !ok || token == "" {
+		t.Fatal("real Redis did not cache the vehicle media token")
+	}
 	if err := (&ControlLeaseStore{client: client}).PurgeVehicleLeases(ctx, vehicleID); err != nil {
 		t.Fatal(err)
+	}
+	if result, err := mediaTokenCacheScript.Run(ctx, client,
+		[]string{prefix + ":demand", vehicleMediaTokenKey(vehicleID)},
+		activeDemand.Epoch, activeDemand.Revision, "write", "late-token", 60000, "static").StringSlice(); err != nil || len(result) != 1 || result[0] != "stale" {
+		t.Fatal("real Redis accepted a delayed token after purge", err)
+	}
+	if exists, err := client.Exists(ctx, vehicleMediaTokenKey(vehicleID)).Result(); err != nil || exists != 0 {
+		t.Fatal("real Redis retained or recreated the token after purge", err)
 	}
 	for _, op := range []string{"renew", "acquire"} {
 		if _, err := store.mutate(ctx, op, vehicleID, "test-owner", activeSID); !errors.Is(err, errViewingGone) {
 			t.Fatalf("real Redis retired tombstone allowed %s: %v", op, err)
 		}
+	}
+}
+
+func TestVehicleMediaTokenCacheConcurrencyExpiryAndPurge(t *testing.T) {
+	store, server := newViewingStore(t)
+	previousKey, previousSecret := lkApiKey, lkApiSecret
+	lkApiKey, lkApiSecret = "test-key", "viewing-cache-test-signing-key-not-for-production"
+	t.Cleanup(func() { lkApiKey, lkApiSecret = previousKey, previousSecret })
+	t.Setenv("VEHICLE_LIVEKIT_TOKEN_TTL_MINUTES", "15")
+	api := &ViewingLeaseAPI{store: store}
+	ctx := context.Background()
+	const vehicle = "cache-test"
+	demand := demandFor(t, store, vehicle)
+	const workers = 16
+	tokens := make(chan string, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			request := httptest.NewRequest(http.MethodGet, "/", nil)
+			token, ok := api.cachedVehicleMediaToken(httptest.NewRecorder(), request, demand)
+			if ok {
+				tokens <- token
+			} else {
+				tokens <- ""
+			}
+		}()
+	}
+	wg.Wait()
+	close(tokens)
+	var issued string
+	for token := range tokens {
+		verifier, err := auth.ParseAPIToken(token)
+		if err != nil {
+			t.Fatal("concurrent request returned an invalid token", err)
+		}
+		claims, grants, err := verifier.Verify(lkApiSecret)
+		if err != nil || claims.Subject != "vehicle-"+vehicle || grants.Video.Room != "teleop-"+vehicle {
+			t.Fatal("concurrent request returned incorrect vehicle grants")
+		}
+		issued = token
+	}
+	key := vehicleMediaTokenKey(vehicle)
+	if ttl := server.TTL(key); ttl <= 2*time.Minute || ttl > 13*time.Minute {
+		t.Fatalf("unexpected cache TTL: %s", ttl)
+	}
+	managedRead, err := mediaTokenCacheScript.Run(ctx, store.client,
+		[]string{"viewing:" + vehicle + ":demand", key},
+		demand.Epoch, demand.Revision, "read", "", 0, "managed:tenant").StringSlice()
+	if err != nil || len(managedRead) != 2 || managedRead[0] != "ok" || managedRead[1] != "" {
+		t.Fatal("managed authorization reused a token reserved in another scope", err)
+	}
+	wrongGrant, err := auth.NewAccessToken(lkApiKey, lkApiSecret).
+		AddGrant(&auth.VideoGrant{RoomJoin: true, Room: "teleop-" + vehicle, CanPublish: bp(false)}).
+		SetIdentity("vehicle-" + vehicle).SetValidFor(15 * time.Minute).ToJWT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.client.Set(ctx, key, "static\n"+wrongGrant, 10*time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	replacement, ok := api.cachedVehicleMediaToken(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), demand)
+	if !ok || replacement == wrongGrant {
+		t.Fatal("cached token with insufficient grants was reused")
+	}
+	oldSecret := lkApiSecret
+	lkApiSecret = "rotated-viewing-cache-signing-key-not-for-production"
+	rotated, ok := api.cachedVehicleMediaToken(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), demand)
+	if !ok {
+		t.Fatal("secret rotation could not replace the cached token")
+	}
+	rotatedVerifier, err := auth.ParseAPIToken(rotated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := rotatedVerifier.Verify(lkApiSecret); err != nil {
+		t.Fatal("secret rotation reused a token signed with the old key", err)
+	}
+	lkApiSecret = oldSecret
+	if _, err := store.mutate(ctx, "acquire", vehicle, "owner", uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	staleRevision := httptest.NewRecorder()
+	if _, ok := api.cachedVehicleMediaToken(staleRevision, httptest.NewRequest(http.MethodGet, "/", nil), demand); ok || staleRevision.Code != http.StatusServiceUnavailable {
+		t.Fatal("changed demand revision returned an old response")
+	}
+	demand = demandFor(t, store, vehicle)
+	if token, ok := api.cachedVehicleMediaToken(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), demand); !ok || token == "" {
+		t.Fatal("current demand could not reuse the token")
+	}
+	if err := store.client.Set(ctx, key, "stale-cache-entry", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	token, ok := api.cachedVehicleMediaToken(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil), demand)
+	if !ok || token == "" || token == "stale-cache-entry" {
+		t.Fatal("near-expiry cache entry was not replaced")
+	}
+	if err := (&ControlLeaseStore{client: store.client}).PurgeVehicleLeases(ctx, vehicle); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := store.client.Exists(ctx, key).Result(); err != nil || exists != 0 {
+		t.Fatal("purge did not remove cached token", err)
+	}
+	staleResponse := httptest.NewRecorder()
+	if staleToken, ok := api.cachedVehicleMediaToken(staleResponse, httptest.NewRequest(http.MethodGet, "/", nil), demand); ok || staleToken != "" || staleResponse.Code != http.StatusServiceUnavailable {
+		t.Fatal("purged demand returned a cached vehicle token")
+	}
+	if exists, err := store.client.Exists(ctx, key).Result(); err != nil || exists != 0 {
+		t.Fatal("stale demand repopulated token cache", err)
+	}
+	staleWrite, err := mediaTokenCacheScript.Run(ctx, store.client,
+		[]string{"viewing:" + vehicle + ":demand", key},
+		demand.Epoch, demand.Revision, "write", issued, 60000, "static").StringSlice()
+	if err != nil || len(staleWrite) != 1 || staleWrite[0] != "stale" {
+		t.Fatal("delayed token issuance survived a purge", err)
+	}
+	verifier, err := auth.ParseAPIToken(issued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := verifier.Verify(lkApiSecret); err != nil {
+		t.Fatal("cache purge must not be mistaken for JWT revocation", err)
 	}
 }
 

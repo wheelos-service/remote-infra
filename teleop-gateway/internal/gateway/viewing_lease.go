@@ -40,6 +40,11 @@ type MediaDemand struct {
 	ServerTimeMS    int64  `json:"server_time_ms"`
 	ValidUntilMS    int64  `json:"valid_until_ms"`
 	RetryAfterMS    int64  `json:"retry_after_ms"`
+	MediaToken      string `json:"media_token,omitempty"`
+}
+
+func vehicleMediaTokenKey(vehicleID string) string {
+	return "viewing:" + vehicleID + ":vehicle_token"
 }
 
 type ViewingLeaseStore struct {

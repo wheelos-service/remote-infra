@@ -267,13 +267,6 @@ local opKey = redis.call('HGET', KEYS[2], 'operator_key')
 if opKey and opKey ~= '' then
   redis.call('DEL', opKey)
 end
-local vRaw = redis.call('GET', KEYS[5])
-if vRaw then
-  local ok, vs = pcall(cjson.decode, vRaw)
-  if ok and type(vs) == 'table' and type(vs.session_id) == 'string' and vs.session_id ~= '' then
-    redis.call('DEL', 'video_viewer:' .. vs.session_id)
-  end
-end
 redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5])
 return 1
 `)
@@ -287,7 +280,7 @@ func (s *ControlLeaseStore) PurgeVehicleLeases(ctx context.Context, vehicleID st
 		controlHandoverKey(vehicleID),
 		"viewing:" + vehicleID + ":active",
 		"viewing:" + vehicleID + ":demand",
-		videoSessionKey(vehicleID),
+		vehicleMediaTokenKey(vehicleID),
 	}, vehicleID).Err()
 }
 
@@ -315,9 +308,6 @@ func (s *ControlLeaseStore) RevokeOperatorControl(ctx context.Context, tenant, o
 	}
 	if err := s.ReleaseControlSession(ctx, session.SessionID, session.OperatorID); err != nil && !errors.Is(err, ErrControlSessionNotFound) {
 		return "", err
-	}
-	if videoSessions != nil {
-		_, _ = videoSessions.ClearController(ctx, session.VehicleID, session.SessionID)
 	}
 	return session.VehicleID, nil
 }

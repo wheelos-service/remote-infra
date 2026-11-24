@@ -106,11 +106,6 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		writeControlSessionError(w, err)
 		return
 	}
-	if _, err := videoSessions.SetController(r.Context(), vehicleID, session.SessionID); err != nil {
-		_ = controlLeases.ReleaseControlSession(r.Context(), session.SessionID, session.OperatorID)
-		http.Error(w, "video session unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	recordAudit(r.Context(), AuditEvent{
 		OperatorID: session.OperatorID, VehicleID: session.VehicleID, SessionID: session.SessionID,
@@ -174,10 +169,6 @@ func handleReleaseControl(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := controlLeases.ReleaseControlSession(r.Context(), session.SessionID, claims.Name); err != nil {
 		writeControlSessionError(w, err)
-		return
-	}
-	if _, err := videoSessions.ClearController(r.Context(), session.VehicleID, session.SessionID); err != nil {
-		http.Error(w, "video session unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	recordAudit(r.Context(), AuditEvent{

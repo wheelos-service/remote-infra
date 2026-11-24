@@ -4,7 +4,12 @@ import { organizationHeaders, requestOrganization } from './organization-context
 
 export const VIEWING_REQUEST_TIMEOUT_MS = 5_000
 export class ViewingRequestError extends Error {
-  constructor(message: string, readonly retryable: boolean, readonly status = 0) { super(message) }
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+    readonly status = 0,
+    readonly timedOut = false,
+  ) { super(message) }
 }
 const gatewayUrl = teleopConfig.gatewayUrl.replace(/\/$/, '')
 const timestamp = z.number().int().safe().positive()
@@ -80,7 +85,7 @@ async function post(path: string, bearer: string, body?: object, keepalive = fal
       })(),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
-          reject(new ViewingRequestError('监看租约请求超时', true))
+          reject(new ViewingRequestError('监看租约请求超时', true, 0, true))
           controller.abort()
         }, VIEWING_REQUEST_TIMEOUT_MS)
       }),

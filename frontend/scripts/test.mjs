@@ -808,7 +808,7 @@ test('v2 canonical signing rejects float and conflicting pedal commands', () => 
   assert.throws(() => controlProtocol.controlSignBytes({ ...payload, command: { ...payload.command, brake: 1 } }))
 })
 
-function controllerFixture(renewAfter = 10000) {
+function controllerFixture(renewAfter = 10000, releaseFailures = 0) {
   let instanceId
   let sequence = 0
   const calls = [], publishedCommands = []
@@ -833,7 +833,11 @@ function controllerFixture(renewAfter = 10000) {
       instanceId = JSON.parse(options.body).client_instance_id
       return Response.json({ session: { ...session, client_instance_id: instanceId }, token: 'test-token', renew_after_ms: renewAfter })
     }
-    if (url.endsWith('/release')) { calls.push('release'); return Response.json({ state: 'PENDING' }, { status: 202 }) }
+    if (url.endsWith('/release')) {
+      calls.push('release')
+      if (releaseFailures > 0) { releaseFailures--; return new Response('', { status: 400 }) }
+      return Response.json({ state: 'PENDING' }, { status: 202 })
+    }
     if (url.endsWith('/handover')) {
       calls.push('handover')
       return Response.json({ vehicle_id: 'car-test', session_id: session.session_id, state: 'CONFIRMED', vehicle_handover_confirmed: true })
@@ -1021,7 +1025,8 @@ test('camera feed readiness needs three advancing decoded streams and clears on 
     callback()
     frames.left = frames.right = true
     assert.equal(cameraFeed.threeCamerasReady(frames), true)
-    listeners.get('waiting')()
+    assert.equal(listeners.has('waiting'), false, 'transient waiting must use stallBudgetMs rather than immediate stall')
+    listeners.get('ended')()
     assert.equal(cameraFeed.threeCamerasReady(frames), false)
     callback()
     now += cameraFeed.CAMERA_FRAME_TIMEOUT_MS
@@ -1112,6 +1117,161 @@ test('bindCameraFeed adapts stall budget from measured frame interval EMA and em
     assert.deepEqual(states, [true, false], '5fps stream with 200ms EMA should detect stall around 1200ms instead of waiting 1500ms')
     assert.ok(statsLog.length >= 1 && statsLog.at(-1).stallBudgetMs === 1200 && statsLog.at(-1).emaIntervalMs === 200)
   } finally { stop(); context.mock.timers.reset() }
+})
+
+test('bindCameraFeed reports advancing frames and rejects excessive local residence', (context) => {
+  let now = 2_000
+  context.mock.method(performance, 'now', () => now)
+  context.mock.timers.enable({ apis: ['setInterval'] })
+  let callback
+  const video = {
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    requestVideoFrameCallback: fn => { callback = fn; return 1 },
+    cancelVideoFrameCallback: () => {},
+  }
+  const states = []
+  const statsLog = []
+  let progress = 0
+  const stop = cameraFeed.bindCameraFeed({ attach: () => {}, detach: () => {} }, video,
+    live => states.push(live), {
+      requireFrameCallback: true,
+      maxResidenceMs: 400,
+      onFrame: () => progress++,
+      onStats: s => statsLog.push(s),
+    })
+  try {
+    callback(now, { rtpTimestamp: 1, receiveTime: now - 50, presentationTime: now })
+    assert.deepEqual(states, [true])
+    callback(now, { rtpTimestamp: 2, receiveTime: now - 50, presentationTime: now })
+    callback(now, { rtpTimestamp: 2, receiveTime: now - 50, presentationTime: now })
+    assert.equal(progress, 2, 'unchanged RTP timestamps do not signal recovery progress')
+
+    now += 1500
+    callback(now, { rtpTimestamp: 3, receiveTime: now - 450, presentationTime: now - 100 })
+    context.mock.timers.tick(100)
+    assert.deepEqual(states, [true, false])
+    assert.equal(statsLog.at(-1).lastResidenceMs, 450)
+    assert.equal(progress, 2, 'late callbacks cannot signal recovery progress')
+
+    callback(now, { rtpTimestamp: 4, receiveTime: now - 40, presentationTime: now })
+    assert.deepEqual(states, [true, false, true])
+    assert.equal(progress, 3)
+  } finally { stop(); context.mock.restoreAll(); context.mock.timers.reset() }
+})
+
+test('camera hook separates transport and fresh frames and ignores old Room events', async () => {
+  const harness = { states: [], effects: [], rooms: [], current: true }
+  globalThis.__videoHookHarness = harness
+  const originalAdd = window.addEventListener
+  const originalRemove = window.removeEventListener
+  window.addEventListener = () => {}
+  window.removeEventListener = () => {}
+  const tracks = Object.fromEntries(['left', 'center', 'right'].map(name => [name, { kind: 'video' }]))
+  const participant = { identity: 'vehicle-car-test', trackPublications: new Map() }
+  for (const [name, track] of Object.entries(tracks)) {
+    const pub = { trackName: `camera-${name}`, trackSid: name, track, isMuted: false, setSubscribed() {} }
+    participant.trackPublications.set(name, pub)
+  }
+  harness.participant = participant
+  const bundle = await esbuild.build({
+    entryPoints: ['src/hooks/use-driving-cameras.ts'], bundle: true, format: 'esm', platform: 'node', write: false,
+    plugins: [{
+      name: 'video-hook-fakes',
+      setup(build) {
+        build.onResolve({ filter: /^(react|livekit-client)$|\/viewing-lifecycle$/ }, args =>
+          ({ path: args.path, namespace: 'video-test' }))
+        build.onLoad({ filter: /.*/, namespace: 'video-test' }, args => {
+          if (args.path === 'react') return { contents: `
+            export const useCallback = fn => fn
+            export const useRef = value => ({ current: value })
+            export const useState = value => {
+              const h = globalThis.__videoHookHarness, i = h.states.length
+              h.states.push(value)
+              return [value, next => { h.states[i] = next }]
+            }
+            export const useEffect = fn => { globalThis.__videoHookHarness.effects.push(fn) }
+          `, loader: 'js' }
+          if (args.path === 'livekit-client') return { contents: `
+            export const Track = { Kind: { Video: 'video' } }
+            export const DisconnectReason = { CLIENT_INITIATED: 1, DUPLICATE_IDENTITY: 2,
+              PARTICIPANT_REMOVED: 4, ROOM_DELETED: 5, ROOM_CLOSED: 10 }
+            export const RoomEvent = Object.fromEntries(
+              ['TrackPublished','TrackSubscribed','TrackUnsubscribed','TrackMuted','TrackUnmuted',
+               'TrackSubscriptionFailed','Reconnecting','SignalReconnecting','Reconnected','Disconnected'].map(v => [v, v]))
+            export class Room {
+              constructor() {
+                this.handlers = {}
+                this.remoteParticipants = new Map([['vehicle', globalThis.__videoHookHarness.participant]])
+                globalThis.__videoHookHarness.rooms.push(this)
+              }
+              on(event, handler) { this.handlers[event] = handler }
+              emit(event, ...args) { this.handlers[event]?.(...args) }
+              async connect() {}
+              disconnect() {}
+              removeAllListeners() { this.handlers = {} }
+            }
+          `, loader: 'js' }
+          return { contents: `
+            export class ViewingLifecycle {
+              constructor(options) { this.options = options; globalThis.__videoHookHarness.lifecycle = this }
+              async start() {
+                const h = globalThis.__videoHookHarness
+                this.observer = this.options.createObserver('token', {
+                  current: () => h.current,
+                  reconnecting: () => { if (h.current) { this.connected = false; this.options.onRecovering() } },
+                  reconnected: () => { if (h.current) { this.connected = true; this.options.onConnected() } },
+                  disconnected: terminal => { h.terminal = terminal },
+                })
+                await this.observer.connect()
+                this.connected = true
+                this.options.onConnected()
+              }
+              frameRendered() { globalThis.__videoHookHarness.progress = (globalThis.__videoHookHarness.progress || 0) + 1 }
+              stop() {}
+              fail() {}
+            }
+          `, loader: 'js' }
+        })
+      },
+    }],
+  })
+  try {
+    const module = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString('base64')}`)
+    const cameras = module.useDrivingCameras('car-test', 'test-bearer', true)
+    const cleanup = harness.effects[0]()
+    await new Promise(resolve => setImmediate(resolve))
+    const room = harness.rooms[0]
+    assert.equal(harness.states[3], true)
+    cameras.reportProgress('left', tracks.left)
+    assert.equal(harness.states[2].left, tracks.left)
+    room.emit('SignalReconnecting')
+    assert.equal(harness.states[5], true)
+    assert.equal(harness.states[3], true, 'signal-only interruption keeps media connected')
+    room.emit('Reconnecting')
+    assert.equal(harness.states[3], false)
+    assert.deepEqual(harness.states[2], {})
+    for (const [name, track] of Object.entries(tracks)) cameras.reportProgress(name, track)
+    room.emit('Reconnected')
+    assert.equal(harness.states[3], true, 'transport can recover before camera frames')
+    assert.deepEqual(harness.states[2], {}, 'in-reconnect frames do not count')
+    cameras.reportProgress('left', tracks.left)
+    assert.deepEqual(harness.states[2], { left: tracks.left })
+    cameras.reportProgress('center', {})
+    assert.deepEqual(harness.states[2], { left: tracks.left }, 'old track cannot restore frames')
+    room.emit('Disconnected', 4)
+    assert.equal(harness.terminal, true, 'server removal is terminal')
+    room.emit('Reconnecting')
+    harness.current = false
+    room.emit('Reconnected')
+    for (const [name, track] of Object.entries(tracks)) cameras.reportProgress(name, track)
+    assert.deepEqual(harness.states[2], {}, 'stale Room events cannot restore frames')
+    cleanup()
+  } finally {
+    window.addEventListener = originalAdd
+    window.removeEventListener = originalRemove
+    delete globalThis.__videoHookHarness
+  }
 })
 
 test('CONTROL_TIMING obeys strict ordering and resolveControlTiming clamps server timing_policy', async () => {
@@ -1713,7 +1873,7 @@ test('release while signing discards the command even if the promise later succe
 })
 
 test('faults retain the first cause through RTC failure, failed release and successful retry', async () => {
-  const f = controllerFixture()
+  const f = controllerFixture(10000, 1)
   const disconnect = f.connection.disconnect
   try {
     await f.controller.acquire()
@@ -1725,7 +1885,7 @@ test('faults retain the first cause through RTC failure, failed release and succ
     assert.equal(f.controller.error, 'stale_command')
     assert.match(f.controller.cleanupError, /disconnect failed/)
     assert.ok(!f.controller.cleanupError.includes('private'))
-    await assert.rejects(f.controller.release(), /Control release failed; vehicle handover is not confirmed/)
+    await assert.rejects(f.controller.release(), /Control API: HTTP 400/)
     assert.equal(f.controller.state, 'pending')
     assert.equal(f.controller.error, 'stale_command')
     f.connection.disconnect = disconnect
@@ -1792,8 +1952,8 @@ test('local clock steps are diagnostic only and cannot extend a monotonic ACK de
       await f.controller.acquire()
       f.accept()
       await f.controller.tick()
-      now += 449
-      wall += 449 + step
+      now += CONTROL_TIMING.ackBudgetMs - 1
+      wall += CONTROL_TIMING.ackBudgetMs - 1 + step
       f.accept({ ...f.feedback(), accepted_sequence: 0 })
       assert.equal(f.controller.state, 'ready')
       assert.equal(f.controller.diagnostics.at(-1).wall_elapsed_delta_ms, step)
@@ -2063,14 +2223,14 @@ test('business operations request is read-only, scoped, bearer-authenticated and
   }
 })
 
-test('operations rejects malformed identifiers, zero timestamps and oversized UTF-8 mission descriptions', () => {
+test('operations rejects malformed identifiers, zero timestamps and oversized Unicode mission descriptions', () => {
   const fixture = operations.createPreviewOperations('fleet-1')
   const mutations = [
     { server_time_ms: 0 },
     { alerts: [{ ...fixture.alerts[0], event_id: 'preview-id' }] },
     { missions: [{ ...fixture.missions[0], mission_id: '../mission' }] },
     { missions: [{ ...fixture.missions[0], updated_at_ms: 0 }] },
-    { missions: [{ ...fixture.missions[0], description: '车'.repeat(683) }] },
+    { missions: [{ ...fixture.missions[0], description: '车'.repeat(2049) }] },
     { history: [{ ...fixture.history[0], stream_id: '' }] },
     { history: [{ ...fixture.history[0], sequence: 0 }] },
   ]
@@ -2080,7 +2240,7 @@ test('operations rejects malformed identifiers, zero timestamps and oversized UT
   assert.equal(operations.vehicleOperationsSchema.safeParse({
     ...fixture,
     diagnostics: { ...fixture.diagnostics, chassis_age_ms: 0 },
-    missions: [{ ...fixture.missions[0], description: '车'.repeat(682) }],
+    missions: [{ ...fixture.missions[0], description: '车'.repeat(2048) }],
   }).success, true)
 })
 
@@ -2211,7 +2371,7 @@ const deferred = () => {
   const promise = new Promise((res, rej) => { resolve = res; reject = rej })
   return { promise, resolve, reject }
 }
-const flush = async () => { for (let i = 0; i < 15; i++) await Promise.resolve() }
+const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
 
 function lifecycleHarness(overrides = {}, optionOverrides = {}) {
   const calls = { acquired: [], released: [], renewed: [], errors: [], disconnected: 0, created: 0, connected: 0, cleanupErrors: 0 }
@@ -2493,7 +2653,7 @@ test('read-only viewing retries transient renewal without replacing the Room and
   } finally { await lifecycle.stop(); globalThis.fetch = originalFetch }
 })
 
-test('SDK recovery keeps the Room and lease until a current frame renders; terminal disconnect rebuilds once', async () => {
+test('SDK recovery restores transport independently of frames; transient disconnect rebuilds once', async () => {
   const events = []
   const tokens = []
   const refreshed = []
@@ -2516,7 +2676,7 @@ test('SDK recovery keeps the Room and lease until a current frame renders; termi
     lifecycle.frameRendered()
     assert.equal(calls.connected, 1, 'frames cannot recover a disconnected transport')
     events[0].reconnected()
-    assert.equal(calls.connected, 1, 'a connected transport does not prove frame delivery')
+    assert.equal(calls.connected, 2, 'transport recovery must not wait for vehicle frames')
     lifecycle.frameRendered()
     assert.equal(calls.connected, 2)
     assert.equal(events.length, 1, 'SDK recovery must not replace the Room')
@@ -2537,7 +2697,7 @@ test('SDK recovery keeps the Room and lease until a current frame renders; termi
   assert.equal(calls.released.length, 1)
 })
 
-test('a late token response cannot rebuild after the original media recovery deadline', async (context) => {
+test('a late token response cannot rebuild after the independent rebuild deadline', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] })
   let now = 1_000
   context.mock.method(performance, 'now', () => now)
@@ -2560,6 +2720,10 @@ test('a late token response cannot rebuild after the original media recovery dea
     rooms[0].disconnected()
     now += 5_000
     context.mock.timers.tick(5_000)
+    await flush()
+    assert.equal(calls.released.length, 0, 'SDK and rebuild budgets are independent')
+    now += 10_000
+    context.mock.timers.tick(10_000)
     pending.resolve(lease)
     await flush()
     assert.equal(rooms.length, 1)
@@ -2610,16 +2774,219 @@ test('recovery retries transient token refresh and permits bounded Room rebuilds
     await advance(500)
     assert.equal(tokenAttempt, 2)
     assert.equal(rooms.length, 2, 'retryable 503 during token refresh must retry inside the recovery window')
-    // Second terminal disconnect triggers a second bounded rebuild after backoff.
+    // Flapping before a new frame retains the rebuild backoff.
     rooms[1].disconnected()
     await flush()
     assert.equal(rooms.length, 2)
     await advance(500)
     assert.equal(rooms.length, 3)
     lifecycle.frameRendered()
-    assert.equal(calls.connected, 2)
+    assert.equal(calls.connected, 3)
     assert.equal(calls.errors.length, 0)
   } finally { await lifecycle.stop(); globalThis.fetch = originalFetch; context.mock.timers.reset() }
+})
+
+test('recovery retries Room connect failures inside the 15s window up to MAX_MEDIA_REBUILD_ATTEMPTS', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000
+  context.mock.method(performance, 'now', () => now)
+  const rooms = []
+  let connectAttempt = 0
+  const { lifecycle, calls, lease } = lifecycleHarness({
+    refreshToken: async () => ({ ...lease, token: `fresh-${connectAttempt}` }),
+  }, {
+    onRecovering: () => {},
+    createObserver(_token, events) {
+      rooms.push(events)
+      return {
+        connect: async () => {
+          connectAttempt++
+          if (connectAttempt === 2) throw new Error('transient livekit handshake error')
+        },
+        disconnect: async () => { calls.disconnected++ },
+      }
+    },
+  })
+
+  const advance = async (ms) => {
+    now += ms
+    context.mock.timers.tick(ms)
+    await flush()
+  }
+  try {
+    await lifecycle.start()
+    assert.equal(connectAttempt, 1)
+    rooms[0].disconnected()
+    await flush()
+    assert.equal(connectAttempt, 2, 'first rebuild failed during observer.connect()')
+    assert.equal(calls.errors.length, 0, 'first connect failure must not abort recovery before 3 attempts')
+    await advance(500)
+    assert.equal(connectAttempt, 3, 'second rebuild attempt must run after backoff')
+    lifecycle.frameRendered()
+    assert.equal(calls.connected, 2)
+    assert.equal(calls.errors.length, 0)
+  } finally { await lifecycle.stop(); context.mock.timers.reset() }
+})
+
+test('viewer waits for delayed vehicle frames after transport recovery and bounds all-video loss', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000
+  context.mock.method(performance, 'now', () => now)
+  let events
+  const { lifecycle, calls } = lifecycleHarness({}, {
+    onRecovering: () => {},
+    createObserver(_token, observerEvents) {
+      events = observerEvents
+      return { connect: async () => {}, disconnect: async () => {} }
+    },
+  })
+  const advance = async ms => {
+    now += ms
+    context.mock.timers.tick(ms)
+    await flush()
+  }
+  try {
+    await lifecycle.start()
+    events.reconnecting()
+    await advance(5_000)
+    events.reconnected()
+    await advance(10_000)
+    await advance(5_000)
+    assert.equal(lifecycle.active, true, 'vehicle may return more than 15s after reconnect')
+    assert.equal(calls.connected, 2)
+    assert.equal(calls.released.length, 0)
+    lifecycle.frameRendered()
+    for (let i = 0; i < 5; i++) await advance(10_000)
+    assert.equal(lifecycle.active, true)
+    await advance(10_000)
+    assert.equal(lifecycle.active, false)
+    assert.equal(calls.released.length, 1)
+    assert.match(calls.errors[0].message, /长时间没有视频/)
+  } finally { await lifecycle.stop(); context.mock.restoreAll(); context.mock.timers.reset() }
+})
+
+test('a continuing displayed camera keeps observation alive beyond the no-video window', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000
+  context.mock.method(performance, 'now', () => now)
+  const { lifecycle, calls } = lifecycleHarness({}, { onRecovering: () => {} })
+  try {
+    await lifecycle.start()
+    for (let i = 0; i < 8; i++) {
+      now += 10_000
+      context.mock.timers.tick(10_000)
+      await flush()
+      lifecycle.frameRendered()
+    }
+    assert.equal(lifecycle.active, true)
+    assert.equal(calls.released.length, 0)
+    assert.equal(calls.errors.length, 0)
+  } finally { await lifecycle.stop(); context.mock.restoreAll(); context.mock.timers.reset() }
+})
+
+test('SDK recovery deadline hands off to one Room rebuild and removed participants do not rejoin', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000
+  context.mock.method(performance, 'now', () => now)
+  const rooms = []
+  let refreshed = 0
+  const { lifecycle, calls, lease } = lifecycleHarness({
+    refreshToken: async () => { refreshed++; return lease },
+  }, {
+    onRecovering: () => {},
+    createObserver(_token, events) {
+      rooms.push(events)
+      return { connect: async () => {}, disconnect: async () => {} }
+    },
+  })
+  try {
+    await lifecycle.start()
+    rooms[0].reconnecting()
+    for (let i = 0; i < 3; i++) {
+      now += 10_000
+      context.mock.timers.tick(10_000)
+      await flush()
+    }
+    assert.equal(refreshed, 1)
+    assert.equal(rooms.length, 2)
+    assert.equal(rooms[0].current(), false)
+    rooms[0].reconnected()
+    assert.equal(calls.connected, 2)
+    rooms[1].disconnected(true)
+    await flush()
+    assert.equal(lifecycle.active, false)
+    assert.equal(refreshed, 1)
+    assert.equal(calls.released.length, 1)
+    assert.match(calls.errors[0].message, /连接已终止/)
+  } finally { await lifecycle.stop(); context.mock.restoreAll(); context.mock.timers.reset() }
+})
+
+test('a late SDK reconnect after tab suspension cannot bypass the transport deadline', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000
+  context.mock.method(performance, 'now', () => now)
+  const rooms = []
+  let refreshed = 0
+  const { lifecycle, calls, lease } = lifecycleHarness({
+    refreshToken: async () => { refreshed++; return lease },
+  }, {
+    onRecovering: () => {},
+    createObserver(_token, events) {
+      rooms.push(events)
+      return { connect: async () => {}, disconnect: async () => {} }
+    },
+  })
+  try {
+    await lifecycle.start()
+    rooms[0].reconnecting()
+    for (let i = 0; i < 2; i++) {
+      now += 10_000
+      context.mock.timers.tick(10_000)
+      await flush()
+    }
+    now += 10_000
+    rooms[0].reconnected()
+    await flush()
+    assert.equal(refreshed, 1)
+    assert.equal(rooms[0].current(), false)
+    assert.equal(calls.connected, 2, 'only the replacement Room becomes connected')
+  } finally { await lifecycle.stop(); context.mock.restoreAll(); context.mock.timers.reset() }
+})
+
+test('a stalled old Room disconnect cannot block rebuild, release, or revive the old Room', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 1_000
+  context.mock.method(performance, 'now', () => now)
+  const pending = deferred()
+  const rooms = []
+  let refreshed = 0
+  const { lifecycle, calls, lease } = lifecycleHarness({
+    refreshToken: async () => { refreshed++; return lease },
+  }, {
+    onRecovering: () => {},
+    createObserver(_token, events) {
+      rooms.push(events)
+      return { connect: async () => {}, disconnect: rooms.length === 1 ? () => pending.promise : async () => {} }
+    },
+  })
+  try {
+    await lifecycle.start()
+    rooms[0].disconnected()
+    await flush()
+    assert.equal(refreshed, 0)
+    now += 500
+    context.mock.timers.tick(500)
+    await flush()
+    assert.equal(refreshed, 1)
+    assert.equal(rooms.length, 2)
+    rooms[0].reconnected()
+    assert.equal(calls.connected, 2)
+    await lifecycle.stop()
+    assert.equal(calls.released.length, 1)
+    pending.resolve()
+    await flush()
+    assert.equal(calls.connected, 2)
+  } finally { await lifecycle.stop(); context.mock.restoreAll(); context.mock.timers.reset() }
 })
 
 test('a suspended read-only viewer does not start an HTTP renew that no longer fits before expiry', async (context) => {

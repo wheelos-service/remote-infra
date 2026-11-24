@@ -9,18 +9,17 @@ end, driving control must remain gated or read-only.
 
 ## Current Baseline (Static Verification)
 
-- **Browser (`frontend/src/lib/camera-feed.ts`)**: `bindCameraFeed` currently
-  records local render time (`performance.now()`) inside
-  `requestVideoFrameCallback` and falls back to `timeupdate` if unsupported. It
-  does not inspect `VideoFrameCallbackMetadata` (`captureTime`, `receiveTime`,
-  `rtpTimestamp`, `presentedFrames`) and cannot distinguish fresh camera frames
-  from delayed jitter-buffer bursts.
+- **Browser (`frontend/src/lib/camera-feed.ts`)**: `bindCameraFeed` tracks
+  frame progression and, when available, local receive-to-callback residence.
+  Observation may fall back to `timeupdate`. These checks do not prove source
+  freshness. The workbench therefore permits observation only, even for
+  simulation; other API clients are not protected by this frontend gate.
 - **Vehicle edge (`apollo-base` `v1` + `data/sdk-kit` `v2`)**: `EncodedFrame::capture_time_us` is defined
   in `data/sdk-kit/livekit/include/vehicle_edge/encoded_video.h` and forwarded
   to `metadata->user_timestamp_us` in `data/sdk-kit/livekit/media_backend.cc`
   when positive (`frame_metadata_features->user_timestamp = true`).
-  `modules/teleop/src/camera_gst/camera_gst_adapter.cc` (`SubmitSample`) now
-  populates `capture_time_us` with Unix microseconds at `appsink` read;
+  `modules/teleop/src/camera_gst/camera_gst_adapter.cc` (`SubmitSample`) populates
+  `capture_time_us` with Unix microseconds at `appsink` read, not sensor exposure;
   `SimulationFrame` (synthetic RGBA) does not populate `capture_time_us`.
 
 ## Target Browser Verification Protocol
