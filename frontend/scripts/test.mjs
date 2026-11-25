@@ -1133,12 +1133,12 @@ test('bindCameraFeed reports advancing frames and rejects excessive local reside
   }
   const states = []
   const statsLog = []
-  let progress = 0
+  const progress = []
   const stop = cameraFeed.bindCameraFeed({ attach: () => {}, detach: () => {} }, video,
     live => states.push(live), {
       requireFrameCallback: true,
       maxResidenceMs: 400,
-      onFrame: () => progress++,
+      onFrame: timestamp => progress.push(timestamp),
       onStats: s => statsLog.push(s),
     })
   try {
@@ -1146,18 +1146,18 @@ test('bindCameraFeed reports advancing frames and rejects excessive local reside
     assert.deepEqual(states, [true])
     callback(now, { rtpTimestamp: 2, receiveTime: now - 50, presentationTime: now })
     callback(now, { rtpTimestamp: 2, receiveTime: now - 50, presentationTime: now })
-    assert.equal(progress, 2, 'unchanged RTP timestamps do not signal recovery progress')
+    assert.deepEqual(progress, [1, 2], 'unchanged RTP timestamps do not signal recovery progress')
 
     now += 1500
     callback(now, { rtpTimestamp: 3, receiveTime: now - 450, presentationTime: now - 100 })
     context.mock.timers.tick(100)
     assert.deepEqual(states, [true, false])
     assert.equal(statsLog.at(-1).lastResidenceMs, 450)
-    assert.equal(progress, 2, 'late callbacks cannot signal recovery progress')
+    assert.deepEqual(progress, [1, 2], 'late callbacks cannot signal recovery progress')
 
     callback(now, { rtpTimestamp: 4, receiveTime: now - 40, presentationTime: now })
     assert.deepEqual(states, [true, false, true])
-    assert.equal(progress, 3)
+    assert.deepEqual(progress, [1, 2, 4])
   } finally { stop(); context.mock.restoreAll(); context.mock.timers.reset() }
 })
 
@@ -3332,4 +3332,23 @@ test('generated-camera bench rejects corrupted, stale, wrong-camera and previous
     assert.equal(captureDeadline(clock, 3200, 250 + gap), 0)
   assert.equal(captureDeadline(clock, 5000, 250), 0)
   assert.equal(captureDeadline(clock, 19000, 16000), 0)
+})
+
+test('H.264 capture stamp is camera and epoch bound, and a displayed frame expires', async () => {
+  const { decodeCaptureStamp, captureDeadline } = await loadBundle('bench-camera')
+  const bytes = Buffer.from('00b2000030390000000c809c1a00', 'hex').subarray(1, 13)
+  const stamp = decodeCaptureStamp(bytes, 2, 12345)
+  assert.equal(stamp, 3200)
+  assert.equal(decodeCaptureStamp(bytes, 1, 12345), undefined)
+  assert.equal(decodeCaptureStamp(bytes, 2, 12346), undefined)
+  assert.equal(decodeCaptureStamp(bytes.subarray(1), 2, 12345), undefined)
+  const clock = { epoch: 12345, elapsed_ms: 3200, started: 100, received: 110 }
+  for (const age of [180, 200]) {
+    const now = clock.started + age
+    const expiry = captureDeadline(clock, stamp, now)
+    assert.ok(expiry > now && expiry < now + 1000 - age)
+    assert.equal(captureDeadline(clock, stamp, Math.ceil(expiry)), 0)
+  }
+  bytes[6] ^= 1
+  assert.equal(decodeCaptureStamp(bytes, 2, 12345), undefined)
 })

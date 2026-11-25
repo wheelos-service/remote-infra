@@ -13,7 +13,7 @@ function CameraSlot({ name, label, track, live, failure, requireFrameCallback, o
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
   onProgress?: (name: FrontCamera, track: CameraFeedTrack) => void
   onPresented?: (name: FrontCamera, track: CameraFeedTrack, count?: number) => void
-  onSample?: (name: FrontCamera, track: CameraFeedTrack, video: HTMLVideoElement) => void
+  onSample?: (name: FrontCamera, track: CameraFeedTrack, video: HTMLVideoElement, rtpTimestamp?: number) => void
   onStats?: (name: FrontCamera, stats: CameraFrameStats) => void
 }) {
   const video = useRef<HTMLVideoElement>(null)
@@ -39,8 +39,8 @@ function CameraSlot({ name, label, track, live, failure, requireFrameCallback, o
       requireFrameCallback,
       maxResidenceMs: requireFrameCallback ? 1000 : undefined,
       onPresented: count => presentedRef.current?.(name, track, count),
-      onFrame: () => {
-        if (video.current) sampleRef.current?.(name, track, video.current)
+      onFrame: rtpTimestamp => {
+        if (video.current) sampleRef.current?.(name, track, video.current, rtpTimestamp)
         onProgressRef.current?.(name, track)
       },
       onStats: stats => onStatsRef.current?.(name, stats),
@@ -74,7 +74,7 @@ export default function ThreeCameraView({ vehicleId, tracks = {}, frames = {}, f
   onFrame?: (name: FrontCamera, live: boolean, track?: CameraFeedTrack) => void
   onProgress?: (name: FrontCamera, track: CameraFeedTrack) => void
   onPresented?: (name: FrontCamera, track: CameraFeedTrack, count?: number) => void
-  onSample?: (name: FrontCamera, track: CameraFeedTrack, video: HTMLVideoElement) => void
+  onSample?: (name: FrontCamera, track: CameraFeedTrack, video: HTMLVideoElement, rtpTimestamp?: number) => void
   onStats?: (name: FrontCamera, stats: CameraFrameStats) => void
 }) {
   const [focused, setFocused] = useState(false)

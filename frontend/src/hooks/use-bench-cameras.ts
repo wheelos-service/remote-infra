@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { captureDeadline, readGeneratedFrame, type BenchClock } from '../lib/bench-camera'
+import { captureDeadline, decodeCaptureStamp, readGeneratedFrame, type BenchClock } from '../lib/bench-camera'
 import { organizationHeaders, requestOrganization } from '../lib/organization-context'
 import { teleopConfig } from '../lib/teleop-config'
 import type { CameraFeedTrack } from '../lib/camera-feed'
@@ -94,17 +94,24 @@ export function useBenchCameras(vehicle: string, bearer: string, requested: bool
     if (!connected) { samples.current.clear(); setReady(false) }
     for (const track of samples.current.keys()) if (!Object.values(tracks).includes(track)) samples.current.delete(track)
   }, [connected, tracks])
-  const sample = useCallback((name: FrontCamera, track: CameraFeedTrack, video: HTMLVideoElement) => {
+  const sample = useCallback((name: FrontCamera, track: CameraFeedTrack, video: HTMLVideoElement, rtpTimestamp?: number) => {
     const sync = clock.current
     if (!sync || !current.current.connected || current.current.tracks[name] !== track || name === 'front') return
-    if (!canvas.current) {
-      const element = document.createElement('canvas')
-      element.width = 96; element.height = 1
-      canvas.current = element.getContext('2d', {willReadFrequently: true})
-    }
-    if (!canvas.current) return
+    const camera = names.indexOf(name)
+    const metadata = rtpTimestamp === undefined ? undefined : track.lookupFrameMetadata?.({rtpTimestamp})
     let stamp: number | undefined
-    try { stamp = readGeneratedFrame(video, canvas.current, names.indexOf(name), sync.epoch) } catch { /* unreadable frame */ }
+    if (metadata) {
+      if (metadata.userData) stamp = decodeCaptureStamp(metadata.userData, camera, sync.epoch)
+    } else {
+      if (!canvas.current) {
+        const element = document.createElement('canvas')
+        element.width = 96; element.height = 1
+        canvas.current = element.getContext('2d', {willReadFrequently: true})
+      }
+      try {
+        if (canvas.current) stamp = readGeneratedFrame(video, canvas.current, camera, sync.epoch)
+      } catch { /* An unreadable sample invalidates this track below. */ }
+    }
     const now = performance.now()
     const previous = samples.current.get(track)
     const until = stamp === undefined ? 0 : captureDeadline(sync, stamp, now)

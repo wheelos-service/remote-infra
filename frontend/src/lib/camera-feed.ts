@@ -1,4 +1,5 @@
 export interface CameraFeedTrack {
+  lookupFrameMetadata?(frame: {rtpTimestamp: number}): {userData?: Uint8Array} | undefined
   getRTCStatsReport?(): Promise<RTCStatsReport | undefined>
   attach(element: HTMLVideoElement): HTMLMediaElement
   detach(element: HTMLVideoElement): HTMLMediaElement[]
@@ -16,7 +17,7 @@ export interface CameraFeedOptions {
   requireFrameCallback?: boolean
   maxResidenceMs?: number
   onPresented?: (count: number | undefined) => void
-  onFrame?: () => void
+  onFrame?: (rtpTimestamp?: number) => void
   onStats?: (stats: CameraFrameStats) => void
 }
 
@@ -60,7 +61,7 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
     if (!value && intervalSamples > 0) emitStats()
     changed(value)
   }
-  const fresh = () => {
+  const fresh = (rtpTimestamp?: number) => {
     const now = performance.now()
     if (Number.isFinite(lastFrame)) {
       const delta = Math.max(0, now - lastFrame)
@@ -73,7 +74,7 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
     }
     lastFrame = now
     report(true)
-    options?.onFrame?.()
+    options?.onFrame?.(rtpTimestamp)
   }
   const frame = (now?: number, metadata?: VideoFrameCallbackMetadata) => {
     if (stopped) return
@@ -100,7 +101,7 @@ export function bindCameraFeed(track: CameraFeedTrack, video: HTMLVideoElement,
         }
       }
     }
-    if (progressed) fresh()
+    if (progressed) fresh(metadata?.rtpTimestamp)
     frameId = video.requestVideoFrameCallback(frame)
   }
   const hasCallback = typeof video.requestVideoFrameCallback === 'function'

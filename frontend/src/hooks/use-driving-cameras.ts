@@ -119,7 +119,11 @@ export function useDrivingCameras(
           updateFrames({})
           setPlaybackEpoch(frameEpoch)
         }
-        const observer = new Room({ adaptiveStream: false, dynacast: false })
+        const worker = typeof Worker !== 'undefined' &&
+          ('RTCRtpScriptTransform' in window || (typeof RTCRtpReceiver !== 'undefined' && 'createEncodedStreams' in RTCRtpReceiver.prototype))
+          ? new Worker('/frame-metadata-worker.js') : undefined
+        const observer = new Room({ adaptiveStream: false, dynacast: false,
+          frameMetadata: worker ? { worker } : undefined })
         let acceptTracks = true
         const retryCounts = new Map<string, number>()
         const retryTimers = new Set<ReturnType<typeof setTimeout>>()
@@ -242,7 +246,7 @@ export function useDrivingCameras(
           disconnect: () => {
             clearRetryTimers()
             observer.removeAllListeners()
-            return observer.disconnect()
+            return observer.disconnect().finally(() => worker?.terminate())
           },
         }
       },

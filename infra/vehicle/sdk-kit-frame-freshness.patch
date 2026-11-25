@@ -1,0 +1,205 @@
+--- a/livekit/include/vehicle_edge/encoded_video.h
++++ b/livekit/include/vehicle_edge/encoded_video.h
+@@ -39,6 +39,8 @@
+   std::int64_t timestamp_us = 0;
+   // Unix microseconds at appsink read; zero means unavailable.
+   std::int64_t capture_time_us = 0;
++  // Capture PTS mapped to Linux CLOCK_MONOTONIC. Zero when unavailable.
++  std::int64_t capture_monotonic_us = 0;
+   bool keyframe = false;
+   bool discontinuity = false;
+   std::uint64_t sequence = 0;
+--- a/livekit/encoded_video.cc
++++ b/livekit/encoded_video.cc
+@@ -76,7 +76,7 @@
+   if (frame.camera_index >= kMaxCameraStreams || frame.data.empty() ||
+       frame.data.size() > kMaxEncodedBytes || frame.width == 0 ||
+       frame.width > 4096 || frame.height == 0 || frame.height > 4096 ||
+-      frame.timestamp_us <= 0 || frame.capture_time_us < 0 ||
++      frame.timestamp_us <= 0 || frame.capture_time_us < 0 || frame.capture_monotonic_us < 0 ||
+       !StartCode(frame.data, 0))
+     return false;
+   bool sps = false, pps = false, idr = false, slice = false;
+@@ -243,6 +243,8 @@
+   header["width"] = frame.width;
+   header["height"] = frame.height;
+   header["timestamp_us"] = Json::Int64(frame.timestamp_us);
++  if (frame.capture_monotonic_us > 0)
++    header["capture_monotonic_us"] = Json::Int64(frame.capture_monotonic_us);
+   if (frame.capture_time_us > 0)
+     header["capture_time_us"] = Json::Int64(frame.capture_time_us);
+   header["keyframe"] = frame.keyframe;
+@@ -281,6 +283,8 @@
+       !header["height"].isUInt() || !header["timestamp_us"].isInt64() ||
+       !header["keyframe"].isBool() || !header["sequence"].isUInt64() ||
+       !header["sent_at_ns"].isInt64() || header["sequence"].asUInt64() == 0 ||
++      (header.isMember("capture_monotonic_us") &&
++       (!header["capture_monotonic_us"].isInt64() || header["capture_monotonic_us"].asInt64() <= 0)) ||
+       (header.isMember("capture_time_us") &&
+        (!header["capture_time_us"].isInt64() ||
+         header["capture_time_us"].asInt64() <= 0)) ||
+@@ -297,6 +301,8 @@
+   frame.width = header["width"].asUInt();
+   frame.height = header["height"].asUInt();
+   frame.timestamp_us = header["timestamp_us"].asInt64();
++  if (header.isMember("capture_monotonic_us"))
++    frame.capture_monotonic_us = header["capture_monotonic_us"].asInt64();
+   if (header.isMember("capture_time_us"))
+     frame.capture_time_us = header["capture_time_us"].asInt64();
+   frame.keyframe = header["keyframe"].asBool();
+--- a/livekit/media_backend.cc
++++ b/livekit/media_backend.cc
+@@ -350,17 +350,17 @@
+   return {};
+ }
+ 
+-void StampGeneratedFrame(std::uint8_t *pixels, int width, int view,
+-                         const BenchClockSample &sample,
+-                         vehicle_edge::SteadyTime generated) {
++std::optional<std::array<std::uint8_t, 12>> CaptureStamp(
++    int view, const BenchClockSample &sample, vehicle_edge::SteadyTime captured) {
++  if (captured < sample.received) return std::nullopt;
+   const auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
+-                         generated - sample.received)
++                         captured - sample.received)
+                          .count();
+-  if (!sample.epoch || delta < 0 || delta > 15000 || view < 0) return;
++  if (!sample.epoch || delta < 0 || delta > 15000 || view < 0 || view > 2) return std::nullopt;
+   // Sampling at HTTP receipt yields a lower bound. Allow 1000 ppm oscillator
+   // drift.
+   const auto stamp = sample.elapsed_ms + delta - (delta / 1000 + 1);
+-  if (stamp < 0) return;
++  if (stamp < 0 || stamp >= (1LL << 40)) return std::nullopt;
+   std::array<std::uint8_t, 12> bytes{};
+   bytes[0] = 0xb0 + view;
+   for (int i = 0; i < 4; ++i) bytes[1 + i] = sample.epoch >> (24 - 8 * i);
+@@ -373,6 +373,15 @@
+   }
+   bytes[10] = crc >> 8;
+   bytes[11] = crc;
++  return bytes;
++}
++
++void StampGeneratedFrame(std::uint8_t *pixels, int width, int view,
++                         const BenchClockSample &sample,
++                         vehicle_edge::SteadyTime generated) {
++  const auto stamp = CaptureStamp(view, sample, generated);
++  if (!stamp) return;
++  const auto &bytes = *stamp;
+   for (int bit = 0; bit < 96; ++bit) {
+     const auto value = bytes[bit / 8] & (0x80 >> (bit % 8)) ? 240 : 16;
+     for (int y = 0; y < 16; ++y)
+@@ -442,6 +451,7 @@
+   signal(SIGINT, Stop);
+   const bool encoded = config.camera_source == "h264_annexb";
+   const bool three = config.camera_layout == "three";
++  const bool stamp_camera = encoded && three && !config.camera_capture_config.empty();
+   if (!config.media_enabled ||
+       (!encoded && config.camera_source != "simulation") ||
+       (config.camera_layout != "single" && !three))
+@@ -514,6 +524,7 @@
+         }
+         publish_options.frame_metadata_features.emplace();
+         publish_options.frame_metadata_features->user_timestamp = true;
++        publish_options.frame_metadata_features->user_data = stamp_camera;
+         participant->publishTrack(track, publish_options);
+         if (config.video_publish) {
+           const auto &video = *config.video_publish;
+@@ -550,7 +561,8 @@
+     std::unique_ptr<AuthenticatedClient> clock_client;
+     std::future<BenchClockSample> clock_request;
+     BenchClockSample clock_sample;
+-    if (publish_video && !encoded && three)
++    BenchClockSample previous_clock;
++    if (publish_video && three && (!encoded || stamp_camera))
+       clock_client = std::make_unique<AuthenticatedClient>(config);
+     auto next_state = vehicle_edge::SteadyTime{};
+     auto next_control = vehicle_edge::SteadyTime{};
+@@ -615,6 +627,18 @@
+           next_control = now + std::chrono::milliseconds(50);
+         }
+       }
++      if (clock_request.valid() &&
++          clock_request.wait_for(std::chrono::seconds(0)) ==
++              std::future_status::ready) {
++        previous_clock = clock_sample;
++        clock_sample = clock_request.get();
++      }
++      if (clock_client && !clock_request.valid() && now >= next_clock) {
++        clock_request =
++            std::async(std::launch::async, SampleBenchClock,
++                       std::ref(*clock_client), config.vehicle_id);
++        next_clock = now + std::chrono::seconds(8);
++      }
+       if (publish_video && encoded) {
+         for (std::size_t cam = 0; cam < encoded_sources.size(); ++cam) {
+           const auto requested = encoded_sources[cam]->takeFeedback();
+@@ -710,6 +734,18 @@
+             input_frame.metadata->user_timestamp_us =
+                 static_cast<std::uint64_t>(frame->capture_time_us);
+           }
++          if (stamp_camera && frame->capture_monotonic_us > 0 &&
++              frame->capture_monotonic_us <= clock_us) {
++            const vehicle_edge::SteadyTime captured{
++                std::chrono::microseconds(frame->capture_monotonic_us)};
++            const auto &clock = captured < clock_sample.received &&
++                                        previous_clock.epoch == clock_sample.epoch
++                                    ? previous_clock : clock_sample;
++            if (const auto stamp = CaptureStamp(cam, clock, captured)) {
++              if (!input_frame.metadata) input_frame.metadata.emplace();
++              input_frame.metadata->user_data.emplace(stamp->begin(), stamp->end());
++            }
++          }
+           input_frame.data = std::move(frame->data);
+           if (!encoded_sources[cam]->captureFrame(input_frame)) {
+             waiting_keyframe[cam] = true;
+@@ -718,16 +754,6 @@
+           }
+         }
+       } else if (publish_video && now >= next_frame) {
+-        if (clock_request.valid() &&
+-            clock_request.wait_for(std::chrono::seconds(0)) ==
+-                std::future_status::ready)
+-          clock_sample = clock_request.get();
+-        if (clock_client && !clock_request.valid() && now >= next_clock) {
+-          clock_request =
+-              std::async(std::launch::async, SampleBenchClock,
+-                         std::ref(*clock_client), config.vehicle_id);
+-          next_clock = now + std::chrono::seconds(8);
+-        }
+         ++sequence;
+         for (std::size_t view = 0; view < sources.size(); ++view) {
+           Drain(&update);
+--- a/tests/encoded_video_test.cc
++++ b/tests/encoded_video_test.cc
+@@ -171,6 +171,7 @@
+     auto frame = Frame(1);
+     frame.camera_index = 2;
+     frame.capture_time_us = 1700000000123456;
++    frame.capture_monotonic_us = 12345678;
+     frame.discontinuity = true;
+     Require(SendEncodedFrame(sockets[0], frame), "frame send failed");
+     const auto received = ReceiveEncodedFrame(sockets[1]);
+@@ -179,7 +180,8 @@
+                 received->discontinuity &&
+                 received->width == 640 && received->sequence == 1 &&
+                 received->camera_index == 2 &&
+-                received->capture_time_us == frame.capture_time_us,
++                received->capture_time_us == frame.capture_time_us &&
++                received->capture_monotonic_us == frame.capture_monotonic_us,
+             "IPC metadata or payload corrupted");
+     Require(SendVideoFeedback(sockets[0], {true, 750000, 30, 0b101}),
+             "video feedback send failed");
+@@ -188,10 +190,11 @@
+                 fb->camera_mask == 0b101,
+             "video feedback camera_mask corrupted");
+     frame.capture_time_us = 0;
++    frame.capture_monotonic_us = 0;
+     frame.discontinuity = false;
+     Require(SendEncodedFrame(sockets[0], frame), "legacy frame send failed");
+     const auto legacy = ReceiveEncodedFrame(sockets[1]);
+-    Require(legacy && legacy->capture_time_us == 0 && !legacy->discontinuity,
++    Require(legacy && legacy->capture_time_us == 0 && legacy->capture_monotonic_us == 0 && !legacy->discontinuity,
+             "frame without capture time was not preserved");
+     Require(SendVideoFeedback(sockets[1], {true, 500000, 15}),
+             "feedback send failed");

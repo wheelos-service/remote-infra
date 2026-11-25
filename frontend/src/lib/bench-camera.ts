@@ -10,7 +10,12 @@ export function generatedFrameStamp(pixels: Uint8ClampedArray, camera: number, e
     if (level > 84 && level < 172) return
     bytes[bit >> 3] |= Number(level >= 172) << (7 - bit % 8)
   }
-  if (bytes[0] !== 0xb0 + camera || new DataView(bytes.buffer).getUint32(1) !== epoch) return
+  return decodeCaptureStamp(bytes, camera, epoch)
+}
+
+export function decodeCaptureStamp(bytes: Uint8Array, camera: number, epoch: number): number | undefined {
+  if (bytes.length !== 12 || camera < 0 || camera > 2 || bytes[0] !== 0xb0 + camera) return
+  if (new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(1) !== epoch) return
   let crc = 0xffff
   for (const byte of bytes.subarray(0, 10)) {
     crc ^= byte << 8
