@@ -271,7 +271,9 @@ def prepare(state):
                         f"{state / 'casdoor-logs'}:/logs"],
         },
         "livekit": {
-            "image": "livekit/livekit-server:v1.13.11",
+            "image": "teleop-livekit:master-c5c8ec507d",
+            "build": {"context": str(ROOT / "infra" / "livekit")},
+            "pull_policy": "never",
             "command": ["--config", "/etc/livekit.yaml"],
             "volumes": [volume("livekit.yaml", "/etc/livekit.yaml")],
             "depends_on": ["redis"],
@@ -362,7 +364,7 @@ def build(state):
     if RELEASE_IMAGES is not None:
         raise RuntimeError("this release is already compiled; use start or all")
     # Build from lockfiles inside Linux containers; no host Go/Node toolchain.
-    compose(state, "build", "gateway", "frontend")
+    compose(state, "build", "gateway", "frontend", "livekit")
 
 
 def request(state, path, body=None, admin=True, origin=None, form=False, bearer=None):

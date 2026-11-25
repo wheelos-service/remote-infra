@@ -558,6 +558,20 @@ func TestManagedRuntimePostgresExclusiveInstanceAndLockLoss(t *testing.T) {
 	}
 	managedRuntime = first
 	f.request(t, "GET", "/api/auth/me", "viewer", "", "", 200)
+	// Aborting a browser request while its authorized DB operation is in flight
+	// must leave the same PostgreSQL backend available for the next request.
+	caller, abort := context.WithCancel(context.Background())
+	err = first.withInstance(caller, func(dbCtx context.Context) error {
+		abort()
+		if err := first.instance.PingContext(dbCtx); err != nil {
+			t.Fatalf("caller cancellation reached the lifetime-lock session: %v", err)
+		}
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("aborted authorization request: %v", err)
+	}
+	f.request(t, "GET", "/api/auth/me", "viewer", "", "", 200)
 	var pid int
 	if err := first.instance.QueryRowContext(context.Background(), `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
 		t.Fatal(err)

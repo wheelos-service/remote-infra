@@ -4,6 +4,12 @@ Use this instead of the prebuilt package in [LAN setup](setup.md). You need a
 checkout of tag `1.1.0`, Git, Python 3, Docker Engine, and Docker Compose v2.
 Your OS user must be able to run Docker. Docker compiles the applications;
 host Go and Node.js installations are unnecessary. Builds require internet access.
+The LiveKit image uses upstream master commit `c5c8ec507dfec495e89eb64a3370645473d4f6b7`.
+The image build clones LiveKit, checks out this revision, runs `./bootstrap.sh`
+and `mage`, and tests the camera packet-trailer fix. Source deployments and AMD64
+bundles use the same Dockerfile. The server reports version 1.13.11 at this
+commit. Use the image's `org.opencontainers.image.revision` label to verify the build.
+[Upstream source build instructions](https://github.com/livekit/livekit/blob/c5c8ec507dfec495e89eb64a3370645473d4f6b7/README.md#building-from-source)
 
 ## Deploy on the LAN
 

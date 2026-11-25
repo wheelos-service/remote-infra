@@ -85,10 +85,10 @@ class DeploymentTest(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, 'release image mismatch'):
                         deploy.load_release_images(path)
 
-    def test_source_build_only_builds_applications_with_generated_compose(self):
+    def test_source_build_includes_source_built_livekit_with_generated_compose(self):
         with patch.object(deploy, 'compose') as compose, patch.object(deploy, 'RELEASE_IMAGES', None):
             deploy.build(Path('/private/state'))
-            compose.assert_called_once_with(Path('/private/state'), 'build', 'gateway', 'frontend')
+            compose.assert_called_once_with(Path('/private/state'), 'build', 'gateway', 'frontend', 'livekit')
 
     def test_source_and_release_share_prepare_start_verify_without_release_build(self):
         for prebuilt in (False, True):

@@ -188,6 +188,10 @@ func Run() {
 			return
 		}
 		if managedRuntime != nil {
+			if err := managedRuntime.checkInstance(r.Context()); err != nil {
+				http.Error(w, "managed authorization instance unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			if _, err := managedRuntime.store.Version(r.Context()); err != nil {
 				http.Error(w, "authorization database unavailable", http.StatusServiceUnavailable)
 				return
