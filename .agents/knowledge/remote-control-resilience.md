@@ -153,9 +153,13 @@ Resolved across `apollo-base` (`v1`), `data/sdk-kit` (`v2`), and `livekit-infra`
      - **Video pause (`mediaPauseGraceMs = 5000`)**: When `videoReady` drops
        while `ControlSessionClient.state === 'ready'`, `DrivingControlPanel`
        immediately disables driving inputs and applies 20% service brake hold
-       only when already in `REMOTE` and not emergency-braking (preserving
-       `brake === 100` on `Space` and neutral `RESET` in `AUTO`/`MANUAL`
-       standby). Emergency `Space` and the red brake button remain enabled
+       after the required standby ACK when an explicit Guardian `REMOTE` report
+       from this session is younger than its negotiated `feedbackTimeoutMs`
+       (browser monotonic receipt time). Omitted status cannot renew evidence.
+       A non-REMOTE Guardian state or a reported chassis mode other than
+       `COMPLETE_REMOTE_DRIVE` invalidates it until a consistent explicit
+       `REMOTE` report arrives. An active emergency stop takes priority.
+       Otherwise missing or expired evidence selects neutral standby. Emergency `Space` and the red brake button remain enabled
        whenever `controller.state === 'ready'`. `useDrivingCameras` preserves
        existing `<video>` tracks across `RoomEvent.Reconnecting` (only clearing
        tracks/remounting on actual `Room` rebuild). Current read-only viewing

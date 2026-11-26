@@ -809,7 +809,7 @@ test('v2 canonical signing rejects float and conflicting pedal commands', () => 
   assert.throws(() => controlProtocol.controlSignBytes({ ...payload, command: { ...payload.command, brake: 1 } }))
 })
 
-function controllerFixture(renewAfter = 10000, releaseFailures = 0) {
+function controllerFixture(renewAfter = 10000, releaseFailures = 0, timingPolicy) {
   let instanceId
   let sequence = 0
   const calls = [], publishedCommands = []
@@ -832,7 +832,7 @@ function controllerFixture(renewAfter = 10000, releaseFailures = 0) {
   const request = async (url, options) => {
     if (url.endsWith('/acquire')) {
       instanceId = JSON.parse(options.body).client_instance_id
-      return Response.json({ session: { ...session, client_instance_id: instanceId }, token: 'test-token', renew_after_ms: renewAfter })
+      return Response.json({ session: { ...session, client_instance_id: instanceId }, token: 'test-token', renew_after_ms: renewAfter, timing_policy: timingPolicy })
     }
     if (url.endsWith('/release')) {
       calls.push('release')
@@ -1788,6 +1788,96 @@ test('controller retries transient renewal failures before lease deadline and lo
   } finally { await controller.release(); context.mock.timers.reset() }
 })
 
+test('video pause selects the command from current session arbitration and preserves emergency stop', async context => {
+  let now = 1000
+  context.mock.method(performance, 'now', () => now)
+  const f = controllerFixture(10000, 0, { feedback_timeout_ms: 1600 })
+  const c = f.controller
+  const hold = { steering: -14, throttle: 0, brake: 20, direction: 0 }
+  const standby = controlProtocol.neutralCommand
+  const emergency = { ...standby, brake: 100 }
+  function expectPause(outcome, command) {
+    assert.deepEqual(c.selectVideoPauseCommand(), { outcome, command })
+  }
+  try {
+    c.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE', 14)
+    await c.acquire()
+    f.accept()
+    expectPause('standby', standby)
+    c.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE', 14)
+    expectPause('remote_brake_20', hold)
+    now += 1599
+    c.updateArbitration(undefined, 'COMPLETE_REMOTE_DRIVE', 6)
+    expectPause('remote_brake_20', { ...hold, steering: -6 })
+    now++
+    c.updateArbitration(undefined, 'COMPLETE_REMOTE_DRIVE', 6)
+    expectPause('standby', standby)
+    for (const [state, mode] of [[undefined, 'COMPLETE_MANUAL'], ['REMOTE', 'COMPLETE_AUTO_DRIVE'], ['AUTO', undefined]]) {
+      c.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE', 14)
+      expectPause('remote_brake_20', hold)
+      c.updateArbitration(state, mode, 14)
+      expectPause('standby', standby)
+      c.updateArbitration(undefined, 'COMPLETE_REMOTE_DRIVE', 14)
+      expectPause('standby', standby)
+    }
+    c.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE', 14)
+    c.setCommand(emergency)
+    expectPause('emergency_stop', emergency)
+    c.updateArbitration('MANUAL')
+    expectPause('emergency_stop', emergency)
+  } finally { await c.release() }
+})
+
+test('a signature completed during RTC reconnect consumes its sequence without dispatch or ACK debt', async context => {
+  const f = controllerFixture()
+  const started = deferred()
+  const finish = deferred()
+  const sign = crypto.subtle.sign.bind(crypto.subtle)
+  context.mock.method(crypto.subtle, 'sign', async (...args) => {
+    const signature = await sign(...args)
+    started.resolve()
+    await finish.promise
+    return signature
+  })
+  try {
+    await f.controller.acquire()
+    f.accept()
+    const sending = f.controller.tick()
+    await started.promise
+    f.controller.setRtcReconnecting(true)
+    finish.resolve()
+    await sending
+    f.accept()
+    assert.equal(f.publishedCommands.length, 0)
+    assert.equal(f.controller.diagnostics.at(-1).pending_commands, 0)
+    f.controller.setRtcReconnecting(false)
+    await f.controller.tick()
+    assert.deepEqual(f.publishedCommands, [controlProtocol.neutralCommand])
+    assert.equal(f.feedback().accepted_sequence, 2)
+    f.accept()
+    assert.equal(f.controller.state, 'ready')
+  } finally { await f.controller.release() }
+})
+
+for (const first of ['tick', 'reconnected']) {
+  test(`RTC recovery at the deadline locks when ${first} runs first`, async context => {
+    let now = 1000
+    context.mock.method(performance, 'now', () => now)
+    const f = controllerFixture()
+    try {
+      await f.controller.acquire()
+      f.accept()
+      f.controller.setRtcReconnecting(true)
+      now += f.controller.timingPolicy.rtcReconnectGraceMs
+      if (first === 'tick') await f.controller.tick()
+      f.controller.setRtcReconnecting(false)
+      assert.equal(f.controller.state, 'locked')
+      await f.controller.tick()
+      assert.match(f.controller.error, /RTC reconnection timed out/)
+    } finally { await f.controller.release() }
+  })
+}
+
 test('rtcReconnecting holds control session across transient <1.2s ICE reconnect and locks on timeout', async context => {
   let now = 1000
   context.mock.method(performance, 'now', () => now)
@@ -1806,7 +1896,7 @@ test('rtcReconnecting holds control session across transient <1.2s ICE reconnect
     now += 900
     await f.controller.tick()
     assert.equal(f.controller.state, 'ready')
-    f.accept({ ...f.feedback(), status: 'PAUSED', reason: 'command_paused', command: null })
+    f.accept({ ...f.feedback(), accepted_sequence: 1, status: 'PAUSED', reason: 'command_paused', command: null })
     assert.equal(f.controller.state, 'ready')
     f.controller.setRtcReconnecting(false)
     f.accept()

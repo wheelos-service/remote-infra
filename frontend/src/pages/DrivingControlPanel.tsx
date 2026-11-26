@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { DataPacket_Kind, Room, RoomEvent } from 'livekit-client'
 import { teleopConfig } from '../lib/teleop-config'
-import { ControlSessionClient, isControlReady } from '../lib/control-session-client'
+import { ControlSessionClient, isControlReady, steeringAlignedHold } from '../lib/control-session-client'
 import { applyControlSafetyStrategy, type ControlSafetyEvent } from '../lib/control-safety'
 import { CONTROL_TIMING } from '../lib/control-timing'
 import type { ControlCommand } from '../lib/control-protocol'
@@ -46,8 +46,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
   const [vehicleArbitration, setVehicleArbitration] = useState<{
     state?: string; safetyOverride?: string; errorCode?: string; reason?: string; drivingMode?: string; speedMps?: number; steeringPct?: number
   }>()
-  const vehicleArbitrationRef = useRef(vehicleArbitration)
-  vehicleArbitrationRef.current = vehicleArbitration
   const [inputState, setInputState] = useState({ gamepadEnabled: false, message: '输入未启用' })
   const [pad, setPad] = useState<GamepadView>()
   const [mapping, setMapping] = useState<GamepadMapping>({ ...v2GamepadMapping })
@@ -235,24 +233,12 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
     // (only when already REMOTE and not emergency-braking) up to server contract
     // mediaPauseGraceMs while video recovers, before escalating to auto-release.
     if (!mediaPauseTimer.current) {
-      diagnostics?.record('video', 'media_pause_hold', vehicleArbitrationRef.current?.state === 'REMOTE' ? 'remote_brake_20' : 'standby')
+      const { outcome, command } = active.selectVideoPauseCommand()
+      diagnostics?.record('video', 'media_pause_hold', outcome)
       setMediaPaused(true)
-      if (!active.isEmergencyStop) {
-        if (vehicleArbitrationRef.current?.state === 'REMOTE') {
-          const steerPct = vehicleArbitrationRef.current?.steeringPct
-          const matchedSteer = typeof steerPct === 'number' && Number.isFinite(steerPct)
-            ? Math.round(Math.max(-100, Math.min(100, -steerPct)))
-            : 0
-          const holdCommand: ControlCommand = { steering: matchedSteer, throttle: 0, brake: 20, direction: 0 }
-          active.setVideoHold(holdCommand)
-          onIntent(vehicleId, holdCommand)
-          void active.tick()
-        } else {
-          const neutral: ControlCommand = { steering: 0, throttle: 0, brake: 0, direction: 0 }
-          active.setCommand(neutral)
-          onIntent(vehicleId, neutral)
-          void active.tick()
-        }
+      if (outcome !== 'emergency_stop') {
+        onIntent(vehicleId, command)
+        void active.tick()
       }
       mediaPauseTimer.current = setTimeout(() => {
         mediaPauseTimer.current = undefined
@@ -302,7 +288,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
         return
       }
       if (topic === 'vehicle.state' && participant?.identity === `vehicle-${vehicleId}` &&
-          kind === DataPacket_Kind.RELIABLE && body.length <= 16384 && mounted.current) {
+          kind === DataPacket_Kind.RELIABLE && body.length <= 16384 && mounted.current && controller.current === next) {
         try {
           const parsed = JSON.parse(new TextDecoder().decode(body)) as {
             type?: string
@@ -313,6 +299,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
           if (parsed?.type !== 'vehicle.state') return
           const status = parsed.sources?.vehicle_status?.message
           const chassis = parsed.telemetry?.chassis?.message
+          next.updateArbitration(status?.state, chassis?.driving_mode, chassis?.steering_percentage)
           const preserveStatus = Boolean(parsed.sources_omitted && !status)
           if (parsed.sources_omitted) diagnostics?.record('feedback', 'vehicle_state_sources_omitted', status ? 'kept_status' : 'omitted_all')
           setVehicleArbitration(previous => ({
@@ -365,11 +352,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
   const requestTakeover = () => {
     const active = controller.current
     if (!active || !isControlReady(active.state, mediaReady.current)) return
-    const matchedSteer = typeof vehicleArbitration?.steeringPct === 'number' &&
-        Number.isFinite(vehicleArbitration.steeringPct)
-      ? Math.round(Math.max(-100, Math.min(100, -vehicleArbitration.steeringPct)))
-      : 0
-    const command: ControlCommand = { steering: matchedSteer, throttle: 0, brake: 20, direction: 0 }
+    const command = steeringAlignedHold(vehicleArbitration?.steeringPct)
     active.setCommand(command)
     onIntent(vehicleId, command)
     void active.tick()
@@ -420,7 +403,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
       <p className="mt-2">{videoReady
         ? '三路画面正在出帧'
         : mediaPaused
-          ? '画面短暂中断：已保持温和制动（恢复后需手动重新启用手柄）'
+          ? '画面短暂中断：驾驶输入已停用（恢复后需手动重新启用手柄）'
           : '三路画面未就绪：禁止申请或恢复输出'}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <select aria-label="控制手柄" className="rounded border border-amber-800 bg-slate-950 p-2"

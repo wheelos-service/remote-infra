@@ -76,6 +76,12 @@ class ControlAPIError extends Error {
   }
 }
 
+export function steeringAlignedHold(steeringPct?: number): ControlCommand {
+  const steering = typeof steeringPct === 'number' && Number.isFinite(steeringPct)
+    ? Math.round(Math.max(-100, Math.min(100, -steeringPct))) : 0
+  return { steering, throttle: 0, brake: 20, direction: 0 }
+}
+
 export class ControlSessionClient {
   state: ControllerState = 'idle'
   feedback?: ControlFeedback
@@ -107,6 +113,8 @@ export class ControlSessionClient {
   private renewTimer?: ReturnType<typeof setTimeout>
   private renewalSeq = 0
   private clockOffsetMs = 0
+  private remoteReportedAt?: number
+  private steeringPct?: number
   private mediaReady = true
   private rtcReconnecting = false
   private rtcReconnectDeadline = 0
@@ -222,6 +230,8 @@ export class ControlSessionClient {
   async acquire(): Promise<void> {
     if (this.state !== 'idle') throw new Error('Controller is already in use')
     if (!this.mediaReady || this.verifyVideo && !this.verifyVideo()) throw new Error('Three camera feeds are not ready')
+    this.remoteReportedAt = undefined
+    this.steeringPct = undefined
     this.acquiring = true
     this.error = ''
     this.state = 'acquiring'
@@ -364,7 +374,7 @@ export class ControlSessionClient {
       }
       return
     }
-    if (!this.rtcReconnecting) return
+    if (!this.rtcReconnecting || !this.checkDeadlines(now)) return
     this.rtcReconnecting = false
     this.rtcReconnectDeadline = 0
     for (const pending of this.pendingCommands) pending.dispatchedAt = now
@@ -378,10 +388,27 @@ export class ControlSessionClient {
 
   private videoHoldRevision = -1
 
-  setVideoHold(command: ControlCommand): void {
-    if (command.throttle !== 0 || command.direction !== 0 || command.brake !== 20) throw new Error('Invalid pause hold')
-    this.setCommand(command)
-    this.videoHoldRevision = this.intentRevision
+  updateArbitration(state?: string, drivingMode?: string, steeringPct?: number): void {
+    this.steeringPct = steeringPct
+    if ((drivingMode != null && drivingMode !== 'COMPLETE_REMOTE_DRIVE') ||
+        (state != null && state !== 'REMOTE')) {
+      this.remoteReportedAt = undefined
+    } else if (state === 'REMOTE') {
+      this.remoteReportedAt = performance.now()
+    }
+  }
+
+  selectVideoPauseCommand() {
+    if (this.isEmergencyStop) return { outcome: 'emergency_stop', command: { ...this.command } } as const
+    if (this.neutralAcknowledged && this.remoteReportedAt !== undefined &&
+        performance.now() - this.remoteReportedAt < this.timing.feedbackTimeoutMs) {
+      const command = steeringAlignedHold(this.steeringPct)
+      this.setCommand(command)
+      this.videoHoldRevision = this.intentRevision
+      return { outcome: 'remote_brake_20', command } as const
+    }
+    this.setCommand(neutralCommand)
+    return { outcome: 'standby', command: { ...neutralCommand } } as const
   }
 
   setCommand(command: ControlCommand): void {
@@ -493,7 +520,7 @@ export class ControlSessionClient {
         sequence, timestamp_ms: Math.max(1, Math.round(Date.now() + this.clockOffsetMs)), command: signedCommand,
       })
       this.record('sign', sequence, performance.now() - now)
-      if (!this.canContinue() || this.state !== 'ready' || !this.checkDeadlines(performance.now())) return
+      if (!this.canContinue() || this.state !== 'ready' || !this.checkDeadlines(performance.now()) || this.rtcReconnecting) return
       if (intentRevision !== this.intentRevision) {
         this.record('superseded', sequence)
         return
