@@ -40,9 +40,10 @@ The LAN stack runs AdGuard Home; add rewrites for both hostnames to the LAN IP
 and configure router DHCP to distribute that DNS server. Trust the generated
 CA certificate on each LAN client, then open
 `https://console.example.com` from the host or another LAN computer.
-Sign in with the administrator created during setup. The fleet starts empty;
-vehicle software installation is handled separately. Managed native driving
-is disabled until handover support is complete.
+Sign in with the administrator created during setup. The fleet starts empty.
+The managed Gateway uses active vehicle enrollment for native control.
+An operator with control permission can request a session when the vehicle's
+native-v3 receiver is online and the dashboard verifies all three front cameras.
 
 The [user documentation index](docs/readme.md) covers source deployment,
 operations, administration, vehicle registration, and release limitations.

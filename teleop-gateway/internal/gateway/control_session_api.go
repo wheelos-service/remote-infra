@@ -69,7 +69,7 @@ func handleAcquireControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	native := request.ContractVersion == 3 && !simulationControlEnabled(vehicleID)
-	if native && !nativeBenchEnabled(vehicleID) || !native && claims.managed != nil && !simulationControlEnabled(vehicleID) {
+	if native && !nativeControlEnabled(claims, vehicleID) || !native && claims.managed != nil && !simulationControlEnabled(vehicleID) {
 		writeDiagnosticError(w, r, "managed native control unavailable: handover support required", "MANAGED_NATIVE_HANDOVER_REQUIRED", http.StatusServiceUnavailable)
 		return
 	}
@@ -145,7 +145,7 @@ func handleRenewControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "managed renewal requires v2", http.StatusForbidden)
 		return
 	}
-	if current.ContractVersion == 3 && !nativeBenchEnabled(current.VehicleID) {
+	if current.ContractVersion == 3 && !nativeControlEnabled(claims, current.VehicleID) {
 		writeControlSessionError(w, errReceiverUnavailable)
 		return
 	}

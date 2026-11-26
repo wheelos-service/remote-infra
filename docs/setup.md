@@ -108,8 +108,9 @@ With split DNS, the host and LAN clients use the same domain URLs as public clie
 - Login service: `https://login.example.com`
 
 Read `~/.local/state/teleop/administrator.txt` on the host for the administrator
-login. The fleet starts empty; vehicle setup is separate, and managed native
-driving remains disabled pending handover support.
+login. The fleet starts empty. Managed Gateways with automatic native-control
+admission use the current enrollment registry, including vehicles added later.
+The original 1.1.3 image used a per-vehicle list. [Release capabilities](compatibility.md)
 
 To restart or check the deployment, use the same OS user:
 
@@ -124,3 +125,36 @@ for loopback-only testing. LAN deployments require `--lan-ip`, `--domain`, and
 `--lan-ip`.
 See [Operations](operations.md) for logs, backups, and troubleshooting, and
 [Administration](auth-management.md) to invite people and assign access.
+
+## Update an existing deployment
+
+For a standard registry installation, extract the new release's Compose kit into a
+fresh directory. Back up the existing state and volumes, then run the new kit's
+`./install.sh --state /absolute/path/to/existing-state --non-interactive` as the
+installation owner. Run `./install.sh --verify` afterward. The kit's `UPGRADE.md`
+covers recovery and backups.
+
+For an image update that preserves a customized generated Compose configuration,
+including external HTTPS ports and NAT mappings, install the [updater](../infra/scripts/teleop-update)
+once from a source checkout with `sudo install -m 0755 infra/scripts/teleop-update /usr/local/bin/teleop-update`.
+Run it as the deployment owner on the Docker host:
+
+```bash
+teleop-update 1.1.3
+```
+
+The updater discovers the state directory from the Gateway. Supply `--state PATH`
+when the host has multiple Teleop deployments. Use `--check` to pull and verify
+the target images and validate the proposed configuration while services are running.
+Updates briefly stop the selected project and save its previous Compose file, private
+state, and volumes in a timestamped directory beside the state directory, under
+`<state-name>-backups/`. A successful update verifies the running images, Gateway
+readiness, and login service discovery. Repeating the command checks an installed release.
+On the public site, a repeat update to 1.1.3 verifies and preserves the recorded
+Gateway patch. Updating to a different version selects that release's published
+Gateway image.
+
+Use this updater for subsequent image updates and the saved `compose.json` for
+ordinary Compose operations. Running an older source or offline launcher can
+regenerate the configuration with its own image versions. If startup fails, the
+updater restarts the previous configuration and keeps the backup for data recovery.

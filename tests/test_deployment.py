@@ -38,6 +38,7 @@ class DeploymentTest(unittest.TestCase):
             values = deploy.prepare(state)
             services = json.loads((state / 'compose.json').read_text())['services']
             self.assertEqual(set(services), set(images) - {'adguardhome'})
+            self.assertNotIn('NATIVE_BENCH_VEHICLES_JSON', services['gateway']['environment'])
             for name, service in services.items():
                 self.assertEqual(service['image'], images[name])
                 self.assertEqual(service['platform'], 'linux/amd64')
@@ -47,7 +48,10 @@ class DeploymentTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'already compiled'):
                 deploy.build(state)
             compose.assert_not_called()
+            (state / 'native-bench-vehicles.json').write_text('["previously-selected"]')
             self.assertEqual(deploy.prepare(state), values)
+            upgraded = json.loads((state / 'compose.json').read_text())['services']['gateway']
+            self.assertNotIn('NATIVE_BENCH_VEHICLES_JSON', upgraded['environment'])
 
     def test_release_manifest_rejects_missing_services_wrong_architecture_and_interpolation(self):
         images = {name: f'teleop-{name}:test' for name in

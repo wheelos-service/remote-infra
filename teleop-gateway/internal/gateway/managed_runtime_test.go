@@ -1249,6 +1249,59 @@ func TestManagedRoomDrainQueriesLiveKitWithoutTerminatingParticipants(t *testing
 	}
 }
 
+func TestManagedNativeControlFollowsEnrollment(t *testing.T) {
+	f := newManagedFixture(t)
+	ctx := context.Background()
+	t.Setenv("NATIVE_BENCH_VEHICLES_JSON", "")
+	t.Setenv("SIMULATED_CONTROL_VEHICLES_JSON", "[]")
+	clock := "/control/bench-clock"
+	f.request(t, "GET", "/api/vehicles/car-one"+clock, "operator", "", "", 200)
+	f.request(t, "GET", "/api/vehicles/car-one"+clock, "device-one", "", "", 200)
+	f.request(t, "GET", "/api/vehicles/car-one"+clock, "viewer", "", "", 403)
+	f.request(t, "GET", "/api/vehicles/car-one"+clock, "device-other", "", "", 403)
+	f.request(t, "GET", "/api/vehicles/car-other"+clock, "operator", "", "", 403)
+	f.request(t, "GET", "/api/vehicles/car-two"+clock, "device-two", "", "", 200)
+	f.request(t, "GET", "/api/vehicles/car-two"+clock, "operator", "", "", 403) // selected scope covers only car-one
+	t.Setenv("SIMULATED_CONTROL_VEHICLES_JSON", `["car-two"]`)
+	f.request(t, "GET", "/api/vehicles/car-two"+clock, "device-two", "", "", 403)
+
+	// An image-only upgrade can retain the old site's list in the Gateway environment.
+	t.Setenv("NATIVE_BENCH_VEHICLES_JSON", `["car-one"]`)
+	const id = "car-new"
+	const path = "/api/vehicles/" + id
+	if _, err := f.store.AssignManagedRole(ctx, authorization.Assignment{
+		ActorUserID: f.adminID, UserID: f.operatorID, OrganizationID: f.orgID,
+		Role: authorization.RoleRemoteOperator, Scope: authorization.ScopeAll,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.request(t, "GET", path+clock, "operator", "", "", 403)
+	if _, err := f.store.RegisterVehicle(ctx, f.adminID, f.orgID, managedTestIssuer, id, "New car", "device-new"); err != nil {
+		t.Fatal(err)
+	}
+	f.request(t, "GET", path+clock, "device-new", "", "", 200)
+	f.request(t, "GET", path+clock, "operator", "", "", 200)
+	f.request(t, "GET", "/api/vehicles/car-other"+clock, "operator", "", "", 403)
+	body := `{"protocol_version":2,"contract_version":3,"client_instance_id":"browser-new","public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`
+	f.request(t, "POST", path+"/control/acquire", "operator", "", body, 503)
+	const instance = "1123456789abcdef0123456789abcdef"
+	receiver := path + "/control/context/native-v3-percent/" + instance
+	f.request(t, "GET", receiver, "device-one", "", "", 403)
+	f.request(t, "GET", receiver, "device-new", "", "", 200)
+	w := f.request(t, "POST", path+"/control/acquire", "operator", "", body, 200)
+	var acquired controlSessionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &acquired); err != nil {
+		t.Fatal(err)
+	}
+	if acquired.Session.ContractVersion != 3 || acquired.Session.ReceiverInstanceID != instance {
+		t.Fatal("newly enrolled vehicle did not acquire an instance-bound native session")
+	}
+	session := "/api/control/" + acquired.Session.SessionID
+	f.request(t, "POST", session+"/renew", "operator", "", "", 200)
+	f.request(t, "POST", session+"/release", "operator", "", "", 202)
+	f.request(t, "POST", path+"/control/acquire", "operator", "", body, 409)
+}
+
 func TestManagedNativeAcquisitionRejectsBeforeReservingAuthority(t *testing.T) {
 	for _, nativeACK := range []string{"false", "true"} {
 		t.Run("native_ack_"+nativeACK, func(t *testing.T) {

@@ -36,8 +36,15 @@ var nativeInstance = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
 func receiverKey(id string) string { return "control-receiver:" + id }
 
-func nativeBenchEnabled(id string) bool {
-	return listedControlVehicle("NATIVE_BENCH_VEHICLES_JSON", id) && !simulationControlEnabled(id)
+func nativeControlEnabled(claims *UserClaims, vehicleID string) bool {
+	if simulationControlEnabled(vehicleID) {
+		return false
+	}
+	if managed := claims.managed; managed != nil {
+		// Managed claims are resolved from active enrollment and grants on every request.
+		return managed.deviceID == vehicleID || managed.permissions[vehicleID][ControlPermission]
+	}
+	return listedControlVehicle("NATIVE_BENCH_VEHICLES_JSON", vehicleID)
 }
 
 type ControlTimingPolicy struct {

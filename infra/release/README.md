@@ -36,7 +36,9 @@ Reserve the host's LAN IP. The same domain URLs work in public mode; public DNS
 points them to the public IP and Caddy uses Let's Encrypt. Keep the state
 directory private and back it up with Docker volumes. No vehicle credentials
 or fleet settings are included.
-Managed native driving remains gated pending the separate vehicle handover work.
+The managed Gateway automatically admits active enrollments for native control
+within each operator's scope. The native-v3 receiver and three front camera
+feeds supply the readiness signals used by the driving dashboard.
 
 Later commands, from this directory and the same OS user:
   ./teleop start

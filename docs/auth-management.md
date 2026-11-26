@@ -37,9 +37,9 @@ its vehicle scope. Roles are separate capabilities, not an increasing hierarchy.
 
 For an operator, `none` grants no driving access, `selected` grants the chosen
 vehicles, and `all` covers the organization's vehicles. Scope does not restrict
-the baseline observation access of an active member. Viewer `all` does not
-grant driving. Managed native driving remains disabled in this release;
-see [release capabilities](compatibility.md).
+the baseline observation access of an active member. A remote operator with
+`all` control scope automatically covers future active vehicles in that
+organization. [Release capabilities](compatibility.md)
 
 ## Change or remove access
 
