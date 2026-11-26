@@ -1,4 +1,4 @@
-Teleop release for Ubuntu 22.04 x86_64
+Teleop release for Ubuntu 24.04 x86_64
 
 Requires Docker Engine usable by your user. No source checkout, Python, Go,
 Node, Compose installation, public domain, or build step is needed on the

@@ -12,7 +12,6 @@ import ipaddress
 import json
 import os
 from pathlib import Path
-import socket
 import subprocess
 import tempfile
 import uuid
@@ -23,7 +22,7 @@ deploy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(deploy)
 
 CLIENT = r'''
-import json, pathlib, ssl, sys, urllib.error, urllib.request
+import json, pathlib, socket, ssl, sys, urllib.error, urllib.request
 ns = {'__name__': 'lan_client', '__file__': '/repo/infra/scripts/deploy.py'}
 exec(compile(pathlib.Path(ns['__file__']).read_text(), ns['__file__'], 'exec'), ns)
 data = json.load(sys.stdin)

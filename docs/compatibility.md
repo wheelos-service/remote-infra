@@ -3,7 +3,7 @@
 The supported deployment is one Docker Compose host with the React frontend,
 Go Gateway, Casdoor, PostgreSQL, Redis, LiveKit, and Caddy. The AMD64 bundle
 includes compiled applications and runtime dependencies for an x86_64 Linux
-Docker host; the release was built and exercised on Ubuntu 22.04.
+Docker host. The release was built and tested on Ubuntu 24.04.
 
 ## Supported workflow
 
