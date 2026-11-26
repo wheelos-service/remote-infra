@@ -49,6 +49,8 @@ class ReleaseTest(unittest.TestCase):
                 self.assertEqual(digest, hashlib.sha256(contents[filename]).hexdigest())
             builds = [call.args[0] for call in run.call_args_list if call.args[0][1] == 'build']
             self.assertEqual(len(builds), 4)
+            run.assert_any_call(['docker', 'run', '--rm', '--network', 'none', '--user', '65534:65534',
+                                 manifest['setup_image'], '--help'], stdout=subprocess.DEVNULL)
             self.assertIn(str(ROOT / 'infra/livekit'), [build[-1] for build in builds])
             setup_context = Path(builds[-1][-1])
             self.assertEqual(setup_context.name, 'setup')

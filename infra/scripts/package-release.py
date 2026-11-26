@@ -74,6 +74,9 @@ def main():
         run(['docker', 'build', '--platform', platform, '-t', setup_image, str(context)])
         if inspect(setup_image)['Architecture'] != 'amd64':
             raise RuntimeError('setup image has the wrong architecture')
+        # The launcher runs as the installing user, which can be any non-root UID.
+        run(['docker', 'run', '--rm', '--network', 'none', '--user', '65534:65534',
+             setup_image, '--help'], stdout=subprocess.DEVNULL)
         bundle = temp / name
         bundle.mkdir()
         setup_image_id = inspect(setup_image)['Id']
