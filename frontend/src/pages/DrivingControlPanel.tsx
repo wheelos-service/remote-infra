@@ -18,9 +18,10 @@ function withinBudget(promise: Promise<void>, message: string): Promise<void> {
   ])
 }
 
-export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo, receiverReady = true, onBusyChange, onIntent, diagnostics }: {
+export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo, receiverReady = true, requestBlocker, onBusyChange, onIntent, diagnostics }: {
   vehicleId: string
   bearer: string
+  requestBlocker?: string
   receiverReady?: boolean
   verifyVideo?: () => boolean
   videoReady: boolean
@@ -381,10 +382,11 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
     <section className="rounded-xl border border-amber-700 bg-amber-950/20 p-3 text-xs text-amber-100">
       <p className="font-semibold">远程驾驶控制</p>
       <p className="mt-1">目标：{vehicleId || '未选择'} · 状态：{state}</p>
+      {!busy && requestBlocker && <p role="status">{requestBlocker}</p>}
       {verifyVideo && <p>{receiverReady ? '车端 native-v3 接收器在线' : '等待车端 native-v3 接收器心跳'}
         {state === 'ready' && !controller.current?.neutralAcknowledged && ' · 正在验证中立指令回执'}</p>}
       <div className="mt-3 flex flex-wrap gap-2">
-        <button type="button" disabled={!vehicleId || busy || !videoReady || !receiverReady} onClick={() => void acquire()} className={button}>申请控制权</button>
+        <button type="button" disabled={!vehicleId || busy || !videoReady || !receiverReady || Boolean(requestBlocker)} onClick={() => void acquire()} className={button}>申请控制权</button>
         <button type="button" disabled={!ready || vehicleArbitration?.state === 'REMOTE'} onClick={requestTakeover} className={button}>
           {vehicleArbitration?.state === 'REMOTE' ? '车端已接管 REMOTE' : '请求接管（制动保持）'}
         </button>

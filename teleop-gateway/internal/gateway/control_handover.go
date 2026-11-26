@@ -98,7 +98,7 @@ if not raw then
   return 0
 end
 local session = cjson.decode(raw)
-if session.session_id ~= ARGV[2] or (session.receiver_instance_id or '') ~= ARGV[4] then return 0 end
+if session.session_id ~= ARGV[2] then return 0 end
 if ARGV[4] ~= '' and redis.call('GET',KEYS[3]) ~= ARGV[4] then return 0 end
 -- Explicit release or lease expiry must precede physical acknowledgement.
 local active = redis.call('GET', KEYS[2])
@@ -107,13 +107,25 @@ local operatorKey = redis.call('HGET', KEYS[1], 'operator_key')
 if not operatorKey or redis.call('GET', operatorKey) ~= ARGV[2] then
   return redis.error_reply('operator handover fence mismatch')
 end
+-- A restarted native receiver may finish an already revoked session only
+-- after independently fencing that same revision and observing physical exit.
+if (session.receiver_instance_id or '') ~= ARGV[4] then
+  if session.contract_version ~= 3 or ARGV[4] == '' or
+     redis.call('HGET', KEYS[1], 'state') ~= 'PENDING' or
+     redis.call('HGET', KEYS[1], 'edge_revocation_applied') ~= '1' then return 0 end
+  if ARGV[3] == '1' then
+    if redis.call('HGET', KEYS[1], 'recovery_receiver') ~= ARGV[4] then return 0 end
+  else
+    redis.call('HSET', KEYS[1], 'recovery_receiver', ARGV[4])
+  end
+end
 redis.call('HSET', KEYS[1], 'edge_revocation_applied', '1')
 if ARGV[3] ~= '1' then
   redis.call('HSET', KEYS[1], 'state', 'PENDING')
   return 1
 end
 redis.call('DEL', operatorKey)
-redis.call('HDEL', KEYS[1], 'session', 'operator_key')
+redis.call('HDEL', KEYS[1], 'session', 'operator_key', 'recovery_receiver')
 redis.call('HSET', KEYS[1], 'state', 'CONFIRMED', 'confirmed_session', ARGV[2], 'confirmed_receiver',ARGV[4])
 return 1
 `)

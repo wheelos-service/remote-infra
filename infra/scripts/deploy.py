@@ -271,7 +271,7 @@ def prepare(state):
                         f"{state / 'casdoor-logs'}:/logs"],
         },
         "livekit": {
-            "image": "teleop-livekit:master-c5c8ec507d",
+            "image": "teleop-livekit:master-4b9f2f75ed",
             "build": {"context": str(ROOT / "infra" / "livekit")},
             "pull_policy": "never",
             "command": ["--config", "/etc/livekit.yaml"],

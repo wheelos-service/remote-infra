@@ -9,6 +9,7 @@ backend without a domain name.
 | [LAN setup](setup.md) | Load the release, trust HTTPS, and sign in |
 | [Deploy from source](deploy-from-source.md) | Build the same deployment from this repository |
 | [Operations](operations.md) | Restart, inspect, back up, and troubleshoot the server |
+| [Remote-control timestamps](remote-control-timestamps.md) | Identify which clock or deadline triggered a control, video, or telemetry fault |
 | [Administration](auth-management.md) | Invite people, manage organizations, and assign access |
 | [Register a vehicle](add-vehicle.md) | Approve a prepared vehicle in the dashboard |
 | [Release capabilities](compatibility.md) | Understand supported features and current limits |

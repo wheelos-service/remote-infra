@@ -65,7 +65,7 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
       onBack={onClose} onMonitor={onMonitor} videoStatus={viewingStatus(cameras)}
       cameraView={<ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} frames={cameras.frames} failedCameras={cameras.failedCameras} requireFrameCallback={drivingEnabled} onFrame={trackChanged} onProgress={reportProgress} onStats={onStats} onPresented={bench.present} onSample={drivingEnabled ? bench.sample : undefined} />}
       controlPanel={drivingEnabled
-      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={bench.ready} verifyVideo={bench.check} receiverReady={bench.receiverReady} onBusyChange={onBusy} onIntent={onIntent} diagnostics={diagnostics.current} />
+      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={bench.ready} verifyVideo={bench.check} receiverReady={bench.receiverReady} requestBlocker={bench.requestBlocker} onBusyChange={onBusy} onIntent={onIntent} diagnostics={diagnostics.current} />
       : <div className="space-y-2 text-xs text-amber-200">
           <button type="button" disabled aria-describedby="control-denied-reason"
             className="rounded border border-slate-700 px-3 py-2 opacity-40">申请控制权</button>

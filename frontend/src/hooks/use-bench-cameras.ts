@@ -16,6 +16,7 @@ export function useBenchCameras(vehicle: string, bearer: string, requested: bool
   const [eligible, setEligible] = useState(false)
   const receiverUntil = useRef(0)
   const [receiverReady, setReceiverReady] = useState(false)
+  const [requestBlocker, setRequestBlocker] = useState('')
   const [ready, setReady] = useState(false)
   const clock = useRef<BenchClock | undefined>(undefined)
   const samples = useRef(new Map<CameraFeedTrack, { until: number; stamp: number; since: number }>())
@@ -74,6 +75,12 @@ export function useBenchCameras(vehicle: string, bearer: string, requested: bool
           if (clock.current?.epoch !== data.epoch) samples.current.clear()
           clock.current = {epoch: data.epoch, elapsed_ms: data.elapsed_ms, started, received: performance.now()}
           receiverUntil.current = Number.isSafeInteger(data.receiver_ttl_ms) ? started + Math.min(data.receiver_ttl_ms, 5000) : 0
+          setRequestBlocker(({
+            lease_held: '车辆控制权已被占用',
+            awaiting_vehicle: '上次控制已撤销，等待车辆确认已退出远程驾驶',
+            awaiting_revocation: '等待车端撤销上一次控制',
+            operator_busy: '请完成该操作员在其他车辆上的控制交接',
+          } as Record<string, string>)[data.control_request_blocker] ?? '')
           setEligible(true)
         }
       } catch { /* Existing samples expire on the monotonic deadline. */ }
@@ -83,7 +90,7 @@ export function useBenchCameras(vehicle: string, bearer: string, requested: bool
     const poll = setInterval(() => { setReady(check()); setReceiverReady(performance.now() < receiverUntil.current) }, 25)
     return () => {
       abort.abort(); clearTimeout(timer); clearInterval(poll)
-      clock.current = undefined; samples.current.clear(); setReady(false); setEligible(false)
+      clock.current = undefined; samples.current.clear(); setReady(false); setEligible(false); setRequestBlocker('')
     }
   }, [vehicle, bearer, requested, check])
   const invalidate = useCallback((track?: CameraFeedTrack) => {
@@ -124,5 +131,5 @@ export function useBenchCameras(vehicle: string, bearer: string, requested: bool
     windows.current.get(name)?.age(1000 - (until - now) * 1.001)
     samples.current.set(track, {until, stamp, since: previous && previous.until > now ? previous.since : now})
   }, [diagnostics, invalidate])
-  return {eligible, ready, receiverReady, sample, present, check, invalidate}
+  return {eligible, ready, requestBlocker, receiverReady, sample, present, check, invalidate}
 }
