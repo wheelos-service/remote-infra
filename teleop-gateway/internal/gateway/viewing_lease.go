@@ -40,6 +40,11 @@ type MediaDemand struct {
 	ServerTimeMS    int64  `json:"server_time_ms"`
 	ValidUntilMS    int64  `json:"valid_until_ms"`
 	RetryAfterMS    int64  `json:"retry_after_ms"`
+	MediaToken      string `json:"media_token,omitempty"`
+}
+
+func vehicleMediaTokenKey(vehicleID string) string {
+	return "viewing:" + vehicleID + ":vehicle_token"
 }
 
 type ViewingLeaseStore struct {
@@ -112,9 +117,11 @@ if op == 'acquire' then
 elseif op == 'renew' then
   if not lease or lease.released or lease.expires_at_ms <= now then return {'gone'} end
   lease.expires_at_ms = now + ttl
-  dirty = true
+elseif op == 'token' then
+  if not lease or lease.released or lease.expires_at_ms <= now then return {'gone'} end
+  return {'ok', tostring(lease.expires_at_ms), tostring(now)}
 elseif op == 'release' then
-  if not lease then return {'gone'} end
+  if not lease or lease.expires_at_ms <= now then return {'gone'} end
   if not lease.released then
     lease.released = true
     dirty = true
@@ -122,7 +129,7 @@ elseif op == 'release' then
 end
 
 if op == 'acquire' or op == 'renew' or op == 'release' then
-  if dirty then redis.call('SET', KEYS[2], cjson.encode(lease), 'PX', 86400000) end
+  if dirty or op == 'renew' then redis.call('SET', KEYS[2], cjson.encode(lease), 'PX', 86400000) end
   if lease.released then
     redis.call('ZREM', KEYS[1], sid)
   else

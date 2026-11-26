@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vehicle-operations-mission.schema.json",
+  "title": "Vehicle operations mission status",
+  "description": "POST /api/vehicles/{vehicle_id}/mission-status request and read-only mission snapshot. Equal-time identical retries return 204; older or equal-time conflicting snapshots return 409. Text limits use Unicode characters.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mission_id", "status", "updated_at_ms", "description"],
+  "properties": {
+    "mission_id": { "$ref": "vehicle-operations-common.schema.json#/$defs/identifier" },
+    "status": { "enum": ["unknown", "accepted", "running", "succeeded", "failed", "canceled"] },
+    "updated_at_ms": { "$ref": "vehicle-operations-common.schema.json#/$defs/timestamp" },
+    "description": { "$ref": "vehicle-operations-common.schema.json#/$defs/text2048" }
+  }
+}

@@ -1,9 +1,15 @@
 # Deploy from source
 
 Use this instead of the prebuilt package in [LAN setup](setup.md). You need a
-checkout of tag `1.1.0`, Git, Python 3, Docker Engine, and Docker Compose v2.
+checkout of tag `1.1.3`, Git, Python 3, Docker Engine, and Docker Compose v2.
 Your OS user must be able to run Docker. Docker compiles the applications;
 host Go and Node.js installations are unnecessary. Builds require internet access.
+The LiveKit image uses upstream master commit `4b9f2f75ed3bd0cb66fd38a3446a0a1ddc81fc2c`.
+The image build clones LiveKit, checks out this revision, runs `./bootstrap.sh`
+and `mage`, and tests the camera packet-trailer fix. Source deployments and AMD64
+bundles use the same Dockerfile. The server reports version 1.13.11 at this
+commit. Use the image's `org.opencontainers.image.revision` label to verify the build.
+[Upstream source build instructions](https://github.com/livekit/livekit/blob/4b9f2f75ed3bd0cb66fd38a3446a0a1ddc81fc2c/README.md#building-from-source)
 
 ## Deploy on the LAN
 
@@ -74,7 +80,7 @@ to your user, have mode `0700`, and be outside the repository.
 On a Linux AMD64 build host with Docker and internet access:
 
 ```bash
-python3 infra/scripts/package-release.py --version 1.1.0 \
+python3 infra/scripts/package-release.py --version 1.1.3 \
   --output /absolute/path/outside-the-checkout
 ```
 

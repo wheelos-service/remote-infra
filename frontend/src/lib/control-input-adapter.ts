@@ -29,14 +29,14 @@ const inputSchema = z.discriminatedUnion('mode', [
 export function toV2ControlCommand(input: InputCommand): ControlCommand {
   const command = inputSchema.parse(input)
   if (command.mode === 'low_level') return controlCommandSchema.parse({
-    steering: Math.round(command.steering * 1000), throttle: Math.round(command.throttle * 1000),
-    brake: Math.round(command.brake * 1000), direction: command.direction,
+    steering: Math.round(command.steering * 100), throttle: Math.round(command.throttle * 100),
+    brake: Math.round(command.brake * 100), direction: command.direction,
   })
   const action = command.action
   return controlCommandSchema.parse({
-    steering: action === 'left' ? -1000 : action === 'right' ? 1000 : 0,
-    throttle: action === 'forward' || action === 'reverse' ? 1000 : 0,
-    brake: action === 'stop' || action === 'emergency_stop' ? 1000 : 0,
+    steering: action === 'left' ? -100 : action === 'right' ? 100 : 0,
+    throttle: action === 'forward' || action === 'reverse' ? 100 : 0,
+    brake: action === 'emergency_stop' ? 100 : 0,
     direction: action === 'forward' ? 1 : action === 'reverse' ? -1 : 0,
   })
 }

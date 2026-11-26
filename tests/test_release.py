@@ -38,7 +38,7 @@ class ReleaseTest(unittest.TestCase):
                 contents = {name: tar.extractfile(prefix + name).read()
                             for name in ('release-images.json', 'teleop', 'images.tar.gz', 'README.txt', 'SHA256SUMS')}
             manifest = json.loads(contents['release-images.json'])
-            self.assertEqual(set(manifest['images']), {'gateway', 'frontend', *package.DEPENDENCIES})
+            self.assertEqual(set(manifest['images']), {'gateway', 'frontend', 'livekit', *package.DEPENDENCIES})
             self.assertEqual(set(manifest['image_ids']), set(manifest['images']))
             self.assertEqual(manifest['setup_image_id'], image_id)
             self.assertNotIn(b'__SETUP_IMAGE', contents['teleop'])
@@ -48,7 +48,10 @@ class ReleaseTest(unittest.TestCase):
                 digest, filename = line.split('  ')
                 self.assertEqual(digest, hashlib.sha256(contents[filename]).hexdigest())
             builds = [call.args[0] for call in run.call_args_list if call.args[0][1] == 'build']
-            self.assertEqual(len(builds), 3)  # Gateway, Frontend and the deployment-tool image.
+            self.assertEqual(len(builds), 4)
+            run.assert_any_call(['docker', 'run', '--rm', '--network', 'none', '--user', '65534:65534',
+                                 manifest['setup_image'], '--help'], stdout=subprocess.DEVNULL)
+            self.assertIn(str(ROOT / 'infra/livekit'), [build[-1] for build in builds])
             setup_context = Path(builds[-1][-1])
             self.assertEqual(setup_context.name, 'setup')
             checksum = archive.with_suffix('.gz.sha256').read_text().split()[0]

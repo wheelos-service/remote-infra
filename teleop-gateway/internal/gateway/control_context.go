@@ -7,15 +7,21 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
 // Simulation confirmation is deliberately separate from the physical ACK gate.
 func simulationControlEnabled(vehicleID string) bool {
+	return listedControlVehicle("SIMULATED_CONTROL_VEHICLES_JSON", vehicleID)
+}
+
+func listedControlVehicle(setting, vehicleID string) bool {
 	var vehicles []string
-	if json.Unmarshal([]byte(os.Getenv("SIMULATED_CONTROL_VEHICLES_JSON")), &vehicles) != nil {
+	if json.Unmarshal([]byte(os.Getenv(setting)), &vehicles) != nil {
 		return false
 	}
 	for _, id := range vehicles {
@@ -26,14 +32,58 @@ func simulationControlEnabled(vehicleID string) bool {
 	return false
 }
 
+var nativeInstance = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
+func receiverKey(id string) string { return "control-receiver:" + id }
+
+func nativeBenchEnabled(id string) bool {
+	return listedControlVehicle("NATIVE_BENCH_VEHICLES_JSON", id) && !simulationControlEnabled(id)
+}
+
+type ControlTimingPolicy struct {
+	ControlTickMS       int64 `json:"control_tick_ms"`
+	WatchdogPauseMS     int64 `json:"watchdog_pause_ms"`
+	WatchdogLockMS      int64 `json:"watchdog_lock_ms"`
+	RTCReconnectGraceMS int64 `json:"rtc_reconnect_grace_ms"`
+	MediaPauseGraceMS   int64 `json:"media_pause_grace_ms"`
+	ACKBudgetMS         int64 `json:"ack_budget_ms"`
+	FeedbackTimeoutMS   int64 `json:"feedback_timeout_ms"`
+	ContextTTLMS        int64 `json:"context_ttl_ms"`
+}
+
+// Single authoritative derivation from three primitives: tick cadence (50ms),
+// packet-drop pause budget (6 ticks = 300ms), and lock multiple (5x = 1500ms).
+func defaultControlTimingPolicy() ControlTimingPolicy {
+	const (
+		tickMS          int64 = 50
+		pauseDropFactor int64 = 6 // tolerates 5 consecutive Lossy drops
+		lockFactor      int64 = 5 // 5 * 300ms = 1500ms
+		mediaGraceMS    int64 = 5000
+		contextTTLMS    int64 = 5000
+	)
+	pauseMS := tickMS * pauseDropFactor
+	lockMS := pauseMS * lockFactor
+	return ControlTimingPolicy{
+		ControlTickMS:       tickMS,
+		WatchdogPauseMS:     pauseMS,
+		WatchdogLockMS:      lockMS,
+		RTCReconnectGraceMS: lockMS - pauseMS,
+		MediaPauseGraceMS:   mediaGraceMS,
+		ACKBudgetMS:         pauseMS * 2,
+		FeedbackTimeoutMS:   pauseMS*3 + tickMS*2,
+		ContextTTLMS:        contextTTLMS,
+	}
+}
+
 type DeviceControlContext struct {
-	VehicleID  string          `json:"vehicle_id"`
-	Revision   int64           `json:"revision"`
-	State      string          `json:"state"`
-	SessionID  string          `json:"session_id"`
-	TTLMS      int64           `json:"ttl_ms"`
-	Session    *ControlSession `json:"session"`
-	Simulation bool            `json:"simulation"`
+	VehicleID    string               `json:"vehicle_id"`
+	Revision     int64                `json:"revision"`
+	State        string               `json:"state"`
+	SessionID    string               `json:"session_id"`
+	TTLMS        int64                `json:"ttl_ms"`
+	Session      *ControlSession      `json:"session"`
+	Simulation   bool                 `json:"simulation"`
+	TimingPolicy *ControlTimingPolicy `json:"timing_policy,omitempty"`
 }
 
 var deviceControlContextScript = redis.NewScript(`
@@ -54,7 +104,12 @@ return {revision, redis.call('HGET', KEYS[1], 'state') or 'NONE',
 `)
 
 func (s *ControlLeaseStore) DeviceContext(ctx context.Context, vehicleID string) (DeviceControlContext, error) {
-	out := DeviceControlContext{VehicleID: vehicleID, Simulation: simulationControlEnabled(vehicleID)}
+	policy := defaultControlTimingPolicy()
+	out := DeviceControlContext{
+		VehicleID:    vehicleID,
+		Simulation:   simulationControlEnabled(vehicleID),
+		TimingPolicy: &policy,
+	}
 	values, err := deviceControlContextScript.Run(ctx, s.client,
 		[]string{controlHandoverKey(vehicleID), controlLeaseKey(vehicleID)}).StringSlice()
 	if err != nil {
@@ -82,6 +137,8 @@ func (s *ControlLeaseStore) DeviceContext(ctx context.Context, vehicleID string)
 }
 
 func registerDeviceControl(mux *http.ServeMux) {
+	mux.Handle("GET /api/vehicles/{vehicle_id}/control/context/native-v3-percent/{instance}", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleDeviceControlContext))))
+	mux.Handle("GET /api/vehicles/{vehicle_id}/control/bench-clock", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleBenchClock))))
 	mux.Handle("GET /api/vehicles/{vehicle_id}/control/context",
 		vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleDeviceControlContext))))
 	mux.Handle("POST /api/vehicles/{vehicle_id}/control/simulation-ack",
@@ -97,6 +154,18 @@ func handleDeviceControlContext(w http.ResponseWriter, r *http.Request) {
 	state, err := controlLeases.DeviceContext(r.Context(), r.PathValue("vehicle_id"))
 	if err != nil {
 		writeControlSessionError(w, err)
+		return
+	}
+	if instance := r.PathValue("instance"); instance != "" {
+		if !nativeInstance.MatchString(instance) {
+			http.Error(w, "invalid receiver instance", 400)
+			return
+		}
+		if err := controlLeases.client.Set(r.Context(), receiverKey(state.VehicleID), instance, 5*time.Second).Err(); err != nil {
+			writeControlSessionError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"contract_version": 3, "vehicle_id": state.VehicleID, "state": state.State, "revision": state.Revision, "session": state.Session, "session_id": state.SessionID, "ttl_ms": state.TTLMS, "timing_policy": state.TimingPolicy})
 		return
 	}
 	writeJSON(w, http.StatusOK, state)
@@ -138,7 +207,7 @@ func handleSimulationAck(w http.ResponseWriter, r *http.Request) {
 	// Only sessions created under the explicit v2 simulation contract qualify.
 	raw, err := controlLeases.client.HGet(r.Context(), controlHandoverKey(vehicleID), "session").Bytes()
 	var session ControlSession
-	if err != nil || json.Unmarshal(raw, &session) != nil || session.ProtocolVersion != 2 {
+	if err != nil || json.Unmarshal(raw, &session) != nil || session.ProtocolVersion != 2 || session.ContractVersion != 0 {
 		http.Error(w, "not a simulation session", http.StatusConflict)
 		return
 	}

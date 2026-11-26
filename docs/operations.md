@@ -83,6 +83,7 @@ restore. Database permission changes are not evidence of physical handover.
 | Login fails | Use the platform administrator from `administrator.txt`; verify the configured login hostname and client clock |
 | Empty fleet | A fresh deployment has no vehicles; select the organization and [register a prepared vehicle](add-vehicle.md) |
 | No live video | Vehicle media publisher and camera health, trusted HTTPS, TCP 7881 and UDP 51000–51100 connectivity |
+| Native control returns 409 | The dashboard refreshes the acquisition blocker while the workbench is open. After lease expiry or release, the operator and vehicle stay reserved until handback completes. If the original native receiver already acknowledged revocation and then restarted, its authenticated replacement can acknowledge that revision in two steps. It first reports local revocation, then confirms fresh matching Guardian and Canbus exit evidence. Check both producers if the dashboard continues to show 等待车辆确认已退出远程驾驶. |
 | Native control returns 503 | This release blocks managed native driving until handover support is complete |
 | Project/state error | Use the original private state directory and project; do not reuse another installation's project name |
 | Service not ready | Check service status/logs and disk space; restart with the launcher after resolving the cause |

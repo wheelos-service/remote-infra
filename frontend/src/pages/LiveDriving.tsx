@@ -2,8 +2,10 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useAuth } from '../app/AuthProvider'
 import { useVehicles } from '../hooks/use-vehicles'
 import { useDrivingCameras } from '../hooks/use-driving-cameras'
-import { threeCamerasReady, type CameraFeedTrack } from '../lib/camera-feed'
-import ThreeCameraView, { type FrontCamera } from './ThreeCameraView'
+import { type CameraFeedTrack, type CameraFrameStats } from '../lib/camera-feed'
+import { isSingleFront, type FrontCamera } from '../lib/camera-view'
+import { TeleopDiagnosticsBuffer } from '../lib/teleop-diagnostics'
+import ThreeCameraView from './ThreeCameraView'
 import { DrivingControlPanel } from './DrivingControlPanel'
 import TeleopWorkbench from './TeleopWorkbench'
 import { FleetOverviewContent } from './FleetOverview'
@@ -16,25 +18,38 @@ import { overviewVehicle, type OverviewVehicle } from '../lib/fleet-overview'
 import type { MonitorListState } from '../lib/vehicle-monitor'
 import { canControlVehicle, hasVehicleContext } from '../lib/organization-context'
 
+import { useBenchCameras } from '../hooks/use-bench-cameras'
+
+function viewingStatus(cameras: ReturnType<typeof useDrivingCameras>) {
+  const single = isSingleFront(cameras.tracks)
+  const names = single ? ['front'] as const : ['left', 'center', 'right'] as const
+  const count = names.filter(name => Boolean(cameras.tracks[name]) && cameras.frames[name] === cameras.tracks[name]).length
+  const transport = cameras.error ? '监看已结束' : cameras.recovering ? '正在恢复连接'
+    : cameras.signalRecovering ? '信令正在恢复' : cameras.connected ? '已连接' : '正在连接'
+  return `${transport} · ${count}/${names.length} 路出帧${cameras.connected && count === 0 ? '（等待视频）' : ''}`
+}
+
 function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, row, onMonitor, controlDenied }: {
   vehicleId: string; bearer: string; onBusyChange: (busy: boolean) => void; onClose: () => void; observeOnly: boolean
   row: OverviewVehicle; onMonitor: () => void; controlDenied: boolean
 }) {
-  const cameras = useDrivingCameras(vehicleId, bearer)
-  const [frames, setFrames] = useState<Partial<Record<FrontCamera, CameraFeedTrack>>>({})
+  const diagnostics = useRef(new TeleopDiagnosticsBuffer())
+  const cameras = useDrivingCameras(vehicleId, bearer, true, diagnostics.current)
+  const bench = useBenchCameras(vehicleId, bearer, !observeOnly, cameras.connected, cameras.tracks, cameras.frames, diagnostics.current)
+  const drivingEnabled = !observeOnly && bench.eligible
   const [busy, setBusy] = useState(false)
-  const onFrame = useCallback((name: FrontCamera, live: boolean, track?: CameraFeedTrack) => {
-    setFrames(previous => {
-      if (!live && previous[name] !== track) return previous
-      const current = live ? track : undefined
-      return previous[name] === current ? previous : { ...previous, [name]: current }
-    })
+  const { reportFrame, reportProgress } = cameras
+  const onStats = useCallback((name: FrontCamera, stats: CameraFrameStats) => {
+    const extra = stats.lastResidenceMs !== undefined ? `res=${stats.lastResidenceMs}ms` : ''
+    diagnostics.current.record('video', 'camera_stats',
+      `${name}:ema=${stats.emaIntervalMs}ms,budget=${stats.stallBudgetMs}ms,max=${stats.maxIntervalMs}ms${extra ? `,${extra}` : ''}`)
   }, [])
   const onBusy = useCallback((value: boolean) => { setBusy(value); onBusyChange(value) }, [onBusyChange])
   const onIntent = useCallback(() => {}, [])
-  const videoReady = cameras.connected && threeCamerasReady(Object.fromEntries(
-    (['left', 'center', 'right'] as const).map(name => [name, Boolean(cameras.tracks[name]) && frames[name] === cameras.tracks[name]]),
-  ))
+  const trackChanged = useCallback((camera: FrontCamera, live: boolean, track?: CameraFeedTrack) => {
+    if (!live) bench.invalidate(track)
+    reportFrame(camera, live, track)
+  }, [bench.invalidate, reportFrame])
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       if (busy) { event.preventDefault(); event.returnValue = '' }
@@ -46,30 +61,31 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
     {cameras.error && <p role="alert" className="text-xs text-red-300">{cameras.error}</p>}
     <TeleopWorkbench vehicleId={vehicleId} row={row} gear={['P', 'R', 'N', 'D'].includes(row.gear) ? row.gear as 'P' | 'R' | 'N' | 'D' : '—'}
       networkQuality={null} speedKph={row.speed ?? undefined} batteryPercent={row.battery ?? undefined}
-      runModeLabel={row.modeLabel} locationLabel={row.locationReason} authenticated busy={busy} observeOnly={observeOnly}
-      onBack={onClose} onMonitor={onMonitor} videoStatus={`${cameras.connected ? '已连接' : '未连接 / 正在连接'} · 三路：${videoReady ? '正在出帧' : '未就绪'}`}
-      cameraView={<ThreeCameraView vehicleId={vehicleId} tracks={cameras.tracks} onFrame={onFrame} />}
-      controlPanel={!observeOnly
-      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={videoReady} onBusyChange={onBusy} onIntent={onIntent} />
+      runModeLabel={row.modeLabel} locationLabel={row.locationReason} authenticated busy={busy} observeOnly={!drivingEnabled}
+      onBack={onClose} onMonitor={onMonitor} videoStatus={viewingStatus(cameras)}
+      cameraView={<ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} frames={cameras.frames} failedCameras={cameras.failedCameras} requireFrameCallback={drivingEnabled} onFrame={trackChanged} onProgress={reportProgress} onStats={onStats} onPresented={bench.present} onSample={drivingEnabled ? bench.sample : undefined} />}
+      controlPanel={drivingEnabled
+      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={bench.ready} verifyVideo={bench.check} receiverReady={bench.receiverReady} requestBlocker={bench.requestBlocker} onBusyChange={onBusy} onIntent={onIntent} diagnostics={diagnostics.current} />
       : <div className="space-y-2 text-xs text-amber-200">
           <button type="button" disabled aria-describedby="control-denied-reason"
             className="rounded border border-slate-700 px-3 py-2 opacity-40">申请控制权</button>
           <p id="control-denied-reason">{controlDenied ? '无此车辆的驾驶权限'
-            : observeOnly ? '当前角色无驾驶权限' : '控制暂不可用'}</p>
+            : observeOnly ? '当前角色无驾驶权限' : '源视频新鲜度尚未验证，仅可监看'}</p>
         </div>} />
     {busy && <p className="text-xs text-amber-200">释放并确认车辆交接前，禁止切换车辆或退出工作台。</p>}
   </div>
 }
 
 function MonitorCameraFeed({ vehicleId, bearer, onStop }: { vehicleId: string; bearer: string; onStop: () => void }) {
-  const cameras = useDrivingCameras(vehicleId, bearer)
+  const cameras = useDrivingCameras(vehicleId, bearer, true)
+  const { reportFrame, reportProgress } = cameras
   return <div className="space-y-2 p-3">
     <div className="flex items-center justify-between text-xs">
-      <span>{cameras.connected ? '监看已连接' : '正在连接监看…'}</span>
-      <button type="button" onClick={onStop} className="text-sky-200">停止监看</button>
+      <span role="status">{viewingStatus(cameras)}</span>
+      <button type="button" onClick={onStop} className="text-sky-200">{cameras.error ? '返回并重新申请' : '停止监看'}</button>
     </div>
     {cameras.error && <p role="alert" className="text-xs text-red-300">{cameras.error}</p>}
-    <ThreeCameraView vehicleId={vehicleId} tracks={cameras.tracks} />
+    <ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} frames={cameras.frames} failedCameras={cameras.failedCameras} onFrame={reportFrame} onProgress={reportProgress} />
   </div>
 }
 

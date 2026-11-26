@@ -1,4 +1,7 @@
-import { acquireViewing, newViewingId, releaseViewing, renewViewing } from './viewing-api'
+import {
+  acquireViewing, newViewingId, refreshViewingToken, releaseViewing, renewViewing,
+  VIEWING_REQUEST_TIMEOUT_MS, ViewingRequestError,
+} from './viewing-api'
 import type { ViewingAcquire, ViewingLease } from './viewing-api'
 import { requestOrganization } from './organization-context'
 
@@ -7,11 +10,27 @@ interface Observer {
   disconnect(): void | Promise<void>
 }
 
+interface ObserverEvents {
+  current(): boolean
+  reconnecting(): void
+  reconnected(): void
+  disconnected(terminal?: boolean): void
+}
+
+const CONNECTION_TIMEOUT_MS = 15_000
+const SDK_RECOVERY_MS = 30_000
+const REBUILD_RECOVERY_MS = 15_000
+const NO_VIDEO_MS = 60_000
+const RETIRE_ROOM_MS = 500
+const MAX_MEDIA_REBUILD_ATTEMPTS = 3
+const RENEW_GUARD_MS = 500
+
 interface ViewingOptions {
   vehicleId: string
   bearer: string
   clientInstanceId: string
-  createObserver(token: string): Observer
+  createObserver(token: string, events: ObserverEvents): Observer
+  onRecovering?(): void
   onConnected(): void
   onError(error: unknown): void
   onCleanupError(): void
@@ -21,6 +40,7 @@ interface ViewingApi {
   acquire: typeof acquireViewing
   renew: typeof renewViewing
   release: typeof releaseViewing
+  refreshToken?: typeof refreshViewingToken
 }
 
 export class ViewingLifecycle {
@@ -30,6 +50,17 @@ export class ViewingLifecycle {
   private lastAcceptedLease?: ViewingLease
   private deadlineMs?: number
   private observer?: Observer
+  private roomEpoch = 0
+  private roomConnected = false
+  private rebuildsSinceFrame = 0
+  private recovery?: { deadlineMs: number; timer: ReturnType<typeof setTimeout>; rebuildAttempts: number }
+  private sdkRecoveryTimer?: ReturnType<typeof setTimeout>
+  private sdkRecoveryDeadline?: number
+  private videoTimer?: ReturnType<typeof setTimeout>
+  private lastVideoProgress?: number
+  private rebuildTimer?: ReturnType<typeof setTimeout>
+  private retireTimer?: ReturnType<typeof setTimeout>
+  private cancelRetire?: () => void
   private renewalTimer?: ReturnType<typeof setTimeout>
   private expiryTimer?: ReturnType<typeof setTimeout>
   private connectionTimer?: ReturnType<typeof setTimeout>
@@ -47,6 +78,7 @@ export class ViewingLifecycle {
       acquire: (vehicle, bearer, request, client) => acquireViewing(vehicle, bearer, request, client, this.organizationId),
       renew: (vehicle, session, bearer) => renewViewing(vehicle, session, bearer, this.organizationId),
       release: (vehicle, session, bearer) => releaseViewing(vehicle, session, bearer, this.organizationId),
+      refreshToken: (vehicle, session, bearer) => refreshViewingToken(vehicle, session, bearer, this.organizationId),
     }
   }
 
@@ -66,19 +98,55 @@ export class ViewingLifecycle {
     this.started = true
     const { vehicleId, bearer, clientInstanceId } = this.options
     try {
-      this.lease = await this.api.acquire(vehicleId, bearer, this.requestId, clientInstanceId)
+      for (let attempt = 0; ; attempt++) {
+        try {
+          this.lease = await this.api.acquire(vehicleId, bearer, this.requestId, clientInstanceId)
+          break
+        } catch (error) {
+          if (this.stopped || !this.options.onRecovering ||
+              !(error instanceof ViewingRequestError) || !error.retryable ||
+              error.timedOut || attempt >= 2) {
+            throw error
+          }
+          await new Promise<void>(resolve => setTimeout(resolve, 500 * 2 ** attempt))
+          if (this.stopped) return
+        }
+      }
       if (this.stopped) {
         await this.release()
         return
       }
       this.lastAcceptedLease = this.lease
       this.schedule(this.lease)
-      const observer = this.options.createObserver(this.lease.token)
+      await this.connect(this.lease.token)
+    } catch (error) {
+      this.fail(error)
+    }
+  }
+
+  private async connect(token: string, epoch = ++this.roomEpoch) {
+    const current = () => epoch === this.roomEpoch && this.active &&
+      (!this.recovery || performance.now() < this.recovery.deadlineMs)
+    const observer = this.options.createObserver(token, {
+      current,
+      reconnecting: () => {
+        if (current()) this.beginSdkRecovery()
+      },
+      reconnected: () => {
+        if (current()) this.transportConnected()
+      },
+      disconnected: (terminal) => {
+        if (!current()) return
+        if (terminal) this.fail(new Error('视频连接已终止，请重新申请监看'))
+        else this.disconnected()
+      },
+    })
+    try {
       this.observer = observer
       const connecting = observer.connect()
       // Some transports complete after cancellation. Only disconnect this attempt's observer.
       void connecting.then(() => {
-        if (this.stopped) {
+        if (this.stopped || epoch !== this.roomEpoch) {
           void Promise.resolve().then(() => observer.disconnect())
             .catch(() => this.options.onCleanupError())
         }
@@ -89,34 +157,194 @@ export class ViewingLifecycle {
           new Promise<never>((_, reject) => {
             this.connectionTimer = setTimeout(
               () => reject(new Error('连接 LiveKit 超时，请检查网络后重试')),
-              15_000,
+              CONNECTION_TIMEOUT_MS,
             )
           }),
           new Promise<void>((resolve) => { this.cancelConnection = resolve }),
         ])
       } finally {
-        clearTimeout(this.connectionTimer)
-        this.cancelConnection = undefined
+        if (epoch === this.roomEpoch) {
+          clearTimeout(this.connectionTimer)
+          this.cancelConnection = undefined
+        }
       }
-      if (!this.guardActive()) return
-      this.options.onConnected()
+      if (epoch !== this.roomEpoch || !this.guardActive() || !current()) return
+      this.transportConnected()
     } catch (error) {
-      this.fail(error)
+      if (epoch === this.roomEpoch) throw error
     }
+  }
+
+  private beginSdkRecovery() {
+    if (!this.options.onRecovering) {
+      this.fail(new Error('视频连接中断；必须重新连接监看和申请控制'))
+      return
+    }
+    this.roomConnected = false
+    if (!this.sdkRecoveryTimer && !this.recovery) {
+      this.sdkRecoveryDeadline = performance.now() + SDK_RECOVERY_MS
+      this.sdkRecoveryTimer = setTimeout(() => {
+        this.sdkRecoveryTimer = undefined
+        if (this.guardActive() && !this.roomConnected) this.disconnected()
+      }, SDK_RECOVERY_MS)
+    }
+    this.options.onRecovering()
+  }
+
+  private transportConnected() {
+    if (!this.guardActive()) return
+    if (this.sdkRecoveryDeadline !== undefined && performance.now() >= this.sdkRecoveryDeadline) {
+      this.disconnected()
+      return
+    }
+    clearTimeout(this.sdkRecoveryTimer)
+    this.sdkRecoveryTimer = undefined
+    this.sdkRecoveryDeadline = undefined
+    if (this.recovery) clearTimeout(this.recovery.timer)
+    this.recovery = undefined
+    clearTimeout(this.rebuildTimer)
+    this.rebuildTimer = undefined
+    const wasConnected = this.roomConnected
+    this.roomConnected = true
+    if (this.lastVideoProgress === undefined && this.options.onRecovering) {
+      this.lastVideoProgress = performance.now()
+      this.scheduleVideoTimeout()
+    }
+    if (!wasConnected) this.options.onConnected()
+  }
+
+  private scheduleVideoTimeout() {
+    if (this.stopped || this.lastVideoProgress === undefined) return
+    const remaining = NO_VIDEO_MS - (performance.now() - this.lastVideoProgress)
+    if (remaining <= 0) {
+      this.fail(new Error('长时间没有视频画面，请重新申请监看'))
+      return
+    }
+    this.videoTimer = setTimeout(() => this.scheduleVideoTimeout(), remaining)
+  }
+
+  private disconnected() {
+    // Let an initial connect failure take the normal error path.
+    if (!this.roomConnected && !this.recovery && this.cancelConnection) return
+    if (!this.options.onRecovering) {
+      this.fail(new Error('视频连接中断；必须重新连接监看和申请控制'))
+      return
+    }
+    this.roomConnected = false
+    clearTimeout(this.sdkRecoveryTimer)
+    this.sdkRecoveryTimer = undefined
+    this.sdkRecoveryDeadline = undefined
+    if (!this.recovery) {
+      this.recovery = {
+        deadlineMs: performance.now() + REBUILD_RECOVERY_MS,
+        timer: setTimeout(() => this.fail(new Error('视频恢复超时，请重新申请监看')), REBUILD_RECOVERY_MS),
+        rebuildAttempts: this.rebuildsSinceFrame,
+      }
+      this.options.onRecovering()
+    }
+    if (!this.recovery || this.recovery.rebuildAttempts >= MAX_MEDIA_REBUILD_ATTEMPTS) {
+      if (this.recovery) this.fail(new Error('视频重建失败，请重新申请监看'))
+      return
+    }
+    const attempt = ++this.recovery.rebuildAttempts
+    this.rebuildsSinceFrame = attempt
+    const epoch = ++this.roomEpoch
+    clearTimeout(this.connectionTimer)
+    clearTimeout(this.rebuildTimer)
+    this.rebuildTimer = undefined
+    this.cancelConnection?.()
+    this.cancelConnection = undefined
+    const observer = this.observer
+    this.observer = undefined
+    const delay = attempt === 1 ? 0 : Math.min(500 * 2 ** (attempt - 2), 2_000)
+    void this.retire(observer).then(() => {
+      if (epoch !== this.roomEpoch || !this.guardActive() || !this.recovery) return
+      if (performance.now() + delay >= this.recovery.deadlineMs) {
+        this.fail(new Error('视频恢复超时，请重新申请监看'))
+        return
+      }
+      const start = () => {
+        this.rebuildTimer = undefined
+        if (epoch !== this.roomEpoch || this.stopped) return
+        void this.rebuild(epoch).catch(error => {
+          if (!this.stopped) this.fail(error)
+        })
+      }
+      if (delay > 0) this.rebuildTimer = setTimeout(start, delay)
+      else start()
+    })
+  }
+
+  private async refreshTokenWithRetry(epoch: number, retry = 0): Promise<ViewingAcquire | undefined> {
+    if (!this.lease || !this.api.refreshToken) throw new Error('无法更新监看凭证')
+    if (epoch !== this.roomEpoch || !this.guardActive() ||
+      !this.recovery || performance.now() >= this.recovery.deadlineMs) return undefined
+    try {
+      return await this.api.refreshToken(
+        this.options.vehicleId, this.lease.viewing_session_id, this.options.bearer,
+      )
+    } catch (error) {
+      if (epoch !== this.roomEpoch || !this.guardActive() || !this.recovery) return undefined
+      if (error instanceof ViewingRequestError && error.retryable) {
+        const delay = Math.min(500 * 2 ** retry, 2_000)
+        if (performance.now() + delay + VIEWING_REQUEST_TIMEOUT_MS < this.recovery.deadlineMs) {
+          await new Promise<void>(resolve => {
+            this.rebuildTimer = setTimeout(() => {
+              this.rebuildTimer = undefined
+              resolve()
+            }, delay)
+          })
+          return this.refreshTokenWithRetry(epoch, retry + 1)
+        }
+      }
+      throw error
+    }
+  }
+
+  private async rebuild(epoch: number) {
+    const response = await this.refreshTokenWithRetry(epoch)
+    if (!response || epoch !== this.roomEpoch || !this.guardActive() ||
+      !this.recovery || performance.now() >= this.recovery.deadlineMs) return
+    try {
+      await this.connect(response.token, epoch)
+    } catch (error) {
+      if (this.stopped || epoch !== this.roomEpoch) return
+      if (error instanceof ViewingRequestError && !error.retryable) throw error
+      if (this.active && this.recovery && performance.now() < this.recovery.deadlineMs) {
+        this.disconnected()
+        return
+      }
+      throw error
+    }
+  }
+
+  frameRendered() {
+    if (!this.roomConnected || !this.guardActive() || this.lastVideoProgress === undefined) return
+    const now = performance.now()
+    if (now - this.lastVideoProgress >= NO_VIDEO_MS) {
+      this.fail(new Error('长时间没有视频画面，请重新申请监看'))
+      return
+    }
+    this.lastVideoProgress = now
+    this.rebuildsSinceFrame = 0
   }
 
   private schedule(lease: ViewingLease) {
     clearTimeout(this.expiryTimer)
     clearTimeout(this.renewalTimer)
-    const remaining = lease.deadlineMs - performance.now()
+    const deadline = lease.deadlineMs - (this.options.onRecovering ? RENEW_GUARD_MS : 0)
+    const remaining = deadline - performance.now()
     if (remaining <= 0) throw new Error('监看租约已过期')
-    this.deadlineMs = lease.deadlineMs
+    this.deadlineMs = deadline
     this.expiryTimer = setTimeout(() => this.fail(new Error('监看租约已过期，已停止监看')), remaining)
     this.renewalTimer = setTimeout(() => { void this.renew() }, Math.min(lease.renew_after_ms, remaining))
   }
 
-  private async renew() {
+  private async renew(attempt = 0) {
     if (!this.guardActive() || !this.lease) return
+    const deadline = this.deadlineMs
+    if (this.options.onRecovering && deadline !== undefined &&
+      performance.now() + VIEWING_REQUEST_TIMEOUT_MS >= deadline) return
     try {
       const lease = await this.api.renew(
         this.options.vehicleId, this.lease.viewing_session_id, this.options.bearer,
@@ -134,6 +362,14 @@ export class ViewingLifecycle {
       this.lastAcceptedLease = lease
       this.schedule(lease)
     } catch (error) {
+      if (!this.guardActive()) return
+      if (this.options.onRecovering && error instanceof ViewingRequestError && error.retryable) {
+        const delay = Math.min(500 * 2 ** attempt, 2_000)
+        if (deadline !== undefined && performance.now() + delay + VIEWING_REQUEST_TIMEOUT_MS < deadline) {
+          this.renewalTimer = setTimeout(() => { void this.renew(attempt + 1) }, delay)
+        }
+        return
+      }
       this.fail(error)
     }
   }
@@ -150,15 +386,40 @@ export class ViewingLifecycle {
     clearTimeout(this.expiryTimer)
     clearTimeout(this.renewalTimer)
     clearTimeout(this.connectionTimer)
+    clearTimeout(this.rebuildTimer)
+    clearTimeout(this.retireTimer)
+    this.cancelRetire?.()
+    clearTimeout(this.sdkRecoveryTimer)
+    clearTimeout(this.videoTimer)
+    this.rebuildTimer = undefined
+    if (this.recovery) clearTimeout(this.recovery.timer)
     this.cancelConnection?.()
     const observer = this.observer
     this.observer = undefined
     // Release must not wait for a stalled transport disconnect.
     this.cleanup = Promise.all([
-      Promise.resolve().then(() => observer?.disconnect()).catch(() => this.options.onCleanupError()),
+      this.disconnect(observer),
       this.release(),
     ]).then(() => {})
     return this.cleanup
+  }
+
+  private disconnect(observer?: Observer) {
+    return Promise.resolve().then(() => observer?.disconnect()).catch(() => this.options.onCleanupError())
+  }
+
+  private async retire(observer?: Observer) {
+    if (!observer) return
+    await Promise.race([
+      this.disconnect(observer),
+      new Promise<void>(resolve => {
+        this.cancelRetire = resolve
+        this.retireTimer = setTimeout(resolve, RETIRE_ROOM_MS)
+      }),
+    ])
+    clearTimeout(this.retireTimer)
+    this.retireTimer = undefined
+    this.cancelRetire = undefined
   }
 
   private async release() {

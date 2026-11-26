@@ -222,7 +222,14 @@ def prepare(state):
 }}
 """)
     volume = lambda name, target: f"{state / name}:{target}:ro"
+    bench_file = state / "native-bench-vehicles.json"
+    bench_vehicles = json.loads(bench_file.read_text()) if bench_file.exists() else []
+    if not isinstance(bench_vehicles, list) or any(
+            not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", v)
+            for v in bench_vehicles):
+        raise RuntimeError("invalid generated-camera bench vehicle list")
     env = {
+        "NATIVE_BENCH_VEHICLES_JSON": json.dumps(bench_vehicles),
         "LIVEKIT_API_KEY": "teleop", "LIVEKIT_API_SECRET": values["livekit"],
         "LIVEKIT_URL": "http://livekit:7880", "REDIS_URL": "redis:6379",
         "AUTH_MODE": "oidc", "OIDC_ISSUER": AUTH, "OIDC_AUDIENCE": values["browser_id"],
@@ -264,7 +271,9 @@ def prepare(state):
                         f"{state / 'casdoor-logs'}:/logs"],
         },
         "livekit": {
-            "image": "livekit/livekit-server:v1.13.11",
+            "image": "teleop-livekit:master-4b9f2f75ed",
+            "build": {"context": str(ROOT / "infra" / "livekit")},
+            "pull_policy": "never",
             "command": ["--config", "/etc/livekit.yaml"],
             "volumes": [volume("livekit.yaml", "/etc/livekit.yaml")],
             "depends_on": ["redis"],
@@ -355,7 +364,7 @@ def build(state):
     if RELEASE_IMAGES is not None:
         raise RuntimeError("this release is already compiled; use start or all")
     # Build from lockfiles inside Linux containers; no host Go/Node toolchain.
-    compose(state, "build", "gateway", "frontend")
+    compose(state, "build", "gateway", "frontend", "livekit")
 
 
 def request(state, path, body=None, admin=True, origin=None, form=False, bearer=None):

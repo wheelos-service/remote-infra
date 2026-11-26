@@ -8,6 +8,7 @@ export const cameras = [
   { name: 'rear-left', label: '后左' }, { name: 'rear-center', label: '后中' }, { name: 'rear-right', label: '后右' },
 ] as const
 export type CameraName = typeof cameras[number]['name']
+export type FrontCamera = 'front' | 'left' | 'center' | 'right'
 
 export function trackCameraName(trackName: string): CameraName | undefined {
   const normalized = trackName === 'camera' || trackName === 'camera0'
@@ -15,8 +16,12 @@ export function trackCameraName(trackName: string): CameraName | undefined {
   return cameras.find(({ name }) => name === normalized)?.name
 }
 
+export function isSingleFront(available: Partial<Record<FrontCamera, unknown>>) {
+  return Boolean(available.front && !available.left && !available.center && !available.right)
+}
+
 export function visibleCameras(group: 'front' | 'rear', available: Partial<Record<CameraName, unknown>>) {
-  const single = available.front && !available.left && !available.center && !available.right
+  const single = isSingleFront(available)
   return cameras.filter(({ name }) => group === 'rear' ? name.startsWith('rear-')
     : single ? name === 'front' : name !== 'front' && !name.startsWith('rear-'))
 }

@@ -17,14 +17,13 @@ func newControlContextFixture(t *testing.T) *telemetryFixture {
 	t.Helper()
 	f := newTelemetryFixture(t)
 	oldLeases, oldAuth, oldIDs := controlLeases, vehicleAuthorizer, vehicleIdentities
-	oldVideo, oldSink, oldKey, oldSecret := videoSessions, auditSink, lkApiKey, lkApiSecret
+	oldSink, oldKey, oldSecret := auditSink, lkApiKey, lkApiSecret
 	controlLeases, vehicleAuthorizer, vehicleIdentities = f.api.leases, f.api.authorizer, f.api.identities
-	videoSessions = NewVideoSessionStore(f.client, 0)
 	auditSink = NewJSONAuditSink(io.Discard)
 	lkApiKey, lkApiSecret = "edge-integration-test", "disposable-loopback-only-test-secret"
 	t.Cleanup(func() {
 		controlLeases, vehicleAuthorizer, vehicleIdentities = oldLeases, oldAuth, oldIDs
-		videoSessions, auditSink, lkApiKey, lkApiSecret = oldVideo, oldSink, oldKey, oldSecret
+		auditSink, lkApiKey, lkApiSecret = oldSink, oldKey, oldSecret
 	})
 	for pattern, handler := range map[string]http.HandlerFunc{
 		"POST /api/vehicles/{vehicle_id}/control/acquire": handleAcquireControl,
@@ -50,6 +49,15 @@ func TestDeviceControlContextAndSimulationFence(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &acquired); err != nil {
 		t.Fatal(err)
 	}
+	if acquired.ServerTimeMS <= 0 {
+		t.Fatalf("acquire response missing server_time_ms: %+v", acquired)
+	}
+	if acquired.TimingPolicy == nil ||
+		acquired.TimingPolicy.ControlTickMS >= acquired.TimingPolicy.WatchdogPauseMS ||
+		acquired.TimingPolicy.WatchdogPauseMS >= acquired.TimingPolicy.RTCReconnectGraceMS ||
+		acquired.TimingPolicy.RTCReconnectGraceMS >= acquired.TimingPolicy.WatchdogLockMS {
+		t.Fatalf("acquire timing_policy violated ordering invariants: %+v", acquired.TimingPolicy)
+	}
 	parts := strings.Split(acquired.Token, ".")
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -67,7 +75,8 @@ func TestDeviceControlContextAndSimulationFence(t *testing.T) {
 	var context DeviceControlContext
 	if json.Unmarshal(result.Body.Bytes(), &context) != nil || context.State != "ACTIVE" ||
 		context.TTLMS <= 0 || context.Revision != 1 || context.Session == nil ||
-		context.Session.ClientInstanceID != "browser-test" {
+		context.Session.ClientInstanceID != "browser-test" || context.TimingPolicy == nil ||
+		context.TimingPolicy.WatchdogLockMS != 1500 {
 		t.Fatal("invalid active context", result.Body.String())
 	}
 	ack := fmt.Sprintf(`{"session_id":%q,"revision":1}`, acquired.Session.SessionID)
@@ -220,4 +229,56 @@ func TestControlChainServer(t *testing.T) {
 		lastTick = now
 	}
 	t.Fatal("control chain runner did not stop fixture")
+}
+
+func TestNativeBenchControlAndHandover(t *testing.T) {
+	f := newControlContextFixture(t)
+	path := "/api/vehicles/car-2/control"
+	instance := "0123456789abcdef0123456789abcdef"
+	other := "1123456789abcdef0123456789abcdef"
+	body := `{"contract_version":3,"protocol_version":2,"client_instance_id":"bench-test","public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`
+	f.request(t, "GET", path+"/bench-clock", "controller", "", 403)
+	f.request(t, "POST", path+"/acquire", "controller", body, 503)
+	t.Setenv("NATIVE_BENCH_VEHICLES_JSON", `["car-2"]`)
+	f.request(t, "GET", path+"/bench-clock", "device1", "", 403)
+	f.request(t, "GET", path+"/bench-clock", "controller", "", 200)
+	f.request(t, "GET", path+"/context/native-v3-percent/"+instance, "device1", "", 403)
+	f.request(t, "GET", path+"/context", "device2", "", 200)
+	f.request(t, "POST", path+"/acquire", "controller", body, 503)
+	poll := func() {
+		t.Helper()
+		r := f.request(t, "GET", path+"/context/native-v3-percent/"+instance, "device2", "", 200)
+		var v map[string]any
+		if json.Unmarshal(r.Body.Bytes(), &v) != nil || v["contract_version"] != 3.0 || v["simulation"] != nil || v["timing_policy"] == nil {
+			t.Fatal("unexpected receiver contract", v)
+		}
+	}
+	poll()
+	clock := f.request(t, "GET", path+"/bench-clock", "controller", "", 200)
+	var ready struct {
+		TTL int64 `json:"receiver_ttl_ms"`
+	}
+	if json.Unmarshal(clock.Body.Bytes(), &ready) != nil || ready.TTL <= 0 || ready.TTL > 5000 {
+		t.Fatal("receiver readiness missing")
+	}
+	f.redis.FastForward(6 * time.Second)
+	f.request(t, "POST", path+"/acquire", "controller", body, 503)
+	poll()
+	r := f.request(t, "POST", path+"/acquire", "controller", body, 200)
+	var sess controlSessionResponse
+	if json.Unmarshal(r.Body.Bytes(), &sess) != nil || sess.Session.ReceiverInstanceID != instance {
+		t.Fatal("unbound session")
+	}
+	pathID := "/api/control/" + sess.Session.SessionID
+	ack := fmt.Sprintf(`{"revision":1,"session_id":%q,"edge_revocation_applied":true,"vehicle_handover_confirmed":true}`, sess.Session.SessionID)
+	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", ack, 409)
+	f.request(t, "POST", pathID+"/renew", "controller", "{}", 200)
+	f.request(t, "POST", pathID+"/release", "controller", "{}", 202)
+	f.request(t, "POST", path+"/handover/ack/"+other, "device2", ack, 409)
+	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", strings.Replace(ack, `"revision":1`, `"revision":2`, 1), 409)
+	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", strings.Replace(ack, `confirmed":true`, `confirmed":false`, 1), 202)
+	f.request(t, "POST", path+"/acquire", "controller", body, 409)
+	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", ack, 204)
+	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", ack, 204)
+	f.request(t, "POST", path+"/acquire", "controller", body, 200)
 }

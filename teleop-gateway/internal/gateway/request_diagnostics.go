@@ -28,6 +28,9 @@ func withRequestID(next http.Handler) http.Handler {
 
 func writeDiagnosticError(w http.ResponseWriter, r *http.Request, message, code string, status int) {
 	id, _ := r.Context().Value(requestIDContextKey{}).(string)
+	if status == http.StatusServiceUnavailable && code != "" {
+		teleopGateway503Total.WithLabelValues(code).Inc()
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Error-Code", code)
 	w.Header().Add("Vary", "Accept")

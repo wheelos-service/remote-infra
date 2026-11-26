@@ -4,11 +4,14 @@ This folder holds cross-component API and wire contracts consumed by the
 frontend, Gateway, and vehicle clients.
 
 - `schemas/vehicle-control-handover-ack.schema.json` — device handover acknowledgement.
-- `schemas/vehicle-control-v2.schema.json` — signed v2 vehicle-control packets.
+- `schemas/vehicle-control.schema.json` — signed vehicle-control packets; the current wire version is 2.
 - `schemas/vehicle-media-demand.schema.json` — device media-demand response.
 - `schemas/vehicle-telemetry.schema.json` — vehicle telemetry snapshots.
+- `schemas/vehicle-operations-common.schema.json` — shared operation identifiers, timestamps, and text limits.
+- `schemas/vehicle-operations-alert.schema.json` — one vehicle operations alert.
+- `schemas/vehicle-operations-mission.schema.json` — one Mission status snapshot or POST request body.
 - `schemas/vehicle-operations-response.schema.json` — read-only operations API response;
-  it reuses telemetry definitions from the telemetry schema.
+  it references the alert, Mission, and telemetry resources.
 
 Schema filenames use lowercase kebab-case resource names, an optional purpose
 or protocol-major suffix, and the `.schema.json` extension. `$id` values match

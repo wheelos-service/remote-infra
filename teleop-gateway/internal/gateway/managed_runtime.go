@@ -35,6 +35,7 @@ type ManagedRuntime struct {
 	onlineMutations bool
 	mu              sync.RWMutex
 	additiveMu      sync.Mutex
+	instanceMu      sync.Mutex
 	roomsEmpty      func(context.Context) error
 	evictRoom       func(context.Context, string, string)
 	rtcProxy        http.Handler
@@ -183,6 +184,31 @@ func (m *ManagedRuntime) Close() {
 	}
 }
 
+// Client disconnects must not cancel an in-flight operation on the PostgreSQL
+// session that owns the Gateway's lifetime lock. pgx can discard that session
+// on cancellation. Keep the DB operation bounded and honor the caller's
+// cancellation before using the session and before reporting success.
+func (m *ManagedRuntime) withInstance(ctx context.Context, operation func(context.Context) error) error {
+	m.instanceMu.Lock()
+	defer m.instanceMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 1500*time.Millisecond)
+	defer cancel()
+	if err := operation(dbCtx); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+func (m *ManagedRuntime) checkInstance(ctx context.Context) error {
+	if m.instance == nil {
+		return nil
+	}
+	return m.withInstance(ctx, m.instance.PingContext)
+}
+
 func (m *ManagedRuntime) authorizeRequest(r *http.Request, claims *UserClaims) (func(), error) {
 	m.mu.RLock()
 	release := m.mu.RUnlock
@@ -193,15 +219,8 @@ func (m *ManagedRuntime) authorizeRequest(r *http.Request, claims *UserClaims) (
 	if claims.Issuer == "" || claims.Issuer != m.issuer {
 		return fail(errManagedDenied)
 	}
-	if m.instance != nil {
-		// A lost session loses the single-instance lock. Never silently acquire
-		// a replacement connection or continue serving under that condition.
-		m.additiveMu.Lock()
-		err := m.instance.PingContext(r.Context())
-		m.additiveMu.Unlock()
-		if err != nil {
-			return fail(fmt.Errorf("managed instance lock unavailable: %w", err))
-		}
+	if err := m.checkInstance(r.Context()); err != nil {
+		return fail(fmt.Errorf("managed instance lock unavailable: %w", err))
 	}
 	if m.maintenance && managedStartsSession(r) {
 		return fail(errManagedMaintenance)
@@ -434,14 +453,16 @@ func resolveVehicleClaims(claims *UserClaims, fallback *VehicleIdentityResolver)
 
 func managedStartsSession(r *http.Request) bool {
 	path := r.URL.Path
-	if path == "/api/token/operator" || path == "/api/token/vehicle" {
+	if path == "/api/token/vehicle" {
 		return true
 	}
 	if r.Method != http.MethodPost {
 		return false
 	}
-	return (strings.Contains(path, "/control/") || strings.Contains(path, "/viewing/") ||
-		strings.Contains(path, "/video/")) &&
+	if strings.Contains(path, "/viewing/") && strings.HasSuffix(path, "/token") {
+		return true
+	}
+	return (strings.Contains(path, "/control/") || strings.Contains(path, "/viewing/")) &&
 		(strings.HasSuffix(path, "/acquire") || strings.HasSuffix(path, "/renew"))
 }
 
@@ -475,7 +496,9 @@ func reserveManagedToken(w http.ResponseWriter, r *http.Request, token string) b
 	expiry := tokenClaims.Expiry.Time().Add(time.Minute)
 	var persistErr error
 	if managedRuntime.instance != nil {
-		persistErr = managedRuntime.store.RecordTokenExpiryOn(r.Context(), managedRuntime.instance, claims.Organization, expiry)
+		persistErr = managedRuntime.withInstance(r.Context(), func(ctx context.Context) error {
+			return managedRuntime.store.RecordTokenExpiryOn(ctx, managedRuntime.instance, claims.Organization, expiry)
+		})
 	} else {
 		persistErr = managedRuntime.store.RecordTokenExpiry(r.Context(), claims.Organization, expiry)
 	}
@@ -577,30 +600,26 @@ func (m *ManagedRuntime) BeforeAdditive(ctx context.Context, _ string) (func(), 
 		release()
 		return nil, err
 	}
-	if m.instance != nil {
-		if err := m.instance.PingContext(ctx); err != nil {
-			release()
-			return nil, fmt.Errorf("managed instance lock unavailable: %w", err)
-		}
+	if err := m.checkInstance(ctx); err != nil {
+		release()
+		return nil, fmt.Errorf("managed instance lock unavailable: %w", err)
 	}
 	return release, nil
 }
 
 func (m *ManagedRuntime) checkDrained(ctx context.Context) error {
-	if m.instance != nil {
-		if err := m.instance.PingContext(ctx); err != nil {
-			return fmt.Errorf("managed instance lock unavailable: %w", err)
-		}
+	if err := m.checkInstance(ctx); err != nil {
+		return fmt.Errorf("managed instance lock unavailable: %w", err)
 	}
 	if !m.maintenance {
 		return errManagedDrain
 	}
-	if controlLeases == nil || videoSessions == nil || m.roomsEmpty == nil {
+	if controlLeases == nil || m.roomsEmpty == nil {
 		return errors.New("managed drain dependencies unavailable")
 	}
 	client := controlLeases.client
 	for _, pattern := range []string{"control:*", "operator-control:*", "control-handover:*",
-		"video_session:*", "video_viewer:*", "viewing:*:active"} {
+		"viewing:*:active"} {
 		var cursor uint64
 		for {
 			keys, next, err := client.Scan(ctx, cursor, pattern, 100).Result()
@@ -615,14 +634,6 @@ func (m *ManagedRuntime) checkDrained(ctx context.Context) error {
 						return err
 					}
 					if handover.State != "CONFIRMED" && handover.State != "NONE" {
-						return errManagedDrain
-					}
-				case strings.HasPrefix(key, "video_session:"):
-					session, err := videoSessions.Get(ctx, strings.TrimPrefix(key, "video_session:"))
-					if err != nil {
-						return err
-					}
-					if session.ViewerCount != 0 || session.ControllerSessionID != "" || session.Mode != VideoStandby {
 						return errManagedDrain
 					}
 				case strings.HasPrefix(key, "viewing:"):
@@ -689,10 +700,8 @@ func (m *ManagedRuntime) RTCIngress(w http.ResponseWriter, r *http.Request) {
 	err := func() error {
 		m.additiveMu.Lock()
 		defer m.additiveMu.Unlock()
-		if m.instance != nil {
-			if err := m.instance.PingContext(r.Context()); err != nil {
-				return err
-			}
+		if err := m.checkInstance(r.Context()); err != nil {
+			return err
 		}
 		return m.store.SetDrainQuietUntil(r.Context(), time.Time{})
 	}()

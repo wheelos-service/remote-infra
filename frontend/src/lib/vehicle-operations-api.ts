@@ -8,7 +8,9 @@ const age = z.number().int().safe().nonnegative()
 const timestamp = age.min(1)
 const nullableTimestamp = timestamp.nullable()
 const vehicleId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/)
-
+const unicodeText = (minimum: number, maximum: number) => z.string()
+  .min(minimum)
+  .refine((value) => Array.from(value).length <= maximum)
 export const diagnosticIssueSchema = z.object({
   code: z.string(),
   severity: z.enum(['warning', 'critical']),
@@ -19,8 +21,8 @@ export const vehicleAlertSchema = z.object({
   event_id: z.string().regex(/^[a-f0-9]{64}$/),
   occurred_at_ms: timestamp,
   severity: z.enum(['info', 'warning', 'critical']),
-  code: z.string().min(1).max(128),
-  message: z.string().min(1).max(2048),
+  code: unicodeText(1, 128),
+  message: unicodeText(1, 2048),
   status: z.enum(['open', 'resolved']),
   resolved_at_ms: nullableTimestamp,
 }).strict()
@@ -29,7 +31,7 @@ export const vehicleMissionSchema = z.object({
   mission_id: vehicleId,
   status: z.enum(['unknown', 'accepted', 'running', 'succeeded', 'failed', 'canceled']),
   updated_at_ms: timestamp,
-  description: z.string().refine((value) => new TextEncoder().encode(value).length <= 2048),
+  description: unicodeText(0, 2048),
 }).strict()
 
 export const vehicleHistorySchema = z.object({

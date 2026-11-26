@@ -10,6 +10,7 @@ import (
 func registerControlHandover(mux *http.ServeMux) {
 	mux.Handle("GET /api/vehicles/{vehicle_id}/control/handover",
 		vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleGetHandover))))
+	mux.Handle("POST /api/vehicles/{vehicle_id}/control/handover/ack/{instance}", vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleAcknowledgeHandover))))
 	mux.Handle("POST /api/vehicles/{vehicle_id}/control/handover/ack",
 		vehicleTelemetryNoStore(AuthenticationMiddleware(http.HandlerFunc(handleAcknowledgeHandover))))
 }
@@ -37,9 +38,12 @@ func handleAcknowledgeHandover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden: vehicle identity mismatch", http.StatusForbidden)
 		return
 	}
-	// No generic stop/speed heuristic can prove an Apollo handover. This endpoint
-	// stays disabled until the deployment's native policy is bench-validated.
-	if claims.managed != nil || os.Getenv("CONTROL_HANDOVER_ACK_ENABLED") != "true" {
+	instance := r.PathValue("instance")
+	if instance != "" && !nativeInstance.MatchString(instance) {
+		http.Error(w, "invalid receiver instance", 400)
+		return
+	}
+	if instance == "" && (claims.managed != nil || os.Getenv("CONTROL_HANDOVER_ACK_ENABLED") != "true") {
 		http.Error(w, "native handover policy has not been enabled", http.StatusServiceUnavailable)
 		return
 	}
@@ -64,7 +68,7 @@ func handleAcknowledgeHandover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "native revocation must be applied before reporting handover", http.StatusBadRequest)
 		return
 	}
-	err = controlLeases.ReportHandover(r.Context(), vehicleID, ack.SessionID, ack.Revision, ack.VehicleHandoverConfirmed)
+	err = controlLeases.reportReceiverHandover(r.Context(), vehicleID, ack.SessionID, ack.Revision, ack.VehicleHandoverConfirmed, instance)
 	if err != nil {
 		writeControlSessionError(w, err)
 		return

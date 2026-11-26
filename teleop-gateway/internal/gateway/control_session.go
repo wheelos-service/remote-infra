@@ -27,17 +27,19 @@ var (
 )
 
 type ControlSession struct {
-	ProtocolVersion  int                  `json:"protocol_version,omitempty"`
-	ClientInstanceID string               `json:"client_instance_id,omitempty"`
-	SenderIdentity   string               `json:"sender_identity,omitempty"`
-	SessionID        string               `json:"session_id"`
-	VehicleID        string               `json:"vehicle_id"`
-	OperatorID       string               `json:"operator_id"`
-	OperatorTenant   string               `json:"operator_tenant,omitempty"`
-	PublicKeyB64     string               `json:"public_key_b64"`
-	Status           ControlSessionStatus `json:"status"`
-	CreatedAtMS      int64                `json:"created_at_ms"`
-	ExpiresAtMS      int64                `json:"expires_at_ms"`
+	ContractVersion    int                  `json:"contract_version,omitempty"`
+	ReceiverInstanceID string               `json:"receiver_instance_id,omitempty"`
+	ProtocolVersion    int                  `json:"protocol_version,omitempty"`
+	ClientInstanceID   string               `json:"client_instance_id,omitempty"`
+	SenderIdentity     string               `json:"sender_identity,omitempty"`
+	SessionID          string               `json:"session_id"`
+	VehicleID          string               `json:"vehicle_id"`
+	OperatorID         string               `json:"operator_id"`
+	OperatorTenant     string               `json:"operator_tenant,omitempty"`
+	PublicKeyB64       string               `json:"public_key_b64"`
+	Status             ControlSessionStatus `json:"status"`
+	CreatedAtMS        int64                `json:"created_at_ms"`
+	ExpiresAtMS        int64                `json:"expires_at_ms"`
 }
 
 var acquireControlSessionScript = redis.NewScript(`
@@ -47,6 +49,7 @@ end
 -- Guards never expire with a driving lease: expiry is not a physical handover.
 local pending = redis.call('HGET', KEYS[3], 'session')
 if pending or redis.call('EXISTS', KEYS[4]) == 1 then return -1 end
+if ARGV[5] ~= '' and redis.call('GET',KEYS[5]) ~= ARGV[5] then return -2 end
 local revision = tonumber(redis.call('HGET', KEYS[3], 'revision') or '0')
 if not revision or revision >= 9007199254740991 then
   return redis.error_reply('invalid handover revision')
@@ -74,6 +77,7 @@ if session.session_id ~= ARGV[1] or session.operator_id ~= ARGV[2] or session.st
 end
 if redis.call('HGET', KEYS[3], 'state') ~= 'ACTIVE'
   or redis.call('GET', KEYS[4]) ~= ARGV[1] then return 0 end
+if session.contract_version == 3 and redis.call('GET',KEYS[5]) ~= session.receiver_instance_id then return -2 end
 session.expires_at_ms = tonumber(ARGV[3])
 redis.call('SET', KEYS[1], cjson.encode(session), 'XX', 'PX', ARGV[4])
 redis.call('SET', KEYS[2], ARGV[5], 'XX', 'PX', ARGV[4])
@@ -109,17 +113,20 @@ func (s *ControlLeaseStore) AcquireControlSession(ctx context.Context, session C
 		ctx,
 		s.client,
 		[]string{controlLeaseKey(session.VehicleID), controlSessionIndexKey(session.SessionID),
-			controlHandoverKey(session.VehicleID), operatorControlKey(session.OperatorTenant, session.OperatorID)},
+			controlHandoverKey(session.VehicleID), operatorControlKey(session.OperatorTenant, session.OperatorID), receiverKey(session.VehicleID)},
 		payload,
 		s.ttl.Milliseconds(),
 		session.VehicleID,
-		session.SessionID,
+		session.SessionID, session.ReceiverInstanceID,
 	).Int()
 	if err != nil {
 		return fmt.Errorf("acquire control session: %w", err)
 	}
 	if result == 0 {
 		return ErrControlLeaseHeld
+	}
+	if result == -2 {
+		return errReceiverUnavailable
 	}
 	if result < 0 {
 		return ErrControlHandoverPending
@@ -157,7 +164,7 @@ func (s *ControlLeaseStore) RenewControlSession(ctx context.Context, sessionID, 
 		ctx,
 		s.client,
 		[]string{controlLeaseKey(session.VehicleID), controlSessionIndexKey(sessionID),
-			controlHandoverKey(session.VehicleID), operatorControlKey(session.OperatorTenant, session.OperatorID)},
+			controlHandoverKey(session.VehicleID), operatorControlKey(session.OperatorTenant, session.OperatorID), receiverKey(session.VehicleID)},
 		sessionID,
 		operatorID,
 		expiresAt,
@@ -169,6 +176,9 @@ func (s *ControlLeaseStore) RenewControlSession(ctx context.Context, sessionID, 
 	}
 	if result == 0 {
 		return ControlSession{}, ErrControlSessionNotFound
+	}
+	if result == -2 {
+		return ControlSession{}, errReceiverUnavailable
 	}
 	if result < 0 {
 		return ControlSession{}, ErrControlSessionOwner
@@ -267,13 +277,6 @@ local opKey = redis.call('HGET', KEYS[2], 'operator_key')
 if opKey and opKey ~= '' then
   redis.call('DEL', opKey)
 end
-local vRaw = redis.call('GET', KEYS[5])
-if vRaw then
-  local ok, vs = pcall(cjson.decode, vRaw)
-  if ok and type(vs) == 'table' and type(vs.session_id) == 'string' and vs.session_id ~= '' then
-    redis.call('DEL', 'video_viewer:' .. vs.session_id)
-  end
-end
 redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5])
 return 1
 `)
@@ -287,7 +290,7 @@ func (s *ControlLeaseStore) PurgeVehicleLeases(ctx context.Context, vehicleID st
 		controlHandoverKey(vehicleID),
 		"viewing:" + vehicleID + ":active",
 		"viewing:" + vehicleID + ":demand",
-		videoSessionKey(vehicleID),
+		vehicleMediaTokenKey(vehicleID),
 	}, vehicleID).Err()
 }
 
@@ -315,9 +318,6 @@ func (s *ControlLeaseStore) RevokeOperatorControl(ctx context.Context, tenant, o
 	}
 	if err := s.ReleaseControlSession(ctx, session.SessionID, session.OperatorID); err != nil && !errors.Is(err, ErrControlSessionNotFound) {
 		return "", err
-	}
-	if videoSessions != nil {
-		_, _ = videoSessions.ClearController(ctx, session.VehicleID, session.SessionID)
 	}
 	return session.VehicleID, nil
 }

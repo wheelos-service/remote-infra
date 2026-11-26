@@ -1,7 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "vehicle-control-v2.schema.json",
-  "title": "Vehicle control v2",
+  "$id": "vehicle-control.schema.json",
+  "title": "Vehicle control",
+  "description": "Vehicle control packet; the current wire version is 2.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "type", "vehicle_id", "session_id", "client_instance_id", "receiver_instance_id", "revision", "sequence", "timestamp_ms", "command", "signature"],
@@ -21,9 +22,9 @@
       "additionalProperties": false,
       "required": ["steering", "throttle", "brake", "direction"],
       "properties": {
-        "steering": { "type": "integer", "minimum": -1000, "maximum": 1000 },
-        "throttle": { "type": "integer", "minimum": 0, "maximum": 1000 },
-        "brake": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "steering": { "type": "integer", "minimum": -100, "maximum": 100 },
+        "throttle": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "brake": { "type": "integer", "minimum": 0, "maximum": 100 },
         "direction": { "type": "integer", "minimum": -1, "maximum": 1 }
       },
       "not": {

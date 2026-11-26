@@ -3,7 +3,9 @@
 ## When
 Read this guide before changing vehicle Cyber, real-time monitoring/control,
 LiveKit transport, the vehicle's Gateway token permissions, or Apollo
-`Guardian` / `Canbus` remote driving arbitration.
+`Guardian` / `Canbus` remote driving arbitration. For full end-to-end flowcharts
+and stage-by-stage exception tables, see
+[`teleop-flows-and-exceptions.md`](teleop-flows-and-exceptions.md).
 
 ## 5-Module Runtime Boundaries
 - Keep a single vehicle process and a single LiveKit room connection. Do not
@@ -23,9 +25,10 @@ LiveKit transport, the vehicle's Gateway token permissions, or Apollo
       (or accepts it inline from `/media-demand`) and passes `media_token` and
       `video_required` over `SOCK_SEQPACKET` (`FD 3`) so the isolated worker
       connects to LiveKit immediately without repeating OAuth/token HTTP RTTs.
-    - Uses `poll()`-driven IPC (`MediaProcess::WaitForEvent` in parent, `poll()`
-      on `FD 3` + `FD 4` in worker) for sub-millisecond control and video
-      dispatch without 10 ms sleep jitter.
+    - Uses `poll()`-driven IPC (`MediaProcess::WaitForEvent` on `FD 3` / `FD 4`
+      + `eventfd` frame-arrival wakeup in parent, `poll()` on `FD 3` + `FD 4`
+      in worker) for sub-millisecond control and video dispatch without sleep
+      jitter.
     - Supports **Data-Only Standby Lease** (`rtc_required=true`,
       `control_required=true`, `video_required=false`): connects the LiveKit
       DataChannel for low-latency control/standby heartbeats without publishing
@@ -45,16 +48,23 @@ LiveKit transport, the vehicle's Gateway token permissions, or Apollo
       never duplicate OAuth `client_credentials` token handshakes.
     - `ControlReceiver`: network & cryptographic verification (`session_id`,
       `vehicle_id`, `sender_id`, Ed25519 signature, anti-replay `seq`/`ts`,
-      `revision`, and 300 ms watchdog). Returns `ACCEPTED` (never `APPLIED`).
+      `revision`, and two-stage watchdog: `300 ms -> PAUSED` requiring
+      neutral/brake `throttle == 0` recovery, `1500 ms -> LOCKED`). Returns
+      `ACCEPTED` or `PAUSED` (never `APPLIED`).
     - `ControlService`: routes verified `ControlIntent` by `control_mode`
       (`disabled | simulation | cyber`). In `simulation`, integrates a synthetic
       setpoint and returns `APPLIED` (`simulation=true`). In `cyber`, delegates to
       `CyberAdapter` to publish `apollo::control::ControlCommand` on
-      `/apollo/teleop/control` and returns `ACCEPTED` (`simulation=false`).
+      `/apollo/teleop/control`, refreshes `PAUSED` every `200 ms`, reports
+      verified `/control/handover/ack` when `LOCKED` and `StateCache` confirms
+      vehicle exit from `REMOTE`, and returns `ACCEPTED` (`simulation=false`).
     - `CyberAdapter`: owns Cyber RT readers/writers and unit/sign conversion
-      (`steer [-1,1]` right `+` -> `steering_target [-100,100]%` left `+`;
-      `throttle/brake [0,1]` -> `[0,100]%`; gear standstill interlock). Never
-      writes directly to `/apollo/control` or Canbus hardware.
+      (`steering [-100,100]` right `+` -> `steering_target [-100,100]%` left `+`;
+      `throttle/brake [0,100]%` -> `[0,100]%` directly, or in configurable
+      `control_longitudinal_mode="speed"` mapping `throttle [0,100]%` to
+      `speed [0, max_remote_speed_mps]` m/s with `throttle=0`; `PAUSED` L1
+      `25%` brake-hold in `DrivingAction::START`; gear standstill interlock).
+      Never writes directly to `/apollo/control` or Canbus hardware.
 - **2. Autonomous Control (`apollo-base/modules/control` + `SafetyManager`)**:
   - Owns AD trajectory tracking and internal AD health checks (`PreCheck` /
     `PostCheck` for Localization/Planning/Chassis timeouts).
@@ -160,4 +170,4 @@ LiveKit transport, the vehicle's Gateway token permissions, or Apollo
 - Apollo Guardian arbiter: `/home/wfh/01code/apollo-base/modules/guardian/`
 - Apollo Canbus & VehicleController: `/home/wfh/01code/apollo-base/modules/canbus/`
 - Cross-component architecture: `.agents/knowledge/architecture.md`
-- Control packet schema: `api/schemas/vehicle-control-v2.schema.json`
+- Control packet schema: `api/schemas/vehicle-control.schema.json`

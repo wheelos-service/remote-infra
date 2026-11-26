@@ -161,14 +161,13 @@ func TestControlHandoverDeviceAcknowledgementGate(t *testing.T) {
 func TestControlHTTPReleaseIsPendingAndACLIsRechecked(t *testing.T) {
 	f := newTelemetryFixture(t)
 	previousLeases, previousAuth, previousIDs := controlLeases, vehicleAuthorizer, vehicleIdentities
-	previousVideo, previousSink, previousKey, previousSecret := videoSessions, auditSink, lkApiKey, lkApiSecret
+	previousSink, previousKey, previousSecret := auditSink, lkApiKey, lkApiSecret
 	controlLeases, vehicleAuthorizer, vehicleIdentities = f.api.leases, f.api.authorizer, f.api.identities
-	videoSessions = NewVideoSessionStore(f.client, 0)
 	auditSink = NewJSONAuditSink(io.Discard)
 	lkApiKey, lkApiSecret = "test", "control-test-only-signing-key-not-a-production-credential"
 	t.Cleanup(func() {
 		controlLeases, vehicleAuthorizer, vehicleIdentities = previousLeases, previousAuth, previousIDs
-		videoSessions, auditSink, lkApiKey, lkApiSecret = previousVideo, previousSink, previousKey, previousSecret
+		auditSink, lkApiKey, lkApiSecret = previousSink, previousKey, previousSecret
 	})
 	for pattern, handler := range map[string]http.HandlerFunc{
 		"POST /api/vehicles/{vehicle_id}/control/acquire": handleAcquireControl,
@@ -197,4 +196,65 @@ func TestControlHTTPReleaseIsPendingAndACLIsRechecked(t *testing.T) {
 	if state.Control.Status != "unknown" {
 		t.Fatal("pending handover was reported free")
 	}
+}
+
+func TestRestartedReceiverCompletesPreviouslyRevokedHandover(t *testing.T) {
+	store, _ := newViewingStore(t)
+	leases := &ControlLeaseStore{client: store.client, ttl: time.Minute}
+	ctx := context.Background()
+	session := newTestControlSession("car", "alice", "first", leases.ttl)
+	session.ContractVersion = 3
+	session.ReceiverInstanceID = "original"
+	heartbeat := func(instance string) {
+		t.Helper()
+		if err := store.client.Set(ctx, receiverKey("car"), instance, time.Minute).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report := func(instance string, confirmed, accepted bool) {
+		t.Helper()
+		err := leases.reportReceiverHandover(ctx, "car", "first", 1, confirmed, instance)
+		if accepted && err != nil || !accepted && !errors.Is(err, ErrControlHandoverPending) {
+			t.Fatalf("report %s confirmed=%v accepted=%v: %v", instance, confirmed, accepted, err)
+		}
+	}
+	blocker := func(car, want string) {
+		t.Helper()
+		got, err := controlRequestBlocker.Run(ctx, store.client, []string{controlLeaseKey(car), controlHandoverKey(car), operatorControlKey(session.OperatorTenant, session.OperatorID)}).Text()
+		if err != nil || got != want {
+			t.Fatalf("blocker %q, want %q: %v", got, want, err)
+		}
+	}
+	heartbeat("original")
+	if err := leases.AcquireControlSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	blocker("car", "lease_held")
+	blocker("other", "operator_busy")
+	heartbeat("replacement")
+	report("replacement", false, false)
+	if err := leases.ReleaseControlSession(ctx, "first", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	blocker("car", "awaiting_revocation")
+	report("replacement", false, false)
+	heartbeat("original")
+	report("original", false, true)
+	blocker("car", "awaiting_vehicle")
+	heartbeat("replacement")
+	report("replacement", true, false)
+	report("replacement", false, true)
+	blocker("other", "operator_busy")
+	heartbeat("third")
+	report("replacement", true, false)
+	report("third", true, false)
+	report("third", false, true)
+	report("third", true, true)
+	report("third", true, true)
+	blocker("car", "")
+	blocker("other", "")
+	if err := leases.AcquireControlSession(ctx, newTestControlSession("car", "alice", "second", leases.ttl)); err != nil {
+		t.Fatal(err)
+	}
+	report("third", true, false)
 }

@@ -14,7 +14,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPENDENCIES = {'postgres': 'postgres:16-alpine', 'redis': 'redis:7-alpine',
-                'casdoor': 'casbin/casdoor:v4.25.0', 'livekit': 'livekit/livekit-server:v1.13.11',
+                'casdoor': 'casbin/casdoor:v4.25.0',
                 'caddy': 'caddy:2-alpine', 'adguardhome': 'adguard/adguardhome:v0.107.80',
                 'storage-init': 'alpine:3.20'}
 
@@ -30,7 +30,7 @@ def inspect(image):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--version', default='1.1.0')
+    parser.add_argument('--version', default='1.1.3')
     args = parser.parse_args()
     if not re.fullmatch(r'[0-9][a-z0-9.-]{0,50}', args.version):
         parser.error('use a numeric release version with lowercase letters, dots or hyphens')
@@ -45,13 +45,15 @@ def main():
     if archive.exists():
         parser.error('output archive already exists; select a different directory or version')
     images = {key: f'teleop-{key}:{args.version}-amd64'
-              for key in ('gateway', 'frontend', *DEPENDENCIES)}
+              for key in ('gateway', 'frontend', 'livekit', *DEPENDENCIES)}
     setup_image = f'teleop-setup:{args.version}-amd64'
     go_proxy = ['--build-arg', 'GOPROXY'] if os.environ.get('GOPROXY') else []
     run(['docker', 'build', '--platform', platform, *go_proxy, '-t', images['gateway'],
          str(ROOT / 'teleop-gateway')])
     run(['docker', 'build', '--platform', platform, '-t', images['frontend'],
          '-f', str(ROOT / 'frontend/Dockerfile'), str(ROOT)])
+    run(['docker', 'build', '--platform', platform, *go_proxy, '-t', images['livekit'],
+         str(ROOT / 'infra/livekit')])
     for key, upstream in DEPENDENCIES.items():
         if subprocess.run(['docker', 'image', 'inspect', upstream], stdout=subprocess.DEVNULL,
                           stderr=subprocess.DEVNULL).returncode:
@@ -72,6 +74,9 @@ def main():
         run(['docker', 'build', '--platform', platform, '-t', setup_image, str(context)])
         if inspect(setup_image)['Architecture'] != 'amd64':
             raise RuntimeError('setup image has the wrong architecture')
+        # The launcher runs as the installing user, which can be any non-root UID.
+        run(['docker', 'run', '--rm', '--network', 'none', '--user', '65534:65534',
+             setup_image, '--help'], stdout=subprocess.DEVNULL)
         bundle = temp / name
         bundle.mkdir()
         setup_image_id = inspect(setup_image)['Id']
@@ -79,7 +84,7 @@ def main():
             '__SETUP_IMAGE__', setup_image).replace('__SETUP_IMAGE_ID__', setup_image_id)
         (bundle / 'teleop').write_text(launcher)
         (bundle / 'teleop').chmod(0o755)
-        shutil.copyfile(ROOT / 'infra/release/README.txt', bundle / 'README.txt')
+        shutil.copyfile(ROOT / 'infra/release/README.md', bundle / 'README.txt')
         shutil.copyfile(context / 'release-images.json', bundle / 'release-images.json')
         manifest['setup_image'] = setup_image
         manifest['setup_image_id'] = setup_image_id

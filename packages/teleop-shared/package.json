@@ -19,6 +19,10 @@
     "./camera-view": {
       "types": "./dist/camera-view.d.ts",
       "default": "./dist/camera-view.js"
+    },
+    "./control-timing": {
+      "types": "./dist/control-timing.d.ts",
+      "default": "./dist/control-timing.js"
     }
   },
   "scripts": {
