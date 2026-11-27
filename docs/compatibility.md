@@ -76,7 +76,10 @@ The browser enables handheld driving after the bound receiver returns reliable
 `READY` feedback with reason `awaiting_command_gear_v1`. Older receivers
 retain standby, takeover, release and emergency-stop controls. The Apollo
 source changes are in commit `88c06171a62510571acf41b40bf66eb99341ed85`
-on `teleop-V1` and cover Teleop, Guardian and Canbus together.
+on `teleop-V1` and cover Teleop, Guardian and Canbus together. This branch
+reports `COMPLETE_AUTO_DRIVE` for both local automation and remote driving.
+The dashboard confirms takeover from fresh Guardian `REMOTE` and an engaged
+chassis mode in the same vehicle state report.
 [Native patch against Apollo 6de50aa262](../infra/apollo/handheld-gear.patch)
 
 The four required signed v2 command values are `steering, throttle, brake,

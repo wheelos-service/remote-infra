@@ -55,6 +55,8 @@ const chassisGears = new Map<string, Gear | 'P'>([
   ['GEAR_DRIVE', 'D'], ['GEAR_REVERSE', 'R'], ['GEAR_NEUTRAL', 'N'], ['GEAR_PARKING', 'P'],
 ])
 
+type TimedSample<T> = { age_ms?: number; source_timestamp_ms?: number; message?: T }
+
 type TraceEvent = 'input' | 'tick' | 'sign' | 'superseded' | 'dispatch' | 'published' |
   'ack' | 'feedback' | 'renew' | 'fault' | 'disconnect_failed' | 'release_failed'
 type FaultCode = 'external_fault' | 'invalid_feedback' | 'receiver_changed' | 'unexpected_ack' |
@@ -122,7 +124,7 @@ export class ControlSessionClient {
   private renewTimer?: ReturnType<typeof setTimeout>
   private renewalSeq = 0
   private clockOffsetMs = 0
-  private remoteReportedAt?: number
+  private remoteExpiresAt = 0
   private steeringPct?: number
   private mediaReady = true
   private rtcReconnecting = false
@@ -175,17 +177,19 @@ export class ControlSessionClient {
       (command.direction === 0 || command.direction !== this.propulsionDirection)
   }
 
-  updateChassisGear(chassis?: { age_ms?: number; source_timestamp_ms?: number; message?: { gear_location?: string } },
-      publishedAt?: number): void {
-    this.gearExpiresAt = 0
-    const source = chassis?.source_timestamp_ms
-    const age = chassis?.age_ms
-    if (typeof source !== 'number' || typeof age !== 'number' || typeof publishedAt !== 'number') return
+  private sampleAge(sample: TimedSample<unknown> | undefined, publishedAt?: number): number {
+    const source = sample?.source_timestamp_ms
+    const age = sample?.age_ms
+    if (typeof source !== 'number' || typeof age !== 'number' || typeof publishedAt !== 'number' ||
+        !Number.isFinite(source) || !Number.isFinite(age) || !Number.isFinite(publishedAt)) return Infinity
     const now = Date.now() + this.clockOffsetMs
     const elapsed = now - publishedAt
-    if (elapsed < 0 || age < 0 || source > now) return
-    const bound = Math.max(now - source, elapsed + age)
-    this.gearExpiresAt = performance.now() + CHASSIS_GEAR_MAX_AGE_MS - bound
+    if (elapsed < 0 || age < 0 || source > now) return Infinity
+    return Math.max(now - source, elapsed + age)
+  }
+
+  updateChassisGear(chassis?: TimedSample<{ gear_location?: string }>, publishedAt?: number): void {
+    this.gearExpiresAt = performance.now() + CHASSIS_GEAR_MAX_AGE_MS - this.sampleAge(chassis, publishedAt)
     this.chassisGear = chassisGears.get(chassis?.message?.gear_location ?? '')
   }
 
@@ -268,7 +272,7 @@ export class ControlSessionClient {
   async acquire(): Promise<void> {
     if (this.state !== 'idle') throw new Error('Controller is already in use')
     if (!this.mediaReady || this.verifyVideo && !this.verifyVideo()) throw new Error('Three camera feeds are not ready')
-    this.remoteReportedAt = undefined
+    this.remoteExpiresAt = 0
     this.steeringPct = undefined
     this.acquiring = true
     this.error = ''
@@ -427,18 +431,31 @@ export class ControlSessionClient {
 
   private videoHoldRevision = -1
 
-  updateArbitration(state?: string, drivingMode?: string, steeringPct?: number): void {
-    this.steeringPct = steeringPct
-    if ((drivingMode != null && drivingMode !== 'COMPLETE_REMOTE_DRIVE') ||
-        (state != null && state !== 'REMOTE')) {
-      this.remoteReportedAt = undefined
-    } else if (state === 'REMOTE') {
-      this.remoteReportedAt = performance.now()
+  updateArbitration(status: TimedSample<{ state?: string; safety_override?: string }> | undefined,
+      chassis: TimedSample<{ driving_mode?: string; steering_percentage?: number }> | undefined,
+      publishedAt?: number, sourcesOmitted = false): void {
+    this.steeringPct = chassis?.message?.steering_percentage
+    const mode = chassis?.message?.driving_mode
+    // teleop-V1 uses the same drive-by-wire mode for Guardian AUTO and REMOTE.
+    const dbwActive = mode === 'COMPLETE_AUTO_DRIVE' || mode === 'COMPLETE_REMOTE_DRIVE'
+    const chassisAge = this.sampleAge(chassis, publishedAt)
+    const limit = this.timing.feedbackTimeoutMs
+    if (!dbwActive || chassisAge >= limit) {
+      this.remoteExpiresAt = 0
+      return
     }
+    if (sourcesOmitted && !status) return // A compact packet cannot renew the last confirmation.
+    const override = status?.message?.safety_override
+    if (status?.message?.state !== 'REMOTE' || (override && override !== 'SAFETY_OVERRIDE_NONE')) {
+      this.remoteExpiresAt = 0
+      return
+    }
+    const age = Math.max(chassisAge, this.sampleAge(status, publishedAt))
+    this.remoteExpiresAt = performance.now() + limit - age
   }
 
   get remoteControlActive(): boolean {
-    return this.remoteReportedAt !== undefined && performance.now() - this.remoteReportedAt < this.timing.feedbackTimeoutMs
+    return performance.now() < this.remoteExpiresAt
   }
 
   get handheldReady(): boolean {

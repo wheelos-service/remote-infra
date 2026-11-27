@@ -1826,31 +1826,42 @@ test('video pause selects the command from current session arbitration and prese
     assert.equal(c.handheldReady, outcome === 'remote_brake_20')
     assert.deepEqual(c.selectVideoPauseCommand(), { outcome, command })
   }
+  function report(state, mode, steer = 14, statusAge = 0, chassisAge = 0, override = 'SAFETY_OVERRIDE_NONE') {
+    const wall = Date.now() + c.clockOffset
+    const sample = (message, age) => ({ message, age_ms: age, source_timestamp_ms: wall - age })
+    c.updateArbitration(state && sample({ state, safety_override: override }, statusAge),
+      sample({ driving_mode: mode, steering_percentage: steer }, chassisAge), wall, state === undefined)
+  }
   try {
-    c.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE', 14)
+    report('REMOTE', 'COMPLETE_AUTO_DRIVE')
     await c.acquire()
     f.accept()
     expectPause('standby', standby)
-    c.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE', 14)
+    report('REMOTE', 'COMPLETE_AUTO_DRIVE')
     expectPause('remote_brake_20', hold)
     now += 1599
-    c.updateArbitration(undefined, 'COMPLETE_REMOTE_DRIVE', 6)
+    report(undefined, 'COMPLETE_AUTO_DRIVE', 6)
     expectPause('remote_brake_20', { ...hold, steering: -6 })
     now++
-    c.updateArbitration(undefined, 'COMPLETE_REMOTE_DRIVE', 6)
+    report(undefined, 'COMPLETE_AUTO_DRIVE', 6)
     expectPause('standby', standby)
-    for (const [state, mode] of [[undefined, 'COMPLETE_MANUAL'], ['REMOTE', 'COMPLETE_AUTO_DRIVE'], ['AUTO', undefined]]) {
-      c.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE', 14)
+    for (const args of [
+      [undefined, 'COMPLETE_MANUAL'], ['REMOTE', undefined], ['REMOTE', 'AUTO_STEER_ONLY'],
+      ['AUTO', 'COMPLETE_AUTO_DRIVE'], ['EMERGENCY', 'COMPLETE_AUTO_DRIVE'],
+      ['REMOTE', 'COMPLETE_AUTO_DRIVE', 14, 1600], ['REMOTE', 'COMPLETE_AUTO_DRIVE', 14, 0, 1600],
+      ['REMOTE', 'COMPLETE_AUTO_DRIVE', 14, 0, 0, 'SAFETY_OVERRIDE_HARD_ESTOP'],
+    ]) {
+      report('REMOTE', 'COMPLETE_REMOTE_DRIVE')
       expectPause('remote_brake_20', hold)
-      c.updateArbitration(state, mode, 14)
+      report(...args)
       expectPause('standby', standby)
-      c.updateArbitration(undefined, 'COMPLETE_REMOTE_DRIVE', 14)
+      report(undefined, 'COMPLETE_AUTO_DRIVE')
       expectPause('standby', standby)
     }
-    c.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE', 14)
+    report('REMOTE', 'COMPLETE_AUTO_DRIVE')
     c.setCommand(emergency)
     expectPause('emergency_stop', emergency)
-    c.updateArbitration('MANUAL')
+    report('MANUAL', 'COMPLETE_MANUAL')
     expectPause('emergency_stop', emergency)
   } finally { await c.release() }
 })

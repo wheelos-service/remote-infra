@@ -420,7 +420,19 @@ test('E2E Normal Flow: viewing acquire -> 3-camera rVFC ready -> gamepad 0-100 c
   reportGear('GEAR_DRIVE')
   padInput.poll([pad], true)
   assert.equal(controls.isGamepadEnabled, false, 'wait for vehicle takeover')
-  controller.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE')
+  const reportTakeover = (state = 'REMOTE') => {
+    const now = Date.now() + controller.clockOffset
+    const stamp = { age_ms: 0, source_timestamp_ms: now }
+    controller.updateArbitration({ ...stamp, message: { state, safety_override: 'SAFETY_OVERRIDE_NONE' } },
+      { ...stamp, message: { driving_mode: 'COMPLETE_AUTO_DRIVE' } }, now)
+  }
+  reportTakeover('AUTO')
+  pad.buttons[6].pressed = true
+  padInput.poll([pad], true)
+  assert.equal(controls.isGamepadEnabled, false)
+  assert.equal(controller.requestedGear, undefined)
+  pad.buttons[6].pressed = false
+  reportTakeover()
   padInput.poll([pad], true)
   pad.axes[0] = 0.575 // ~50% steer
   pad.axes[3] = -0.575 // ~50% throttle, forward
@@ -431,7 +443,7 @@ test('E2E Normal Flow: viewing acquire -> 3-camera rVFC ready -> gamepad 0-100 c
   assert.deepEqual(receiver.lastCommand, { steering: 50, throttle: 50, brake: 0, direction: 1 })
 
   const sample = async () => {
-    controller.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE')
+    reportTakeover()
     padInput.poll([pad], true)
     await new Promise(resolve => setTimeout(resolve, 110))
     await controller.tick()
@@ -440,8 +452,9 @@ test('E2E Normal Flow: viewing acquire -> 3-camera rVFC ready -> gamepad 0-100 c
   await sample()
   assert.deepEqual(receiver.lastCommand, { steering: 50, throttle: 0, brake: 50, direction: 0, service_brake: true })
   pad.axes[3] = .14
+  pad.axes[0] = -.575
   await sample()
-  assert.deepEqual(receiver.lastCommand, { steering: 50, throttle: 0, brake: 0, direction: 0 })
+  assert.deepEqual(receiver.lastCommand, { steering: -50, throttle: 0, brake: 0, direction: 0 })
   pad.axes = [0, 0, 0, 1]
   await sample()
   assert.equal(receiver.lastCommand.brake, 100)

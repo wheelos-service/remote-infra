@@ -68,8 +68,7 @@ and stage-by-stage exception tables, see
 - **2. Autonomous Control (`apollo-base/modules/control` + `SafetyManager`)**:
   - Owns AD trajectory tracking and internal AD health checks (`PreCheck` /
     `PostCheck` for Localization/Planning/Chassis timeouts).
-  - When `chassis.driving_mode() != COMPLETE_AUTO_DRIVE` (i.e.,
-    `COMPLETE_MANUAL` or `COMPLETE_REMOTE_DRIVE`),
+  - When `chassis.driving_mode() != COMPLETE_AUTO_DRIVE`,
     `ControlComponent::ResetAndProduceZeroControlCommand()` automatically resets
     `controller_agent_` (preventing PID/LQR/MPC windup) and tracks actual
     `chassis.steering_percentage()`, while `Planning` (`TrajectoryStitcher`)
@@ -90,12 +89,11 @@ and stage-by-stage exception tables, see
     (`source_timestamp_sec`) so Canbus freshness checks remain active.
 - **4. Canbus Hardware DBW Layer (`apollo-base/modules/canbus` + `VehicleController`)**:
   - Consumes `/apollo/guardian` (`GuardianCommand`).
-  - `Chassis::DrivingMode` includes `COMPLETE_REMOTE_DRIVE = 5`.
-  - `VehicleController` treats both `COMPLETE_AUTO_DRIVE` and
-    `COMPLETE_REMOTE_DRIVE` as DBW-active (`IsDbwActiveMode`), switches
-    seamlessly between `COMPLETE_AUTO_DRIVE` and `COMPLETE_REMOTE_DRIVE` without
-    dropping DBW enablement, and guarantees that physical driver override
-    (`MANUAL_INTERVENTION`) unconditionally returns to `COMPLETE_MANUAL`.
+  - On wheel101 (`teleop-V1`), both Guardian AUTO and REMOTE target
+    `Chassis::COMPLETE_AUTO_DRIVE`. Guardian `VehicleStatus.state` identifies
+    the active command source. The dashboard also accepts an explicit
+    `COMPLETE_REMOTE_DRIVE` chassis mode from compatible receivers when
+    Guardian confirms REMOTE.
 
 ## Two-Stage Pre-Authorization & Arbitration State Machine
 - **Stage 1 — Standby Lease (`RemoteLeaseState`: `DISCONNECTED <-> STANDBY_READY`)**:

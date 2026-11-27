@@ -300,14 +300,13 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
             type?: string
             sources_omitted?: boolean
             telemetry?: { vehicle_id?: string; published_at_ms?: number; chassis?: { age_ms?: number; source_timestamp_ms?: number; message?: { gear_location?: string; driving_mode?: string; speed_mps?: number; steering_percentage?: number } } }
-            sources?: { vehicle_status?: { message?: { state?: string; safety_override?: string; error_code?: string; reason?: string } } }
+            sources?: { vehicle_status?: { age_ms?: number; source_timestamp_ms?: number; message?: { state?: string; safety_override?: string; error_code?: string; reason?: string } } }
           }
-          if (parsed?.type !== 'vehicle.state') return
+          if (parsed?.type !== 'vehicle.state' || parsed.telemetry?.vehicle_id !== vehicleId) return
           const status = parsed.sources?.vehicle_status?.message
           const chassis = parsed.telemetry?.chassis?.message
-          if (parsed.telemetry?.vehicle_id === vehicleId) next.updateChassisGear(parsed.telemetry.chassis, parsed.telemetry.published_at_ms)
-          else next.updateChassisGear()
-          next.updateArbitration(status?.state, chassis?.driving_mode, chassis?.steering_percentage)
+          next.updateChassisGear(parsed.telemetry.chassis, parsed.telemetry.published_at_ms)
+          next.updateArbitration(parsed.sources?.vehicle_status, parsed.telemetry.chassis, parsed.telemetry.published_at_ms, parsed.sources_omitted === true)
           const preserveStatus = Boolean(parsed.sources_omitted && !status)
           if (parsed.sources_omitted) diagnostics?.record('feedback', 'vehicle_state_sources_omitted', status ? 'kept_status' : 'omitted_all')
           setVehicleArbitration(previous => ({

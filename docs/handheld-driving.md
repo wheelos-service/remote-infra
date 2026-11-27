@@ -4,7 +4,7 @@
 
 1. Open the vehicle in **远程驾驶** and keep the driving tab focused. The first standard controller is selected automatically. If you replace the controller or edit its bindings, check **手柄检测与映射** and click **确认映射**.
 2. When the receiver is online and all three camera feeds are ready, tap and release **RT** to request control. Click **请求接管（制动保持）** when it becomes available.
-3. Wait for **车端已接管 REMOTE**, center both sticks, and release the mapped buttons. The controller activates automatically. Start driving when the dashboard shows **手柄输入就绪**.
+3. Wait for **车端已接管 REMOTE**, center both sticks, and release the mapped buttons. The controller activates automatically. Start driving when the dashboard shows **手柄输入就绪**. On wheel101, the expected status after takeover is **车端仲裁：REMOTE** with **底盘模式：COMPLETE_AUTO_DRIVE**. The button numbers under **手柄检测与映射** show what the browser sees even while driving input is in standby.
 
 ## Default controls
 
