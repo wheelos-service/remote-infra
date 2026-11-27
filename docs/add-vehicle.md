@@ -88,6 +88,8 @@ the vehicle operator obtains a fresh code while preserving the device identity.
 After activation, verify current telemetry and, separately, live camera frames.
 Enrollment does not configure cameras or prove control readiness.
 
+For the public 1.1.3 control test, continue with the onboard receiver and camera checks. [Vehicle-side control test](vehicle-control-test.md)
+
 ## Keep runtime deployment separate
 
 After registration, use the vehicle runtime's generated safe defaults for the
@@ -113,8 +115,8 @@ Deploy optional capabilities independently:
   verified. Selecting an encoded-frame source alone does not open a camera. RTC
   demand can come from viewing or control; camera publication has its own
   demand gate.
-- **Control:** keep disabled during telemetry/video acceptance. This release's
-  native-driving gate must not be bypassed with a simulation allowlist.
+- **Control:** the managed Gateway automatically recognizes active enrollments.
+  The compatible onboard runtime supplies its native-v3 heartbeat and camera timestamps.
 
 Vehicle runtime commands and hardware settings belong to its own release, not
 to the server registration form. Apply configuration changes and restart at a
@@ -139,6 +141,5 @@ are purged; viewing leases retain released tombstones so old sessions cannot
 renew/reacquire after reusing a vehicle ID. Room eviction is requested too;
 actual LiveKit disconnect behavior still needs deployment acceptance.
 
-Assign human operator access through [Administration](auth-management.md) only
-when appropriate. Native driving is blocked in this server release pending
-handover support; a simulation acknowledgement is not physical handover.
+Assign remote operators the appropriate organization and vehicle scope.
+The Gateway applies those permissions as vehicles enroll. [Administration](auth-management.md)

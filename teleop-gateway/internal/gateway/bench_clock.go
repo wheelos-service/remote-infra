@@ -29,8 +29,8 @@ func handleBenchClock(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "vehicle control permission required", http.StatusForbidden)
 		return
 	}
-	if !nativeBenchEnabled(id) {
-		http.Error(w, "generated-camera bench disabled", http.StatusForbidden)
+	if !nativeControlEnabled(claims, id) {
+		http.Error(w, "native control unavailable for this vehicle", http.StatusForbidden)
 		return
 	}
 	ttl, err := controlLeases.client.PTTL(r.Context(), receiverKey(id)).Result()

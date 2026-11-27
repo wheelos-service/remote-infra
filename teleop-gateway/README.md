@@ -44,9 +44,9 @@ The image includes `auth-admin` (`go build ./cmd/auth-admin`) for explicit,
 operator-only bootstrap using protected files. It does not create IdP users
 or credentials. `/#/admin` provides people/vehicle bindings and the three fixed
 roles. Active organization membership grants observation of its active vehicles,
-including live video; administrator status does not grant control. Managed v2
-control requires the remote-operator role and vehicle scope, and is limited to
-allowlisted simulators in this release. Managed mode does not authorize business
+including live video; administrator status does not grant control. Managed
+native control applies automatically to active enrollments within the remote
+operator's vehicle scope. Managed mode does not authorize business
 task dispatch. See [administration](../docs/auth-management.md) and
 [release capabilities](../docs/compatibility.md).
 
@@ -56,10 +56,11 @@ Legacy acquire remains compatible. V2 acquire additionally requires
 `protocol_version: 2` and a valid `client_instance_id`, with the same role and
 vehicle ACL checks for either backend. The vehicle selects `simulation` or
 `cyber` in its local configuration; the platform does not select a backend.
-Managed acquisition additionally requires the vehicle ID in
-`SIMULATED_CONTROL_VEHICLES_JSON` (default `[]`). Use disposable simulators only;
-native acquisition returns HTTP 503 until managed handover support is complete.
-Setting `CONTROL_HANDOVER_ACK_ENABLED` does not bypass this gate.
+For managed native acquisition the client sends `contract_version: 3`
+and the enrolled device maintains an instance-bound native-v3 receiver heartbeat.
+The Gateway evaluates enrollment and grants on every request. A missing
+receiver returns HTTP 503. Simulation sessions require the disposable vehicle
+ID in `SIMULATED_CONTROL_VEHICLES_JSON` (default `[]`).
 The returned RTC token is bound to
 `control-<session_id>`, not a reusable operator-wide identity.
 
@@ -353,10 +354,9 @@ policy. Do not enable it until the native revocation and physical handover
 criteria have been verified on an approved bench. A zero speed, writer success,
 HTTP acknowledgement or lease timeout alone is not such evidence.
 
-The new C++ agent does not implement actuation or physical handover
-acknowledgements; platform driving stays unavailable. Existing legacy control
-clients may encounter a persistent pending handover after their first release
-or expiry. There is deliberately no force-unlock browser endpoint, automatic
-timeout bypass, or fake simulator confirmation in the live API.
+Managed native-v3 receivers use the instance-specific
+`POST /api/vehicles/{vehicle_id}/control/handover/ack/{instance}` route.
+They report revocation and vehicle-confirmed handback for the current session
+and revision. A pending handover reserves the operator and vehicle until confirmation.
 Vehicle Room tokens now allow data publication for `vehicle.state` feedback;
 observers still cannot publish tracks or data.

@@ -12,6 +12,8 @@ Docker host. The release was built and tested on Ubuntu 24.04.
   and fixed roles through the dashboard.
 - Observe active vehicles in the signed-in organization and view their media
   when compatible vehicle software publishes it.
+- Request native control for an active vehicle within the remote operator's
+  assigned scope. Current and newly enrolled vehicles qualify automatically.
 - Use the same console and API from the host and other LAN computers.
 
 The release starts with an empty fleet and generated per-installation
@@ -22,15 +24,11 @@ lifetimes.
 
 ## Current limits
 
-- **Managed native driving is disabled.** Non-allowlisted control acquisition
-  returns HTTP 503 before creating authority. Supported v2 simulation control
-  requires an explicit disposable-simulator allowlist; the release defaults to
-  an empty list. Never put a physical vehicle in that list to bypass the gate.
-- **Browser driving is currently disabled, including simulation.** Source video
-  freshness has not been verified through the camera, LiveKit, and target
-  browser. The workbench remains available for observation. This frontend
-  restriction does not enforce safety on other API clients or revoke an
-  existing control session.
+- Native acquisition requires a current instance-bound receiver heartbeat.
+  The workbench enables control requests after verifying source freshness on
+  all three front cameras. An incomplete handover blocks another session.
+- Simulated control uses an explicit list of disposable simulators, empty by
+  default. Its acknowledgements apply only to simulation sessions.
 - Task dispatch and event acknowledgement are unavailable in managed mode.
   Read-only fleet/operational views do not imply those actions are enabled.
 - Permission changes take effect in stored authorization, but existing media
@@ -62,21 +60,23 @@ private state directory. Root-level compatibility Compose files and the
 legacy operator console have been removed; do not use or recreate a parallel
 deployment path.
 
-### Generated-camera Cyber bench
+### Native control and source-video verification
 
-A stationary interlocked bench may opt in a vehicle ID in the deployment state's
-`native-bench-vehicles.json` array. The default is empty. The operator needs
-normal managed control permission. The percent-command receiver polls the
-instance-bound native-v3 context, reports native handback for the same revision,
-and accepts signed v2 packets. Simulation ACKs retain their separate contract.
+The managed Gateway evaluates the active enrollment and operator grant on each
+request. An operator with organization-wide control scope can access vehicles
+enrolled after sign-in. Selected-vehicle grants retain their assigned scope.
+The original 1.1.3 image required a native bench list. On upgrade, existing
+entries and empty or absent lists require no migration or per-vehicle edits.
+The percent-command receiver polls the instance-bound native-v3 context,
+accepts signed v2 packets, and reports native handback for the same revision.
 
 The matching SDK-Kit generated publisher schedules 640 × 480 test images at
 30 fps and encodes its camera index, Gateway clock epoch, capture-time lower
-bound and CRC-16 in the top 16 rows. The browser samples the same authenticated
-monotonic clock, accounts for the request interval, and reads the pixels on
-each advancing frame. Clock estimates expire after 15 seconds and allow 1000
+bound and CRC-16 in the top 16 rows. Physical cameras can carry their capture
+stamps in LiveKit frame metadata matched by RTP timestamp. The browser samples
+the same authenticated monotonic clock and accounts for the request interval.
+Clock estimates expire after 15 seconds and allow 1000
 ppm drift plus timer resolution. All three stamped feeds must stay fresh for
 one second before driving becomes available. A held image expires at its
-individual source-age deadline. Clear or remove the bench list and regenerate
-the deployment to disable new native sessions. Ordinary camera feeds continue
-in observation mode pending source timestamp verification.
+individual source-age deadline. Camera feeds without verified capture stamps
+remain available for observation.

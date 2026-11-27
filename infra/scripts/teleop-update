@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Update an existing Teleop Compose deployment in place from a published release."""
+import argparse
+import copy
+from datetime import datetime, timezone
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+
+
+RELEASES = 'https://github.com/wheelos-service/remote-infra/releases/download'
+UP = ['up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '180']
+
+
+def discover_state():
+    ids = subprocess.check_output(['docker', 'ps', '-aq', '--filter',
+                                   'label=com.docker.compose.service=gateway'], text=True).split()
+    states = set()
+    if ids:
+        for container in json.loads(subprocess.check_output(['docker', 'inspect', *ids])):
+            for mount in container['Mounts']:
+                if mount['Destination'] == '/run/auth/onboarding.json' and mount['Type'] == 'bind':
+                    state = Path(mount['Source']).parent
+                    if (state / 'deployment.json').is_file():
+                        states.add(state)
+    if len(states) != 1:
+        raise RuntimeError('specify the existing deployment with --state /path/to/state')
+    return states.pop()
+
+
+def fetch_kit(version, directory):
+    name = f'teleop-{version}-compose'
+    url = f'{RELEASES}/{version}/{name}.tar.gz'
+    with urllib.request.urlopen(url + '.sha256', timeout=30) as response:
+        expected = response.read().decode().split()
+    with urllib.request.urlopen(url, timeout=60) as response:
+        archive = response.read()
+    if expected != [hashlib.sha256(archive).hexdigest(), name + '.tar.gz']:
+        raise RuntimeError('release package checksum mismatch')
+    kit = directory / name
+    # Read only the release installer and its inputs. Nothing from the archive
+    # is extracted by pathname or executed before the package digest is checked.
+    with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as tar:
+        for relative in ('infra/scripts/install.py', 'infra/scripts/deploy.py', 'release-images.json', 'SHA256SUMS'):
+            member = tar.getmember(f'{name}/{relative}')
+            if not member.isfile():
+                raise RuntimeError('release package is missing ' + relative)
+            target = kit / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(tar.extractfile(member).read())
+    manifest = json.loads((kit / 'release-images.json').read_text())
+    if manifest.get('version') != version or manifest.get('platform') != 'linux/amd64':
+        raise RuntimeError('release version or platform mismatch')
+    return kit
+
+
+def update_config(current, images):
+    result = copy.deepcopy(current)
+    for name, service in result['services'].items():
+        if name in images:
+            service.update(image=images[name], platform='linux/amd64', pull_policy='missing')
+            service.pop('build', None)
+    return result
+
+
+def site_gateway_patch(receipt, version, release_gateway):
+    if receipt.get('version') != version or 'gateway_patch' not in receipt:
+        return None
+    patch = receipt['gateway_patch']
+    if patch['base_image'] != release_gateway:
+        raise RuntimeError('the site Gateway patch belongs to a different release image')
+    image = json.loads(subprocess.check_output(['docker', 'image', 'inspect', '--', patch['image']]))[0]
+    if (image['Id'], image['Os'], image['Architecture']) != (patch['image_id'], 'linux', 'amd64'):
+        raise RuntimeError('the local Gateway image does not match the installed site patch')
+    return patch
+
+
+def backup_mounts(state, containers):
+    mounts = {str(state): 'state'}
+    for container in containers:
+        for mount in container['Mounts']:
+            if mount['Type'] == 'volume':
+                mounts[mount['Name']] = 'volumes/' + mount['Name']
+            elif mount['Type'] == 'bind' and mount['RW']:
+                source = Path(mount['Source'])
+                if not source.is_relative_to(state):
+                    mounts[str(source)] = 'binds' + str(source)
+    return mounts
+
+
+def cold_backup(backup, mounts, helper):
+    args = ['docker', 'run', '--rm', '--network', 'none', '--user', '0:0']
+    for source, target in mounts.items():
+        args.extend(['-v', f'{source}:/snapshot/{target}:ro'])
+    archive = backup / 'state-and-volumes.tar.gz.partial'
+    with archive.open('xb') as stream:
+        subprocess.run([*args, helper, 'tar', '-czf', '-', '-C', '/snapshot', '.'],
+                       stdout=stream, check=True)
+    subprocess.run(['gzip', '-t', archive], check=True)
+    with tarfile.open(archive) as tar:
+        for member in ['state/compose.json', 'state/deployment.json', *mounts.values()]:
+            tar.getmember('./' + member)
+    archive.rename(backup / 'state-and-volumes.tar.gz')
+
+
+def check_control(compose):
+    for pattern in ('control:*', 'operator-control:*'):
+        keys = subprocess.check_output([*compose, 'exec', '-T', 'redis', 'redis-cli',
+                                        '--raw', '--scan', '--pattern', pattern])
+        if keys.strip():
+            raise RuntimeError('a control lease is active; retry after handback')
+
+
+def replace_file(path, data):
+    descriptor, name = tempfile.mkstemp(dir=path.parent)
+    temp = Path(name)
+    try:
+        with os.fdopen(descriptor, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def activate(compose, config, original, candidate, mounts, helper, backup, verify):
+    if config.read_bytes() != original:
+        raise RuntimeError('Compose configuration changed during image verification; rerun the update')
+    check_control(compose)
+    pending = config.parent / '.teleop-update-pending'
+    replace_file(pending, str(backup).encode())
+    switched = False
+    # Close the public endpoint and let any already accepted requests finish.
+    # Redis stays available for a second check before stopping the Gateway.
+    try:
+        subprocess.run([*compose, 'stop', 'caddy'], check=True)
+        check_control(compose)
+        subprocess.run([*compose, 'stop'], check=True)
+        cold_backup(backup, mounts, helper)
+        replace_file(config, candidate)
+        switched = True
+        subprocess.run([*compose, *UP], check=True)
+        verify()
+    except (Exception, KeyboardInterrupt):
+        print(f'Restoring the previous Compose configuration. Backup directory: {backup}', file=sys.stderr)
+        if switched:
+            replace_file(config, original)
+            subprocess.run([*compose, *UP], check=True)
+        else:
+            subprocess.run([*compose, 'start'], check=True)
+        pending.unlink()
+        raise
+    pending.unlink()
+
+
+def update(args, state, kit, installer):
+    deploy = installer.deploy
+    path = state / 'compose.json'
+    settings = json.loads((state / 'deployment.json').read_text())
+    deploy.configure_runtime(settings)
+    # Existing NAT installations can use an external HTTPS port on both origins.
+    onboarding = json.loads((state / 'onboarding.json').read_text())
+    deploy.APP, deploy.AUTH = onboarding['gateway_url'], onboarding['casdoor_url']
+    deploy.check_project(state)
+    compose = ['docker', 'compose', '-p', deploy.PROJECT, '-f', str(path)]
+    original = path.read_bytes()
+    current = json.loads(original)
+    pending = state / '.teleop-update-pending'
+    if pending.exists() and not args.check:
+        print('Resuming the saved Compose configuration after an interrupted update.', flush=True)
+        subprocess.run([*compose, *UP], check=True)
+        deploy.verify(state, {}, login=False)
+        pending.unlink()
+    deploy.ADGUARD = 'adguardhome' in current['services']
+    repository = installer.REPOSITORY
+    registry_file = state / 'image-registry.json'
+    if registry_file.exists():
+        delivery = json.loads(registry_file.read_text())
+        if delivery.get('registry') and not delivery.get('repository'):
+            raise RuntimeError('use the release kit to update a namespace-based registry installation')
+        repository = delivery.get('repository') or repository
+    manifest = kit / 'release-images.json'
+    images = installer.pull_and_lock(manifest, repository, state)
+    receipt = state / 'installed-release.json'
+    if not receipt.exists():
+        receipt = state / 'image-update.json'
+    previous = json.loads(receipt.read_bytes()) if receipt.exists() else {}
+    patch = site_gateway_patch(previous, args.version, images['gateway'])
+    service_images = dict(images)
+    if patch:
+        service_images['gateway'] = patch['image']
+        print(f'Preserving the verified site Gateway patch for {args.version}.', flush=True)
+    candidate = update_config(current, service_images)
+    if patch:
+        candidate['services']['gateway']['pull_policy'] = 'never'
+    encoded = (json.dumps(candidate, indent=2) + '\n').encode()
+    with tempfile.NamedTemporaryFile(dir=state, suffix='.json') as proposed:
+        proposed.write(encoded)
+        proposed.flush()
+        subprocess.run(['docker', 'compose', '-p', deploy.PROJECT, '-f', proposed.name,
+                        'config', '--quiet'], check=True)
+    if args.check:
+        print(f'{deploy.PROJECT}: verified {len(images)} release images and the proposed Compose configuration.')
+        return
+
+    def inspect_containers():
+        ids = subprocess.check_output([*compose, 'ps', '-aq'], text=True).split()
+        if not ids:
+            raise RuntimeError('no existing Compose containers were found for this state')
+        return json.loads(subprocess.check_output(['docker', 'inspect', *ids]))
+
+    inspected = json.loads(subprocess.check_output(['docker', 'image', 'inspect', *service_images.values()]))
+    expected = {name: info['Id'] for name, info in zip(service_images, inspected, strict=True)
+                if name in current['services']}
+
+    def matches_release(containers):
+        verified = set()
+        for container in containers:
+            name = container['Config']['Labels']['com.docker.compose.service']
+            if name not in expected:
+                continue
+            status = container['State']
+            completed = name == 'storage-init' and status['Status'] == 'exited' and status['ExitCode'] == 0
+            if container['Image'] != expected[name] or not (status['Running'] or completed):
+                return False
+            verified.add(name)
+        return verified == expected.keys()
+
+    def verify():
+        if not matches_release(inspect_containers()):
+            raise RuntimeError('running service images differ from the verified release')
+        deploy.verify(state, {}, login=False)
+
+    containers = inspect_containers()
+    if current != candidate or not matches_release(containers):
+        deploy.verify(state, {}, login=False)
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+        backup = state.parent / (state.name + '-backups') / stamp
+        backup.mkdir(mode=0o700, parents=True)
+        (backup / 'compose.json').write_bytes(original)
+        print(f'Cold backup and previous configuration: {backup}', flush=True)
+        activate(compose, path, original, encoded, backup_mounts(state, containers),
+                 images['storage-init'], backup, verify)
+    else:
+        verify()
+    # Keep the installer receipt current on installations already managed by install.sh.
+    release = {'version': args.version, 'repository': repository, 'images': images,
+               'manifest_sha256': installer.file_digest(manifest),
+               'package_sha256': installer.file_digest(kit / 'SHA256SUMS')}
+    if patch:
+        release['gateway_patch'] = patch
+    if previous != release:
+        replace_file(receipt, (json.dumps(release, indent=2) + '\n').encode())
+    print(f'{deploy.PROJECT} is on {args.version}.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('version', help='published version, for example 1.1.3')
+    parser.add_argument('--state', type=Path, help='existing private state directory (default: discover from the Gateway)')
+    parser.add_argument('--check', action='store_true', help='pull and verify images and validate Compose before making changes')
+    args = parser.parse_args()
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', args.version):
+        parser.error('specify a release number such as 1.1.3')
+    os.umask(0o077)
+    state = (args.state or discover_state()).expanduser().resolve()
+    if not (state / 'bootstrapped').is_file() or not (state / 'compose.json').is_file():
+        raise RuntimeError('the selected state is not an initialized Teleop deployment')
+    with tempfile.TemporaryDirectory(prefix='teleop-update-') as temp:
+        kit = fetch_kit(args.version, Path(temp))
+        sys.path.insert(0, str(kit / 'infra/scripts'))
+        import install as installer
+        installer.private_state(state, kit)
+        with installer.install_lock(state):
+            update(args, state, kit, installer)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError, tarfile.TarError, KeyError) as error:
+        sys.exit(str(error))
