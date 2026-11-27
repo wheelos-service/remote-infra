@@ -1,20 +1,28 @@
 # Handheld driving quick reference
 
-| Default input | Vehicle action |
+## Take control
+
+1. Open the vehicle in **远程驾驶** and keep the driving tab focused. The first standard controller is selected automatically. If you replace the controller or edit its bindings, check **手柄检测与映射** and click **确认映射**.
+2. When the receiver is online and all three camera feeds are ready, tap and release **RT** to request control. Click **请求接管（制动保持）** when it becomes available.
+3. Wait for **车端已接管 REMOTE**, center both sticks, and release the mapped buttons. The controller activates automatically. Start driving when the dashboard shows **手柄输入就绪**.
+
+## Default controls
+
+| Input | Action |
 | --- | --- |
-| Left stick left / right (axis 0) | Steer left / right. More deflection gives more steering. |
-| Right stick **up** (axis 3) | Increase throttle in the confirmed gear. D moves forward, R moves backward, N gives zero throttle. |
-| Right stick **down** (axis 3) | Apply the **service brake** in any gear. Move directly from throttle to brake. Full down requests 100% braking. |
-| **LT** (button 6) | Tap once to request the next gear in **N → D → R → N**. From P, the first tap requests N. |
-| **RT** (button 7) | Tap to request control (**申请控制权**). Tap again to release control and begin handback. |
+| **RT** (button 7) | Tap once to request control. During a session, a fresh tap starts handback. |
+| **LT** (button 6) | At a standstill, center both sticks, release the D-pad, and tap to shift **N → D → R → N**. From **P**, the first tap requests **N**. Release LT between shifts. |
+| Left stick left / right (axis 0) | Steer. More deflection gives more steering. |
+| Right stick up (axis 3) | Apply proportional throttle. **D** drives forward, **R** drives backward, and **N** gives zero throttle. |
+| Right stick down (axis 3) | Apply proportional service braking in any gear. Full down requests 100% braking. |
 | D-pad up / down (buttons 12 / 13) | Full accelerator / full service brake. |
 | D-pad left / right (buttons 14 / 15) | Full left / right steering with the steering stick centered. |
-| Button **1** (B) on the confirmed pad, or **Space** with the driving page focused | **Emergency stop.** The on-screen **急停（Space）** button also triggers it. |
+| **B** (button 1) or **Space** | Emergency stop. The dashboard button **急停（Space）** also works. |
 
-## Take control and drive
+Check **当前挡位** for the gear confirmed by the chassis. If a shift is missed, tap LT again. If the display shows **—**, wait for fresh feedback. Check behind the vehicle before reversing because all three cameras face forward. After a brief focus or video interruption, recenter the sticks and release the D-pad before driving again.
 
-1. Open the vehicle in **远程驾驶**. The first standard controller is selected and mapped automatically. For a nonstandard or replacement controller, select it under **控制手柄**, check **手柄检测与映射**, and click **确认映射**.
-2. When all three camera feeds are ready, tap and release **RT**. Click **请求接管（制动保持）**. Once the vehicle reports **REMOTE**, center the sticks and release the mapped buttons. The controller activates automatically.
-3. At a standstill, tap **LT** with both sticks centered and the D-pad released. Check **当前挡位** before applying throttle. A fresh tap retries a missed shift. If the display shows **—**, wait for feedback. The three front cameras show no rear view. Check behind the vehicle before reversing.
-4. Steer with the left stick. Push the right stick up to drive in the confirmed gear or down to brake. Center the sticks and release the D-pad to clear driving input. After a brief focus or video interruption, recenter before driving again.
-5. Brake to a standstill, then tap **RT** or click **释放并等待车辆交接**. Wait for vehicle handback confirmation. After an emergency stop or **停止并停用手柄**, release the session and complete handback before requesting control again.
+## Release control
+
+Brake to a standstill, center the sticks, then tap **RT** or click **释放并等待车辆交接**. After an emergency stop or **停止并停用手柄**, complete handback before requesting a new session.
+
+If **申请控制权** is greyed out, read the status. **等待车端撤销上一次控制** means the receiver is acknowledging revocation of the previous session. **上次控制已撤销，等待车辆确认已退出远程驾驶** means the vehicle is confirming it has left remote mode. The dashboard updates automatically, including after a browser refresh. If either message persists, check receiver connectivity and the vehicle’s Guardian and chassis status. [Handback troubleshooting](operations.md)
