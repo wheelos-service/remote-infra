@@ -88,6 +88,9 @@ func (s *ControlLeaseStore) GetHandover(ctx context.Context, vehicleID string) (
 	return response, nil
 }
 
+// Apollo StateCache::HandoverWaitReason accepts Guardian and chassis samples up to one second old.
+const handoverEvidenceMaxAgeMS = 1000
+
 var acknowledgeHandoverScript = redis.NewScript(`
 local revision = redis.call('HGET', KEYS[1], 'revision')
 if revision ~= ARGV[1] then return 0 end
@@ -107,15 +110,27 @@ local operatorKey = redis.call('HGET', KEYS[1], 'operator_key')
 if not operatorKey or redis.call('GET', operatorKey) ~= ARGV[2] then
   return redis.error_reply('operator handover fence mismatch')
 end
--- A restarted native receiver may finish an already revoked session only
--- after independently fencing that same revision and observing physical exit.
+-- A replacement must report its own fence before confirming physical exit.
 if (session.receiver_instance_id or '') ~= ARGV[4] then
-  if session.contract_version ~= 3 or ARGV[4] == '' or
-     redis.call('HGET', KEYS[1], 'state') ~= 'PENDING' or
-     redis.call('HGET', KEYS[1], 'edge_revocation_applied') ~= '1' then return 0 end
+  if session.contract_version ~= 3 or not session.receiver_instance_id or ARGV[4] == '' then return 0 end
+  local state = redis.call('HGET', KEYS[1], 'state')
+  if state ~= 'PENDING' and state ~= 'ACTIVE' then return 0 end
   if ARGV[3] == '1' then
     if redis.call('HGET', KEYS[1], 'recovery_receiver') ~= ARGV[4] then return 0 end
   else
+    if redis.call('HGET', KEYS[1], 'edge_revocation_applied') ~= '1' then
+      -- The lease is gone, so no new ACTIVE context can be issued. Wait out any
+      -- cached context and any chassis/Guardian sample from before it expired.
+      -- Start on first contact so this also covers fences from older Gateways.
+      local clock = redis.call('TIME')
+      local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+      local after = redis.call('HGET', KEYS[1], 'recovery_after_ms')
+      if not after then
+        redis.call('HSET', KEYS[1], 'state', 'PENDING', 'recovery_after_ms', now + tonumber(ARGV[5]))
+        return 0
+      end
+      if now < tonumber(after) then return 0 end
+    end
     redis.call('HSET', KEYS[1], 'recovery_receiver', ARGV[4])
   end
 end
@@ -125,7 +140,7 @@ if ARGV[3] ~= '1' then
   return 1
 end
 redis.call('DEL', operatorKey)
-redis.call('HDEL', KEYS[1], 'session', 'operator_key', 'recovery_receiver')
+redis.call('HDEL', KEYS[1], 'session', 'operator_key', 'recovery_receiver', 'recovery_after_ms')
 redis.call('HSET', KEYS[1], 'state', 'CONFIRMED', 'confirmed_session', ARGV[2], 'confirmed_receiver',ARGV[4])
 return 1
 `)
@@ -145,7 +160,7 @@ func (s *ControlLeaseStore) reportReceiverHandover(ctx context.Context, vehicleI
 	}
 	result, err := acknowledgeHandoverScript.Run(ctx, s.client,
 		[]string{controlHandoverKey(vehicleID), controlLeaseKey(vehicleID), receiverKey(vehicleID)},
-		revision, sessionID, confirmed, instance).Int()
+		revision, sessionID, confirmed, instance, defaultControlTimingPolicy().ContextTTLMS+handoverEvidenceMaxAgeMS).Int()
 	if err != nil {
 		return fmt.Errorf("acknowledge handover: %w", err)
 	}

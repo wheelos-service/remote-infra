@@ -30,7 +30,7 @@ export default function RemoteDriving({ vehicleId, list, onListChange, onEnter, 
       <button type="button" onClick={onBack} className="text-sky-300">返回远程驾驶列表</button>
     </section>
     return <TeleopWorkbench key={`${map.id}:${row.id}`} vehicleId={row.id} gear={row.gear === 'P' || row.gear === 'R' || row.gear === 'N' || row.gear === 'D' ? row.gear : '—'}
-      networkQuality={null} speedKph={row.speed ?? undefined} batteryPercent={row.battery ?? undefined}
+      speedKph={row.speed ?? undefined} batteryPercent={row.battery ?? undefined}
       runModeLabel={row.modeLabel} locationLabel={row.locationReason} row={row} map={map}
       onBack={onBack} onMonitor={() => onMonitor(row.id)} />
   }
@@ -49,7 +49,6 @@ export function RemoteDrivingList({ rows, visibleRows, list, onListChange, onEnt
     (list.filter !== 'offline' || !row.online))
   return <div data-testid="remote-driving-list" className="flex h-full min-h-0 flex-col gap-4">
     <header className="flex flex-wrap items-center justify-between gap-2"><h1 className="text-base font-semibold">远程驾驶</h1>
-      <span className="text-xs text-slate-400">选择车辆进入工作台 · 不自动申请控制权</span>
       {!authenticated && <span className="text-xs text-amber-200">布局预览 · 非真实车辆</span>}</header>
     <div className="flex flex-wrap gap-3">
       <input aria-label="搜索远程驾驶车辆" placeholder="搜索车辆编号或名称" value={list.query}

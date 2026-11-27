@@ -4,7 +4,7 @@ import { teleopConfig } from '../lib/teleop-config'
 import { ControlSessionClient, isControlReady, steeringAlignedHold } from '../lib/control-session-client'
 import { applyControlSafetyStrategy, type ControlSafetyEvent } from '../lib/control-safety'
 import { CONTROL_TIMING } from '../lib/control-timing'
-import type { ControlCommand } from '../lib/control-protocol'
+import type { ControlCommand, Gear } from '../lib/control-protocol'
 import type { TeleopDiagnosticsBuffer } from '../lib/teleop-diagnostics'
 import {
   ControlInput, GamepadInput, bindGamepadInput, bindKeyboardInput,
@@ -18,7 +18,7 @@ function withinBudget(promise: Promise<void>, message: string): Promise<void> {
   ])
 }
 
-export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo, receiverReady = true, requestBlocker, onBusyChange, onIntent, diagnostics }: {
+export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo, receiverReady = true, requestBlocker, onBusyChange, onIntent, onGearChange, diagnostics }: {
   vehicleId: string
   bearer: string
   requestBlocker?: string
@@ -27,9 +27,13 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
   videoReady: boolean
   onBusyChange: (busy: boolean) => void
   onIntent: (vehicleId: string, command?: ControlCommand) => void
+  onGearChange: (gear: Gear | 'P' | undefined) => void
   diagnostics?: TeleopDiagnosticsBuffer
 }) {
   const controller = useRef<ControlSessionClient | undefined>(undefined)
+  const sessionButton = useRef<HTMLButtonElement>(null)
+  const stoppedSession = useRef<ControlSessionClient | undefined>(undefined)
+  const releasingSession = useRef<ControlSessionClient | undefined>(undefined)
   const input = useRef<ControlInput | undefined>(undefined)
   const gamepad = useRef<GamepadInput | undefined>(undefined)
   const mounted = useRef(false)
@@ -46,7 +50,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
   const [vehicleArbitration, setVehicleArbitration] = useState<{
     state?: string; safetyOverride?: string; errorCode?: string; reason?: string; drivingMode?: string; speedMps?: number; steeringPct?: number
   }>()
-  const [inputState, setInputState] = useState({ gamepadEnabled: false, message: '输入未启用' })
+  const [inputState, setInputState] = useState({ gamepadEnabled: false, message: '输入待命' })
   const [pad, setPad] = useState<GamepadView>()
   const [mapping, setMapping] = useState<GamepadMapping>({ ...v2GamepadMapping })
   const clearSafetyTimer = useCallback(() => {
@@ -58,19 +62,26 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
     mediaPauseTimer.current = undefined
   }, [])
   const releaseSession = useCallback(async (active: ControlSessionClient | undefined = controller.current) => {
+    if (!active || releasingSession.current === active) return
+    releasingSession.current = active
+    stoppedSession.current = active
     clearMediaPauseTimer()
     setMediaPaused(false)
     const drained = input.current?.suspendAndWait('正在释放控制权') ?? Promise.resolve()
     await withinBudget(drained, 'Input neutralization timed out').catch(() => undefined)
     let failure: unknown
     try {
-      if (active) await withinBudget(active.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs),
+      await withinBudget(active.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs),
         'Safe publication timed out')
     }
     catch (error) { failure = error }
-    try { await active?.release() }
+    try { await active.release() }
     catch (error) { failure ??= error }
-    if (failure && mounted.current) setMessage(failure instanceof Error ? failure.message : 'Handover pending')
+    releasingSession.current = undefined
+    if (failure) {
+      if (mounted.current) setMessage(failure instanceof Error ? failure.message : 'Handover pending')
+      else console.error('控制释放未确认；需检查 Gateway 交接状态')
+    }
   }, [clearMediaPauseTimer])
   const applySafetyEvent = useCallback((event: ControlSafetyEvent,
       active: ControlSessionClient | undefined = controller.current): void => {
@@ -114,19 +125,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
           input.current?.suspend(decision.message)
           return
         }
-        void (async () => {
-          const drained = input.current?.suspendAndWait(decision.message) ?? Promise.resolve()
-          await withinBudget(drained, 'Input neutralization timed out').catch(() => undefined)
-          let neutralizeError: unknown
-          try { await withinBudget(active.neutralizeAndPublish(CONTROL_TIMING.neutralizeBudgetMs), 'Safe publication timed out') }
-          catch (error) { neutralizeError = error }
-          try { await active.release() }
-          catch (error) { throw neutralizeError ?? error }
-          if (neutralizeError) throw neutralizeError
-        })().catch(() => {
-          if (mounted.current) render((n) => n + 1)
-          else console.error('控制释放未确认；需检查 Gateway 交接状态')
-        })
+        void releaseSession(active)
       },
       fault: (_safetyEvent, decision) => {
         hiddenAt.current = undefined
@@ -137,10 +136,11 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
         active?.fail(decision.message)
       },
     })
-  }, [clearSafetyTimer, clearMediaPauseTimer])
+  }, [clearSafetyTimer, clearMediaPauseTimer, releaseSession])
   const triggerEmergencyStop = useCallback(() => {
     const active = controller.current
     if (!active || active.state !== 'ready') return
+    stoppedSession.current = active
     if (input.current?.isAvailable) {
       input.current.emergencyStop()
       return
@@ -175,10 +175,10 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
   useEffect(() => {
     mounted.current = true
     const controls = new ControlInput({
-      allowVehicleActions: false,
       send: async (intent) => {
         const active = controller.current
         if (!active || !isControlReady(active.state, mediaReady.current)) throw new Error('控制或三路画面尚未就绪')
+        if (intent.action === 'emergency_stop') stoppedSession.current = active
         const command = toV2ControlCommand(intent)
         active.setCommand(command)
         onIntent(vehicleId, command)
@@ -191,8 +191,14 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
         controller.current?.fail(error instanceof Error ? error.message : '输入处理失败')
       },
     })
-    const monitor = new GamepadInput(controls, (value) => { if (mounted.current) setPad(value) })
-    monitor.setMapping(v2GamepadMapping)
+    const monitor = new GamepadInput(controls, (value) => { if (mounted.current) setPad(value) },
+      () => controller.current?.propulsionDirection ?? 0, () => controller.current?.supportsGearControl === true,
+      {
+        standardMapping: v2GamepadMapping,
+        currentGear: () => controller.current?.actualGear,
+        canDrive: () => mediaReady.current && controller.current?.handheldReady === true && stoppedSession.current !== controller.current,
+        toggleControl: () => sessionButton.current?.click(),
+      })
     setMapping({ ...v2GamepadMapping })
     input.current = controls
     gamepad.current = monitor
@@ -293,12 +299,14 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
           const parsed = JSON.parse(new TextDecoder().decode(body)) as {
             type?: string
             sources_omitted?: boolean
-            telemetry?: { chassis?: { message?: { driving_mode?: string; speed_mps?: number; steering_percentage?: number } } }
+            telemetry?: { vehicle_id?: string; published_at_ms?: number; chassis?: { age_ms?: number; source_timestamp_ms?: number; message?: { gear_location?: string; driving_mode?: string; speed_mps?: number; steering_percentage?: number } } }
             sources?: { vehicle_status?: { message?: { state?: string; safety_override?: string; error_code?: string; reason?: string } } }
           }
           if (parsed?.type !== 'vehicle.state') return
           const status = parsed.sources?.vehicle_status?.message
           const chassis = parsed.telemetry?.chassis?.message
+          if (parsed.telemetry?.vehicle_id === vehicleId) next.updateChassisGear(parsed.telemetry.chassis, parsed.telemetry.published_at_ms)
+          else next.updateChassisGear()
           next.updateArbitration(status?.state, chassis?.driving_mode, chassis?.steering_percentage)
           const preserveStatus = Boolean(parsed.sources_omitted && !status)
           if (parsed.sources_omitted) diagnostics?.record('feedback', 'vehicle_state_sources_omitted', status ? 'kept_status' : 'omitted_all')
@@ -331,7 +339,6 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
       if (mounted.current) setMessage(error instanceof Error ? error.message : 'Control acquire failed')
     }
   }
-  const release = () => releaseSession()
   const downloadDiagnostics = () => {
     const active = controller.current
     if (!active && !diagnostics) return
@@ -351,7 +358,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
   }
   const requestTakeover = () => {
     const active = controller.current
-    if (!active || !isControlReady(active.state, mediaReady.current)) return
+    if (!active || stoppedSession.current === active || !isControlReady(active.state, mediaReady.current)) return
     const command = steeringAlignedHold(vehicleArbitration?.steeringPct)
     active.setCommand(command)
     onIntent(vehicleId, command)
@@ -360,6 +367,25 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
   const state = controller.current?.state ?? 'idle'
   const ready = isControlReady(state, videoReady) && Boolean(controller.current?.neutralAcknowledged)
   const busy = state !== 'closed' && state !== 'idle'
+  const pendingAfterError = state === 'pending' && Boolean(controller.current?.cleanupError)
+  useEffect(() => {
+    const active = controller.current
+    if (!pendingAfterError || !active) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      if (cancelled || active.state !== 'pending') return
+      // A vehicle can finish handback after the initial release request timed out.
+      // Keep observing even when the operator leaves the workbench open.
+      const confirmed = await active.refreshHandover().catch(() => false)
+      if (confirmed && !cancelled) setMessage('')
+      if (!confirmed && !cancelled && active.state === 'pending') timer = setTimeout(poll, CONTROL_TIMING.apiTimeoutMs)
+    }
+    timer = setTimeout(poll, CONTROL_TIMING.apiTimeoutMs)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [pendingAfterError])
+  const actualGear = controller.current?.actualGear
+  useEffect(() => { onGearChange(actualGear) }, [actualGear, onGearChange])
   const button = 'rounded border border-amber-600 px-3 py-2 disabled:opacity-40'
   return (
     <section className="rounded-xl border border-amber-700 bg-amber-950/20 p-3 text-xs text-amber-100">
@@ -369,21 +395,26 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
       {verifyVideo && <p>{receiverReady ? '车端 native-v3 接收器在线' : '等待车端 native-v3 接收器心跳'}
         {state === 'ready' && !controller.current?.neutralAcknowledged && ' · 正在验证中立指令回执'}</p>}
       <div className="mt-3 flex flex-wrap gap-2">
-        <button type="button" disabled={!vehicleId || busy || !videoReady || !receiverReady || Boolean(requestBlocker)} onClick={() => void acquire()} className={button}>申请控制权</button>
-        <button type="button" disabled={!ready || vehicleArbitration?.state === 'REMOTE'} onClick={requestTakeover} className={button}>
-          {vehicleArbitration?.state === 'REMOTE' ? '车端已接管 REMOTE' : '请求接管（制动保持）'}
+        <button ref={sessionButton} type="button" className={button}
+          disabled={busy ? state === 'releasing' || (state === 'pending' && !controller.current?.cleanupError)
+            : !vehicleId || !videoReady || !receiverReady || Boolean(requestBlocker)}
+          onClick={() => { if (busy) void releaseSession(); else void acquire() }}>
+          {busy ? '释放并等待车辆交接' : '申请控制权'}
         </button>
-        <button type="button" disabled={!busy} onClick={() => void release()} className={button}>释放并等待车辆交接</button>
+        <button type="button" disabled={!ready || stoppedSession.current === controller.current || controller.current?.remoteControlActive} onClick={requestTakeover} className={button}>
+          {controller.current?.remoteControlActive ? '车端已接管 REMOTE' : '请求接管（制动保持）'}
+        </button>
       </div>
       <details className="mt-3">
-        <summary>手柄检测与映射（修改后需重新确认，-1 表示不用）</summary>
+        <summary>手柄检测与映射</summary>
         <div className="mt-2 grid gap-2 sm:grid-cols-2">
           {([
-            ['axisX', '转向轴'], ['axisY', '前后轴'], ['enableButton', '使能按钮'],
-            ['emergencyButton', '制动按钮'], ['upButton', '前进按钮'], ['downButton', '倒车按钮'],
+            ['axisX', '转向轴'], ['axisY', '前后轴'],
+            ['emergencyButton', '急停按钮'], ['upButton', '加速按钮'], ['downButton', '行车制动按钮'],
+            ['gearCycleButton', '循环换挡按钮'], ['requestControlButton', '申请 / 释放控制权按钮'],
             ['leftButton', '左转按钮'], ['rightButton', '右转按钮'],
           ] as const).map(([key, label]) => <label key={key} className="flex items-center justify-between gap-2">
-            {label}<input type="number" aria-label={`手柄${label}编号`} value={mapping[key]} min={key === 'enableButton' || key === 'emergencyButton' ? 0 : -1}
+            {label}<input type="number" aria-label={`手柄${label}编号`} value={mapping[key]} min={key === 'emergencyButton' ? 0 : -1}
               className="w-20 rounded border border-amber-800 bg-slate-950 p-2"
               onChange={event => {
                 const value = { ...mapping, [key]: event.currentTarget.valueAsNumber }
@@ -403,29 +434,26 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
       <p className="mt-2">{videoReady
         ? '三路画面正在出帧'
         : mediaPaused
-          ? '画面短暂中断：驾驶输入已停用（恢复后需手动重新启用手柄）'
+          ? '画面短暂中断：驾驶输入已暂停'
           : '三路画面未就绪：禁止申请或恢复输出'}</p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <select aria-label="控制手柄" className="rounded border border-amber-800 bg-slate-950 p-2"
-          value={pad?.selectedIndex ?? ''} disabled={!ready} onChange={(event) => {
+          value={pad?.selectedIndex ?? ''} onChange={(event) => {
             gamepad.current?.select(event.target.value === '' ? null : Number(event.target.value))
             event.currentTarget.blur()
           }}>
           <option value="">选择手柄</option>
           {pad?.devices.map((device) => <option key={device.index} value={device.index}>{device.id}</option>)}
         </select>
-        <button type="button" className={button} disabled={!ready || !pad?.pad || Boolean(pad.validation)}
-          onClick={() => gamepad.current?.confirmMapping(!pad?.confirmed)}>{pad?.confirmed ? '撤销映射确认' : '确认标准映射'}</button>
-        <button type="button" className={button} disabled={!ready || !pad?.canEnable}
-          onClick={() => gamepad.current?.setEnabled(!inputState.gamepadEnabled)}>{inputState.gamepadEnabled ? '关闭手柄' : '启用手柄'}</button>
-        <span>左摇杆 X 转向 / 右摇杆 Y 前后 · LB 按住使能 · B 制动；先松键回中</span>
+        <button type="button" className={button} disabled={!pad?.pad || Boolean(pad.validation)}
+          onClick={() => gamepad.current?.confirmMapping(!pad?.confirmed)}>{pad?.confirmed ? '撤销映射确认' : '确认映射'}</button>
       </div>
       <p className="mt-2">{inputState.message} · {pad?.validation || pad?.message}</p>
       {pad?.pad && <p className="mt-1">轴：{pad.pad.axes.map((value) => value.toFixed(2)).join(' / ')} · 按下按钮：{pad.pad.buttons.flatMap((value, index) => value.pressed ? [index] : []).join(', ') || '无'}</p>}
-      <p className="mt-2">挡位和自动驾驶模式请求未接入 v2，不开放对应手柄动作；不回退到 v1。</p>
-      <p className="mt-2">仅开放手柄比例控制，不支持键盘驾驶；前三相机无后视覆盖，倒车前需确认后方环境。</p>
+      <p className="mt-2">请求挡位：{controller.current?.requestedGear ?? '—'} · 底盘挡位：{actualGear ?? '未知'}
+        {ready && !controller.current?.supportsGearControl && ' · 车端未声明挡位与行车制动支持，手柄仅可急停'}</p>
       <p className="mt-2">反馈序号：{controller.current?.feedback?.accepted_sequence ?? '—'}；
-        {controller.current?.feedback?.reason ?? '等待本次会话反馈'}。反馈表示车端接收状态，底盘执行以车辆实测为准。失焦、断线或反馈超时停止发令；交接完成前禁止切换。</p>
+        {controller.current?.feedback?.reason ?? '等待本次会话反馈'}</p>
       {vehicleArbitration && (vehicleArbitration.state || vehicleArbitration.drivingMode) && (
         <p className="mt-1 text-amber-200" data-testid="vehicle-arbitration-status">
           车端仲裁：{vehicleArbitration.state ?? '未知'}
@@ -436,7 +464,7 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
           {vehicleArbitration.reason ? `（${vehicleArbitration.reason}）` : ''}
         </p>
       )}
-      <p className="mt-1">纵向配置：{teleopConfig.controlLongitudinalMode === 'speed' ? `速度模式（上限 ${(teleopConfig.maxRemoteSpeedMps ?? 5).toFixed(1)} m/s，以车端 device.json 为准）` : '油门模式（0–100%，以车端 device.json 为准）'}</p>
+      <p className="mt-1">纵向配置：{teleopConfig.controlLongitudinalMode === 'speed' ? `速度模式（上限 ${(teleopConfig.maxRemoteSpeedMps ?? 5).toFixed(1)} m/s）` : '油门模式（0–100%）'}</p>
       <p data-testid="control-feedback" data-sequence={controller.current?.feedback?.accepted_sequence}
         data-command={JSON.stringify(controller.current?.feedback?.command)} className="mt-2">
         指令设定（非底盘实测）：
@@ -455,11 +483,12 @@ export function DrivingControlPanel({ vehicleId, bearer, videoReady, verifyVideo
       <button type="button" className={`${button} mt-2`} disabled={!controller.current && !diagnostics}
         onClick={downloadDiagnostics}>导出近期遥操作诊断</button>
       <div className="fixed inset-x-0 bottom-0 z-[60] flex flex-wrap items-center justify-end gap-3 border-t border-amber-800 bg-slate-950 p-3 text-xs">
-        <span>{vehicleId} · {state} · {inputState.gamepadEnabled ? '手柄已启用' : '手柄未启用'}</span>
+        <span>{vehicleId} · {state} · {inputState.gamepadEnabled ? '手柄输入就绪' : '手柄输入待命'}</span>
         <button type="button" disabled={!ready} className={button} onClick={() => {
-          input.current?.suspend('已发送停止，请重新启用手柄')
+          stoppedSession.current = controller.current
+          input.current?.suspend('手柄已停用至本次会话结束')
         }}>停止并停用手柄</button>
-        <button type="button" disabled={state !== 'ready'} className="rounded border border-red-500 bg-red-950 px-4 py-2 disabled:opacity-40" onClick={triggerEmergencyStop}>制动（Space）</button>
+        <button type="button" disabled={state !== 'ready'} className="rounded border border-red-500 bg-red-950 px-4 py-2 disabled:opacity-40" onClick={triggerEmergencyStop}>急停（Space）</button>
       </div>
     </section>
   )

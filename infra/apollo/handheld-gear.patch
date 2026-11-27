@@ -1,0 +1,716 @@
+diff --git a/modules/canbus/canbus_component.cc b/modules/canbus/canbus_component.cc
+--- a/modules/canbus/canbus_component.cc
++++ b/modules/canbus/canbus_component.cc
+@@ -304,6 +304,11 @@
+           control::DrivingAction::RESET);
+     }
+   }
++  if (guardian_command.control_source() == guardian::CONTROL_SOURCE_REMOTE &&
++      !control_command.has_gear_location()) {
++    // The proto2 scalar default is neutral. Remote heartbeats must hold gear.
++    control_command.set_gear_location(Chassis::GEAR_NONE);
++  }
+   OnControlCommand(control_command);
+ }
+
+diff --git a/modules/canbus/canbus_test.cc b/modules/canbus/canbus_test.cc
+--- a/modules/canbus/canbus_test.cc
++++ b/modules/canbus/canbus_test.cc
+@@ -54,7 +54,7 @@
+     c.set_error_code(error_code_);
+     c.set_speed_mps(0.0f);
+     c.set_steering_percentage(static_cast<float>(last_steer_));
+-    c.set_gear_location(Chassis::GEAR_DRIVE);
++    c.set_gear_location(gear_);
+     return c;
+   }
+
+@@ -91,7 +91,7 @@
+     set_driving_mode(Chassis::AUTO_SPEED_ONLY);
+     return common::ErrorCode::OK;
+   }
+-  void Gear(Chassis::GearPosition state) override {}
++  void Gear(Chassis::GearPosition state) override { gear_ = state; }
+   void Brake(double acceleration) override {}
+   void Throttle(double throttle) override {}
+   void Acceleration(double acc) override {}
+@@ -102,6 +102,7 @@
+   void SetHorn(const control::ControlCommand& command) override {}
+   void SetTurningSignal(const control::ControlCommand& command) override {}
+
++  Chassis::GearPosition gear_ = Chassis::GEAR_DRIVE;
+   int enable_auto_calls_ = 0;
+   int disable_auto_calls_ = 0;
+   double last_steer_ = 0.0;
+@@ -181,14 +182,30 @@
+   gcmd2.set_target_driving_mode(Chassis::COMPLETE_AUTO_DRIVE);
+   *gcmd2.mutable_control_command() = MakeFreshCmd(1);
+   gcmd2.mutable_control_command()->set_steering_target(25.0);
++  gcmd2.mutable_control_command()->set_gear_location(Chassis::GEAR_REVERSE);
+   cb.OnGuardianCommand(gcmd2);
+   EXPECT_EQ(raw_controller->driving_mode(), Chassis::COMPLETE_AUTO_DRIVE);
+   EXPECT_EQ(raw_controller->enable_auto_calls(), 1);
+   EXPECT_DOUBLE_EQ(raw_controller->last_steer(), 25.0);
+
++  ASSERT_EQ(raw_controller->chassis().gear_location(), Chassis::GEAR_REVERSE);
++  auto service_brake = gcmd2;
++  service_brake.mutable_header()->set_sequence_num(3);
++  service_brake.mutable_control_command()->clear_gear_location();
++  service_brake.mutable_control_command()->set_throttle(0);
++  service_brake.mutable_control_command()->set_brake(100);
++  cb.OnGuardianCommand(service_brake);
++  EXPECT_EQ(raw_controller->chassis().gear_location(), Chassis::GEAR_REVERSE);
++  auto neutral = service_brake;
++  neutral.mutable_header()->set_sequence_num(4);
++  neutral.mutable_control_command()->set_gear_location(Chassis::GEAR_NEUTRAL);
++  neutral.mutable_control_command()->set_brake(20);
++  cb.OnGuardianCommand(neutral);
++  EXPECT_EQ(raw_controller->chassis().gear_location(), Chassis::GEAR_NEUTRAL);
++
+   // 3. Stale GuardianCommand is rejected by the heartbeat monitor.
+   guardian::GuardianCommand stale_cmd;
+-  stale_cmd.mutable_header()->set_sequence_num(3);
++  stale_cmd.mutable_header()->set_sequence_num(5);
+   stale_cmd.mutable_header()->set_timestamp_sec(t0 - 10.0);
+   stale_cmd.set_control_source(guardian::CONTROL_SOURCE_REMOTE);
+   stale_cmd.set_target_driving_mode(Chassis::COMPLETE_AUTO_DRIVE);
+@@ -200,7 +217,7 @@
+   // 3b. Stale upstream source_timestamp_sec is rejected even when
+   // GuardianCommand's own header timestamp is fresh.
+   guardian::GuardianCommand stale_source_cmd;
+-  stale_source_cmd.mutable_header()->set_sequence_num(4);
++  stale_source_cmd.mutable_header()->set_sequence_num(6);
+   stale_source_cmd.mutable_header()->set_timestamp_sec(
+       cyber::Time::Now().ToSecond());
+   stale_source_cmd.set_source_timestamp_sec(t0 - 10.0);
+@@ -213,7 +230,7 @@
+
+   // 4. Switching back to MANUAL disables auto mode and clears actuator state.
+   guardian::GuardianCommand manual_cmd;
+-  manual_cmd.mutable_header()->set_sequence_num(4);
++  manual_cmd.mutable_header()->set_sequence_num(7);
+   manual_cmd.mutable_header()->set_timestamp_sec(
+       cyber::Time::Now().ToSecond() + 0.02);
+   manual_cmd.set_control_source(guardian::CONTROL_SOURCE_MANUAL);
+diff --git a/modules/canbus/vehicle/vehicle_controller.cc b/modules/canbus/vehicle/vehicle_controller.cc
+--- a/modules/canbus/vehicle/vehicle_controller.cc
++++ b/modules/canbus/vehicle/vehicle_controller.cc
+@@ -238,7 +238,9 @@
+
+   if (driving_mode() == Chassis::COMPLETE_AUTO_DRIVE ||
+       driving_mode() == Chassis::AUTO_SPEED_ONLY) {
+-    Gear(control_command.gear_location());
++    if (control_command.gear_location() != Chassis::GEAR_NONE) {
++      Gear(control_command.gear_location());
++    }
+     Throttle(control_command.throttle());
+     Acceleration(control_command.acceleration());
+     Speed(control_command.speed());
+diff --git a/modules/guardian/guardian_component.cc b/modules/guardian/guardian_component.cc
+--- a/modules/guardian/guardian_component.cc
++++ b/modules/guardian/guardian_component.cc
+@@ -700,21 +700,26 @@
+   }
+ }
+
+-void GuardianComponent::EnforceRemoteGearInterlock(ControlCommand* cmd) const {
+-  if (!has_chassis_ || !chassis_.has_gear_location() ||
+-      !cmd->has_gear_location()) {
+-    return;
+-  }
+-  if (cmd->gear_location() == chassis_.gear_location()) {
+-    return;
+-  }
+-  const bool stationary = !std::isfinite(chassis_.speed_mps()) ||
+-                          std::fabs(chassis_.speed_mps()) <=
+-                              guardian_conf_.max_stationary_speed_mps();
+-  const bool brake_applied =
+-      cmd->brake() >= guardian_conf_.min_gear_shift_brake_pct();
+-  if (!stationary || !brake_applied) {
+-    cmd->set_gear_location(chassis_.gear_location());
++void GuardianComponent::EnforceRemoteGearInterlock(double now_sec, ControlCommand* cmd) const {
++  const bool fresh = has_chassis_ && chassis_.has_gear_location() &&
++      IsTimestampFresh(chassis_.header().timestamp_sec(), now_sec, 500.0);
++  const auto gear = chassis_.gear_location();
++  const bool propulsion = fresh &&
++      (gear == Chassis::GEAR_DRIVE || gear == Chassis::GEAR_REVERSE);
++  // Receivers predating explicit shifts can repeat the measured gear on motion.
++  if (fresh && cmd->has_gear_location() && cmd->gear_location() == gear) {
++    cmd->clear_gear_location();
++  }
++  if (!propulsion || cmd->has_gear_location() || teleop_cmd_.throttle() == 0)
++    cmd->set_throttle(0.0);
++  if (!propulsion || cmd->has_gear_location()) cmd->set_speed(0.0);
++  if (!cmd->has_gear_location()) return;
++  if (!fresh || (!propulsion && gear != Chassis::GEAR_NEUTRAL && gear != Chassis::GEAR_PARKING) ||
++      safety_override_ != SAFETY_OVERRIDE_NONE || !chassis_.has_speed_mps() ||
++      !std::isfinite(chassis_.speed_mps()) ||
++      std::fabs(chassis_.speed_mps()) > guardian_conf_.max_stationary_speed_mps() ||
++      cmd->brake() < guardian_conf_.min_gear_shift_brake_pct()) {
++    cmd->clear_gear_location();
+   }
+ }
+
+@@ -811,7 +816,6 @@
+   if (control_source_ == CONTROL_SOURCE_REMOTE) {
+     output_cmd->CopyFrom(teleop_cmd_);
+     output_cmd->clear_pad_msg();
+-    EnforceRemoteGearInterlock(output_cmd);
+     source_ts = teleop_cmd_.header().timestamp_sec();
+     target_mode = Chassis::COMPLETE_AUTO_DRIVE;
+     if (safety_override_ == SAFETY_OVERRIDE_NONE &&
+@@ -851,6 +855,7 @@
+   }
+
+   ApplyTransitionFilter(now_sec, output_cmd);
++  if (control_source_ == CONTROL_SOURCE_REMOTE) EnforceRemoteGearInterlock(now_sec, output_cmd);
+   ApplySafetyOverride(now_sec, output_cmd);
+
+   const uint32_t seq = ++output_sequence_num_;
+diff --git a/modules/guardian/guardian_component.h b/modules/guardian/guardian_component.h
+--- a/modules/guardian/guardian_component.h
++++ b/modules/guardian/guardian_component.h
+@@ -90,7 +90,7 @@
+   void StartSourceTransition(ControlSource next_source, double now_sec,
+                              const std::string& reason);
+
+-  void EnforceRemoteGearInterlock(apollo::control::ControlCommand* cmd) const;
++  void EnforceRemoteGearInterlock(double now_sec, apollo::control::ControlCommand* cmd) const;
+   void ApplyTransitionFilter(double now_sec,
+                              apollo::control::ControlCommand* cmd) const;
+   void ApplySafetyOverride(double now_sec,
+diff --git a/modules/guardian/guardian_component_test.cc b/modules/guardian/guardian_component_test.cc
+--- a/modules/guardian/guardian_component_test.cc
++++ b/modules/guardian/guardian_component_test.cc
+@@ -254,8 +254,9 @@
+   guardian.Configure(DefaultTestConf());
+
+   const double now = 400.0;
+-  guardian.OnChassis(MakeChassis(Chassis::COMPLETE_AUTO_DRIVE, 1.0f, 0.0f,
+-                                 Chassis::GEAR_DRIVE));
++  auto moving = MakeChassis(Chassis::COMPLETE_AUTO_DRIVE, 1.0f, 0.0f, Chassis::GEAR_DRIVE);
++  moving->mutable_header()->set_timestamp_sec(now);
++  guardian.OnChassis(moving);
+   auto shift_cmd =
+       MakeTeleopCmd(now, 1, DrivingAction::START, false, 0.0, 20.0, 0.0);
+   shift_cmd->set_gear_location(Chassis::GEAR_REVERSE);
+@@ -263,7 +264,7 @@
+
+   // Moving at 1.0 m/s: reverse shift is blocked, gear stays GEAR_DRIVE.
+   GuardianCommand out = guardian.EvaluateArbitration(now);
+-  EXPECT_EQ(out.control_command().gear_location(), Chassis::GEAR_DRIVE);
++  EXPECT_FALSE(out.control_command().has_gear_location());
+
+   // Physical driver manual intervention overrides REMOTE to MANUAL with
+   // DRIVER_INTERVENTION error_code (not EMERGENCY).
+diff --git a/modules/teleop/include/vehicle_edge/cyber_adapter.h b/modules/teleop/include/vehicle_edge/cyber_adapter.h
+--- a/modules/teleop/include/vehicle_edge/cyber_adapter.h
++++ b/modules/teleop/include/vehicle_edge/cyber_adapter.h
+@@ -18,6 +18,7 @@
+ #include <functional>
+ #include <memory>
+ #include <mutex>
++#include <optional>
+ #include <string>
+
+ #include "vehicle_edge/state_cache.h"
+@@ -61,7 +62,7 @@
+   void Publish(const Json::Value &feedback);
+
+  private:
+-  apollo::canbus::Chassis::GearPosition ResolveGear(int direction) const;
++  std::optional<apollo::canbus::Chassis::GearPosition> requested_gear_;
+   void PopulateHeader(apollo::control::ControlCommand *cmd);
+   bool WriteCommand(const apollo::control::ControlCommand &cmd,
+                     const char *reason);
+diff --git a/modules/teleop/include/vehicle_edge/state_cache.h b/modules/teleop/include/vehicle_edge/state_cache.h
+--- a/modules/teleop/include/vehicle_edge/state_cache.h
++++ b/modules/teleop/include/vehicle_edge/state_cache.h
+@@ -70,7 +70,7 @@
+   void UpdateVehicleStatus(const Json::Value &message,
+                            const SourceMetadata &source, SteadyTime received);
+   Json::Value AuxiliarySnapshot(SteadyTime now) const;
+-  Json::Value ChassisMessage() const;
++  Json::Value FreshChassisMessage() const;
+   std::string HandoverWaitReason(SteadyTime fenced, std::int64_t fenced_wall,
+                                  SteadyTime now, std::int64_t wall) const;
+   std::optional<Json::Value> MissionReport() const;
+diff --git a/modules/teleop/src/common/state_cache.cc b/modules/teleop/src/common/state_cache.cc
+--- a/modules/teleop/src/common/state_cache.cc
++++ b/modules/teleop/src/common/state_cache.cc
+@@ -206,8 +206,15 @@
+   return "waiting for matching Guardian and chassis exit from remote control";
+ }
+
+-Json::Value StateCache::ChassisMessage() const {
+-  std::lock_guard<std::mutex> lock(mutex_);
++Json::Value StateCache::FreshChassisMessage() const {
++  std::lock_guard<std::mutex> lock(mutex_);
++  const auto now = std::chrono::steady_clock::now();
++  const auto wall = UnixMilliseconds();
++  if (!chassis_.received || *chassis_.received > now ||
++      now - *chassis_.received > std::chrono::milliseconds(500) ||
++      !chassis_.source.timestamp_ms || *chassis_.source.timestamp_ms > wall ||
++      wall - *chassis_.source.timestamp_ms > 500)
++    return Json::nullValue;
+   return chassis_.message;
+ }
+
+diff --git a/modules/teleop/src/control/control_receiver.cc b/modules/teleop/src/control/control_receiver.cc
+--- a/modules/teleop/src/control/control_receiver.cc
++++ b/modules/teleop/src/control/control_receiver.cc
+@@ -210,7 +210,7 @@
+     rejection_.clear();
+     latched_ = false;
+     status_ = "READY";
+-    reason_ = "awaiting_command";
++    reason_ = "awaiting_command_gear_v1";
+   }
+   pause_watchdog_ = next_pause;
+   lock_watchdog_ = next_lock;
+@@ -280,11 +280,22 @@
+   if (v["sequence"].asInt64() <= sequence_)
+     return reject("replay");
+   const auto &c = v["command"];
+-  if (!Fields(c, {"steering", "throttle", "brake", "direction"}) ||
++  if (!c.isObject()) return reject("invalid_command");
++  const bool shift = c.isMember("gear_request");
++  const bool service_brake = c.isMember("service_brake");
++  if (c.size() != 4u + shift + service_brake ||
+       !Integer(c["steering"], -100, 100) ||
+       !Integer(c["throttle"], 0, 100) || !Integer(c["brake"], 0, 100) ||
+       !Integer(c["direction"], -1, 1) ||
+       (c["throttle"].asInt() > 0 && c["brake"].asInt() > 0))
++    return reject("invalid_command");
++  if (shift && ((c["gear_request"] != "D" && c["gear_request"] != "N" &&
++                 c["gear_request"] != "R") || c["throttle"].asInt() != 0 ||
++                c["steering"].asInt() != 0 || c["direction"].asInt() != 0 ||
++                c["brake"].asInt() != 20 || service_brake))
++    return reject("invalid_command");
++  if (service_brake && (c["service_brake"] != Json::Value(true) ||
++                        c["direction"].asInt() != 0 || c["brake"].asInt() == 0))
+     return reject("invalid_command");
+   Json::Value canonical(Json::arrayValue);
+   for (const char *field :
+@@ -293,9 +304,16 @@
+     canonical.append(v[field]);
+   for (const char *field : {"steering", "throttle", "brake", "direction"})
+     canonical.append(c[field]);
++  if (shift) canonical.append(c["gear_request"]);
++  if (service_brake) canonical.append(true);
+   if (!Verify(public_key_, v["signature"].asString(), EncodeJSON(canonical)))
+     return reject("invalid_signature");
+   sequence_ = v["sequence"].asInt64();
++  if (status_ == "PAUSED" && shift) {
++    reason_ = "shift_requires_rearm";
++    rejection_.clear();
++    return Feedback();
++  }
+   if (status_ == "PAUSED" && c["throttle"].asInt() > 0)
+     return reject("recovery_requires_neutral");
+   rejection_.clear();
+diff --git a/modules/teleop/src/control/control_service.cc b/modules/teleop/src/control/control_service.cc
+--- a/modules/teleop/src/control/control_service.cc
++++ b/modules/teleop/src/control/control_service.cc
+@@ -167,6 +167,8 @@
+     event = "watchdog_timeout";
+   } else if ((status == "ACCEPTED" || status == "APPLIED") &&
+              feedback["command"].isObject() &&
++             !feedback["command"].isMember("service_brake") &&
++             feedback["command"]["direction"].asInt() == 0 &&
+              feedback["command"]["brake"].asInt() >= 100 &&
+              feedback["command"]["throttle"].asInt() == 0) {
+     event = "emergency_stop";
+diff --git a/modules/teleop/src/cyber/cyber_adapter.cc b/modules/teleop/src/cyber/cyber_adapter.cc
+--- a/modules/teleop/src/cyber/cyber_adapter.cc
++++ b/modules/teleop/src/cyber/cyber_adapter.cc
+@@ -358,47 +358,6 @@
+               ? std::min(max_speed_mps, 30.0)
+               : 5.0) {}
+
+-apollo::canbus::Chassis::GearPosition CyberControlPublisher::ResolveGear(
+-    int direction) const {
+-  using GearPosition = apollo::canbus::Chassis::GearPosition;
+-  GearPosition desired = apollo::canbus::Chassis::GEAR_NEUTRAL;
+-  if (direction > 0) {
+-    desired = apollo::canbus::Chassis::GEAR_DRIVE;
+-  } else if (direction < 0) {
+-    desired = apollo::canbus::Chassis::GEAR_REVERSE;
+-  }
+-
+-  if (!cache_) {
+-    return desired;
+-  }
+-  const auto chassis = cache_->ChassisMessage();
+-  if (!chassis.isObject()) {
+-    return desired;
+-  }
+-  const double speed_mps = chassis["speed_mps"].isNumeric()
+-                               ? std::abs(chassis["speed_mps"].asDouble())
+-                               : 0.0;
+-  GearPosition current_gear = apollo::canbus::Chassis::GEAR_NEUTRAL;
+-  bool has_current_gear = false;
+-  if (chassis["gear_location"].isString()) {
+-    has_current_gear = apollo::canbus::Chassis::GearPosition_Parse(
+-        chassis["gear_location"].asString(), &current_gear);
+-  }
+-  if (!has_current_gear || speed_mps <= 0.1) {
+-    return desired;
+-  }
+-  if (direction == 0) {
+-    return current_gear;
+-  }
+-  if ((current_gear == apollo::canbus::Chassis::GEAR_DRIVE &&
+-       desired == apollo::canbus::Chassis::GEAR_REVERSE) ||
+-      (current_gear == apollo::canbus::Chassis::GEAR_REVERSE &&
+-       desired == apollo::canbus::Chassis::GEAR_DRIVE)) {
+-    return current_gear;
+-  }
+-  return desired;
+-}
+-
+ void CyberControlPublisher::PopulateHeader(
+     apollo::control::ControlCommand *cmd) {
+   auto *header = cmd->mutable_header();
+@@ -439,6 +398,7 @@
+             .count();
+     cmd->mutable_latency_stats()->set_total_time_ms(ms);
+   };
++  if (status == "READY" || status == "DISABLED" || status == "LOCKED") requested_gear_.reset();
+   if (status == "DISABLED") {
+     active_takeover_ = false;
+     has_last_accepted_seq_ = false;
+@@ -464,7 +424,6 @@
+     cmd.set_speed(0.0);
+     cmd.set_parking_brake(false);
+     cmd.set_is_in_safe_mode(false);
+-    cmd.set_gear_location(ResolveGear(0));
+     cmd.mutable_pad_msg()->set_action(apollo::control::DrivingAction::START);
+     cmd.mutable_pad_msg()->set_driving_mode(
+         apollo::canbus::Chassis::COMPLETE_AUTO_DRIVE);
+@@ -487,7 +446,6 @@
+     cmd.set_speed(0.0);
+     cmd.set_parking_brake(false);
+     cmd.set_is_in_safe_mode(true);
+-    cmd.set_gear_location(ResolveGear(0));
+     cmd.mutable_pad_msg()->set_action(apollo::control::DrivingAction::STOP);
+     active_takeover_ = false;
+     record_latency(&cmd);
+@@ -506,7 +464,6 @@
+     cmd.set_speed(0.0);
+     cmd.set_parking_brake(false);
+     cmd.set_is_in_safe_mode(false);
+-    cmd.set_gear_location(apollo::canbus::Chassis::GEAR_NEUTRAL);
+     cmd.mutable_pad_msg()->set_action(apollo::control::DrivingAction::RESET);
+     active_takeover_ = false;
+     has_last_accepted_seq_ = false;
+@@ -551,13 +508,11 @@
+       // Neutral input during an active remote driving session must hold
+       // REMOTE control (not emit DrivingAction::RESET / kStandby handback)
+       // and keep active_takeover_ armed so a subsequent LOCKED still stops.
+-      cmd.set_gear_location(ResolveGear(0));
+       cmd.mutable_pad_msg()->set_action(apollo::control::DrivingAction::START);
+       cmd.mutable_pad_msg()->set_driving_mode(
+           apollo::canbus::Chassis::COMPLETE_AUTO_DRIVE);
+       last_steering_target_ = 0.0;
+     } else {
+-      cmd.set_gear_location(apollo::canbus::Chassis::GEAR_NEUTRAL);
+       cmd.mutable_pad_msg()->set_action(apollo::control::DrivingAction::RESET);
+       last_steering_target_ = 0.0;
+     }
+@@ -568,12 +523,25 @@
+
+   const double steering_target =
+       std::clamp(-static_cast<double>(steering), -100.0, 100.0);
+-  const double throttle_pct =
+-      std::clamp(static_cast<double>(throttle), 0.0, 100.0);
++  using Chassis = apollo::canbus::Chassis;
++  const auto chassis = cache_ ? cache_->FreshChassisMessage() : Json::Value();
++  Chassis::GearPosition actual = Chassis::GEAR_INVALID;
++  if (chassis["gear_location"].isString())
++    Chassis::GearPosition_Parse(chassis["gear_location"].asString(), &actual);
++  const bool shift = command.isMember("gear_request");
++  if (shift) {
++    const auto &gear = command["gear_request"];
++    requested_gear_ = gear == "D" ? Chassis::GEAR_DRIVE :
++                      gear == "R" ? Chassis::GEAR_REVERSE : Chassis::GEAR_NEUTRAL;
++  }
++  const bool aligned = (actual == Chassis::GEAR_DRIVE && direction == 1) ||
++                       (actual == Chassis::GEAR_REVERSE && direction == -1);
++  const double throttle_pct = aligned && (!requested_gear_ || *requested_gear_ == actual)
++                                  ? std::clamp(throttle, 0, 100) : 0;
+   const double brake_pct =
+       std::clamp(static_cast<double>(brake), 0.0, 100.0);
+
+-  if (direction == 0 && throttle == 0 && brake >= 100) {
++  if (direction == 0 && throttle == 0 && brake >= 100 && !command.isMember("service_brake")) {
+     apollo::control::ControlCommand cmd;
+     PopulateHeader(&cmd);
+     cmd.set_throttle(0.0);
+@@ -583,7 +551,6 @@
+     cmd.set_speed(0.0);
+     cmd.set_parking_brake(true);
+     cmd.set_is_in_safe_mode(true);
+-    cmd.set_gear_location(ResolveGear(0));
+     cmd.mutable_pad_msg()->set_action(apollo::control::DrivingAction::STOP);
+     active_takeover_ = true;
+     last_steering_target_ = steering_target;
+@@ -596,6 +563,11 @@
+
+   apollo::control::ControlCommand cmd;
+   PopulateHeader(&cmd);
++  const bool known_gear = actual == Chassis::GEAR_DRIVE || actual == Chassis::GEAR_REVERSE ||
++                          actual == Chassis::GEAR_NEUTRAL || actual == Chassis::GEAR_PARKING;
++  if (shift && known_gear && chassis["speed_mps"].isNumeric() &&
++      std::abs(chassis["speed_mps"].asDouble()) <= 0.1 && brake >= 10)
++    cmd.set_gear_location(*requested_gear_);
+   if (longitudinal_mode_ == "speed") {
+     cmd.set_throttle(0.0);
+     cmd.set_speed(direction == 0 ? 0.0
+@@ -609,7 +581,6 @@
+   cmd.set_steering_rate(100.0);
+   cmd.set_parking_brake(false);
+   cmd.set_is_in_safe_mode(false);
+-  cmd.set_gear_location(ResolveGear(direction));
+   cmd.mutable_pad_msg()->set_action(apollo::control::DrivingAction::START);
+   cmd.mutable_pad_msg()->set_driving_mode(
+       apollo::canbus::Chassis::COMPLETE_AUTO_DRIVE);
+diff --git a/modules/teleop/tests/control_receiver_test.cc b/modules/teleop/tests/control_receiver_test.cc
+--- a/modules/teleop/tests/control_receiver_test.cc
++++ b/modules/teleop/tests/control_receiver_test.cc
+@@ -80,6 +80,8 @@
+       canonical.append(command[field]);
+     for (const char *field : {"steering", "throttle", "brake", "direction"})
+       canonical.append(command["command"][field]);
++    for (const char *field : {"gear_request", "service_brake"})
++      if (command["command"].isMember(field)) canonical.append(command["command"][field]);
+     const auto message = EncodeJSON(canonical);
+     std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> signer(
+         EVP_MD_CTX_new(), EVP_MD_CTX_free);
+@@ -129,6 +131,31 @@
+       std::cout << EncodeJSON(feedback) << std::endl;
+       return 0;
+     }
++    Fixture shift;
++    auto &c = shift.command["command"];
++    c["steering"] = c["throttle"] = c["direction"] = 0;
++    c["brake"] = 20;
++    c["gear_request"] = "R";
++    shift.Sign();
++    c["gear_request"] = "D";
++    Require(shift.Receive(EncodeJSON(shift.command))["rejected"] == "invalid_signature",
++            "gear substitution accepted");
++    Require(shift.Receive(shift.Sign())["status"] == "ACCEPTED", "signed shift rejected");
++    shift.now += 350ms;
++    shift.command["sequence"] = 2;
++    auto paused = shift.Receive(shift.Sign());
++    Require(paused["status"] == "PAUSED" && paused["command"].isNull() &&
++            paused["last_rejection"] == "", "paused shift did not remain recoverable");
++    shift.command["sequence"] = 3;
++    c.removeMember("gear_request");
++    c["brake"] = 100;
++    c["service_brake"] = true;
++    shift.Sign();
++    c.removeMember("service_brake");
++    Require(shift.Receive(EncodeJSON(shift.command))["rejected"] == "invalid_signature",
++            "service-brake signature allowed emergency substitution");
++    c["service_brake"] = true;
++    Require(shift.Receive(shift.Sign())["status"] == "ACCEPTED", "service-brake recovery rejected");
+     // Timestamp age and future skew are independent of the monotonic watchdog.
+     const std::int64_t max_age_ms = 5000;
+     const std::int64_t max_future_ms = 5000;
+diff --git a/modules/teleop/tests/cyber_adapter_test.cc b/modules/teleop/tests/cyber_adapter_test.cc
+--- a/modules/teleop/tests/cyber_adapter_test.cc
++++ b/modules/teleop/tests/cyber_adapter_test.cc
+@@ -198,6 +198,11 @@
+
+     // Active remote driving: left steer (-25 -> +25.0%), throttle 35 (35.0%),
+     // forward gear.
++    apollo::canbus::Chassis moving_chassis;
++    moving_chassis.mutable_header()->set_timestamp_sec(vehicle_edge::UnixMilliseconds() / 1000.0);
++    moving_chassis.set_speed_mps(2.0);
++    moving_chassis.set_gear_location(apollo::canbus::Chassis::GEAR_DRIVE);
++    vehicle_edge::ReceiveChassis(moving_chassis, ctrl_cache.get(), now);
+     feedback["status"] = "APPLIED";
+     feedback["command"]["steering"] = -25;
+     feedback["command"]["throttle"] = 35;
+@@ -211,23 +216,19 @@
+         published_cmds.back().latency_stats().total_time_ms() < 0.0 ||
+         std::abs(published_cmds.back().steering_target() - 25.0) > 1e-6 ||
+         std::abs(published_cmds.back().throttle() - 35.0) > 1e-6 ||
+-        published_cmds.back().gear_location() !=
+-            apollo::canbus::Chassis::GEAR_DRIVE)
++        published_cmds.back().has_gear_location())
+       throw std::runtime_error("active remote command mapping mismatch");
+
+     // Standstill gear interlock: moving forward at 2.0 m/s in GEAR_DRIVE
+     // rejects shift to GEAR_REVERSE.
+-    apollo::canbus::Chassis moving_chassis;
+-    moving_chassis.set_speed_mps(2.0);
+-    moving_chassis.set_gear_location(apollo::canbus::Chassis::GEAR_DRIVE);
+-    vehicle_edge::ReceiveChassis(moving_chassis, ctrl_cache.get(), now);
+     feedback["command"]["throttle"] = 0;
+     feedback["command"]["brake"] = 20;
+-    feedback["command"]["direction"] = -1;
++    feedback["command"]["direction"] = 0;
++    feedback["command"]["steering"] = 0;
++    feedback["command"]["gear_request"] = "R";
+     publisher.Publish(feedback);
+     if (published_cmds.size() != 3 ||
+-        published_cmds.back().gear_location() !=
+-            apollo::canbus::Chassis::GEAR_DRIVE)
++        published_cmds.back().has_gear_location())
+       throw std::runtime_error(
+           "moving vehicle allowed opposing gear shift to reverse");
+
+@@ -240,6 +241,7 @@
+             apollo::canbus::Chassis::GEAR_REVERSE)
+       throw std::runtime_error("standstill vehicle rejected reverse gear");
+
++    feedback["command"].removeMember("gear_request");
+     // Watchdog / link-loss failsafe while active emits one STOP holding last
+     // steering target, and does not spam subsequent LOCKED ticks.
+     feedback["status"] = "LOCKED";
+@@ -250,7 +252,7 @@
+             apollo::control::DrivingAction::STOP ||
+         !published_cmds.back().is_in_safe_mode() ||
+         std::abs(published_cmds.back().brake() - 50.0) > 1e-6 ||
+-        std::abs(published_cmds.back().steering_target() - 25.0) > 1e-6)
++        std::abs(published_cmds.back().steering_target()) > 1e-6)
+       throw std::runtime_error("watchdog LOCKED failsafe mismatch");
+
+     // In-band emergency hard stop (direction=0, brake=100).
+@@ -281,8 +283,7 @@
+         published_cmds.back().pad_msg().action() !=
+             apollo::control::DrivingAction::START ||
+         published_cmds.back().is_in_safe_mode() ||
+-        published_cmds.back().gear_location() !=
+-            apollo::canbus::Chassis::GEAR_NEUTRAL)
++        published_cmds.back().has_gear_location())
+       throw std::runtime_error(
+           "neutral input during active remote driving cleared REMOTE mode");
+
+@@ -380,8 +381,7 @@
+     if (speed_cmds.size() != 1 ||
+         std::abs(speed_cmds.back().speed() - 2.0) > 1e-6 ||
+         std::abs(speed_cmds.back().throttle() - 0.0) > 1e-6 ||
+-        speed_cmds.back().gear_location() !=
+-            apollo::canbus::Chassis::GEAR_DRIVE)
++        speed_cmds.back().has_gear_location())
+       throw std::runtime_error("speed longitudinal mode mapping mismatch");
+     speed_fb["accepted_sequence"] = 2;
+     speed_fb["command"]["throttle"] = 50;
+diff --git a/modules/teleop/tests/teleop_e2e_flow_test.cc b/modules/teleop/tests/teleop_e2e_flow_test.cc
+--- a/modules/teleop/tests/teleop_e2e_flow_test.cc
++++ b/modules/teleop/tests/teleop_e2e_flow_test.cc
+@@ -76,7 +76,7 @@
+       std::make_shared<vehicle_edge::StateCache>();
+   vehicle_edge::ControlReceiver receiver{"car-e2e"};
+   apollo::guardian::GuardianComponent guardian;
+-  double sim_sec = 1000.0;
++  double sim_sec = vehicle_edge::UnixMilliseconds() / 1000.0;
+   std::int64_t seq = 0;
+   std::unique_ptr<vehicle_edge::CyberControlPublisher> publisher;
+
+@@ -111,7 +111,8 @@
+   }
+
+   std::string SignPacket(int steering, int throttle, int brake, int direction,
+-                         std::int64_t wall_ms) {
++                         std::int64_t wall_ms, const std::string &gear = "",
++                         bool service_brake = false) {
+     Json::Value payload;
+     payload["version"] = 2;
+     payload["type"] = "control";
+@@ -135,6 +136,14 @@
+       canonical.append(payload[f]);
+     for (const char *f : {"steering", "throttle", "brake", "direction"})
+       canonical.append(payload["command"][f]);
++    if (!gear.empty()) {
++      payload["command"]["gear_request"] = gear;
++      canonical.append(gear);
++    }
++    if (service_brake) {
++      payload["command"]["service_brake"] = true;
++      canonical.append(true);
++    }
+     const auto msg = vehicle_edge::EncodeJSON(canonical);
+     std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> signer(
+         EVP_MD_CTX_new(), EVP_MD_CTX_free);
+@@ -332,3 +341,76 @@
+                     apollo::guardian::VehicleStatus::EMERGENCY,
+             "terminal LOCKED did not trigger Guardian HARD_ESTOP");
+ }
++
++TEST(TeleopE2EFlowTest, HandheldGearAndServiceBrake) {
++  using Chassis = apollo::canbus::Chassis;
++  VehicleHarness h("speed", 4.0);
++  auto now = std::chrono::steady_clock::now();
++  h.receiver.UpdateContext(MakeContext(h.public_key_b64, h.receiver.InstanceID()), now, now);
++  Chassis chassis;
++  chassis.set_driving_mode(Chassis::COMPLETE_AUTO_DRIVE);
++  chassis.set_gear_location(Chassis::GEAR_DRIVE);
++  chassis.set_speed_mps(0);
++  chassis.set_steering_percentage(0);
++  auto report = [&] {
++    chassis.mutable_header()->set_timestamp_sec(vehicle_edge::UnixMilliseconds() / 1000.0);
++    vehicle_edge::ReceiveChassis(chassis, h.cache.get(), std::chrono::steady_clock::now());
++    h.guardian.OnChassis(std::make_shared<Chassis>(chassis));
++  };
++  auto send = [&](int throttle, int brake, int direction, std::string gear = "", bool service = false) {
++    now = std::chrono::steady_clock::now();
++    const auto wall = vehicle_edge::UnixMilliseconds();
++    const auto fb = h.receiver.Receive("control-session-e2e",
++        h.SignPacket(0, throttle, brake, direction, wall, gear, service), now, now, wall);
++    EXPECT_EQ(fb["status"].asString(), "ACCEPTED");
++    h.publisher->Publish(fb);
++    auto output = h.guardian.EvaluateArbitration(h.sim_sec);
++    EXPECT_EQ(output.control_source(), apollo::guardian::CONTROL_SOURCE_REMOTE);
++    EXPECT_EQ(output.safety_override(), apollo::guardian::SAFETY_OVERRIDE_NONE);
++    return output.control_command();
++  };
++  report();
++  send(0, 20, 0);
++  h.sim_sec += 0.31;
++  auto shift = send(0, 20, 0, "R");
++  ASSERT_TRUE(shift.has_gear_location());
++  ASSERT_EQ(shift.gear_location(), Chassis::GEAR_REVERSE);
++  EXPECT_EQ(send(50, 0, 1).speed(), 0);
++  // Simulated chassis consumes the Guardian output and reports its actual gear.
++  chassis.set_gear_location(shift.gear_location());
++  report();
++  auto propel = send(50, 0, -1);
++  EXPECT_FALSE(propel.has_gear_location());
++  ASSERT_EQ(propel.speed(), 2.0);
++  chassis.set_speed_mps(chassis.gear_location() == Chassis::GEAR_REVERSE
++                            ? -propel.speed() : propel.speed());
++  report();
++  EXPECT_LT(h.cache->FreshChassisMessage()["speed_mps"].asDouble(), 0);
++  auto braking = send(0, 100, 0, "", true);
++  EXPECT_FALSE(braking.has_gear_location());
++  EXPECT_EQ(braking.brake(), 100);
++  EXPECT_FALSE(braking.parking_brake());
++  EXPECT_FALSE(braking.is_in_safe_mode());
++  EXPECT_FALSE(send(0, 20, 0, "N").has_gear_location());
++  chassis.set_speed_mps(0);
++  report();
++  EXPECT_FALSE(send(0, 0, 0).has_gear_location());
++  auto neutral = send(0, 20, 0, "N");
++  ASSERT_TRUE(neutral.has_gear_location());
++  ASSERT_EQ(neutral.gear_location(), Chassis::GEAR_NEUTRAL);
++  chassis.set_gear_location(neutral.gear_location());
++  report();
++  EXPECT_EQ(h.cache->FreshChassisMessage()["gear_location"].asString(), "GEAR_NEUTRAL");
++  EXPECT_EQ(send(100, 0, -1).speed(), 0);
++  auto drive = send(0, 20, 0, "D");
++  ASSERT_TRUE(drive.has_gear_location());
++  EXPECT_EQ(drive.gear_location(), Chassis::GEAR_DRIVE);
++  chassis.set_gear_location(Chassis::GEAR_DRIVE);
++  chassis.mutable_header()->set_timestamp_sec(vehicle_edge::UnixMilliseconds() / 1000.0 - 1.0);
++  vehicle_edge::ReceiveChassis(chassis, h.cache.get(), std::chrono::steady_clock::now());
++  EXPECT_EQ(send(100, 0, 1).speed(), 0);
++  chassis.clear_gear_location();
++  report();
++  EXPECT_EQ(send(100, 0, 1).speed(), 0);
++  EXPECT_EQ(send(0, 55, 0, "", true).brake(), 55);
++}

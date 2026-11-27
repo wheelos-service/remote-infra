@@ -25,7 +25,16 @@
         "steering": { "type": "integer", "minimum": -100, "maximum": 100 },
         "throttle": { "type": "integer", "minimum": 0, "maximum": 100 },
         "brake": { "type": "integer", "minimum": 0, "maximum": 100 },
-        "direction": { "type": "integer", "minimum": -1, "maximum": 1 }
+        "direction": { "type": "integer", "minimum": -1, "maximum": 1 },
+        "gear_request": { "enum": ["D", "N", "R"] },
+        "service_brake": { "const": true }
+      },
+      "dependentSchemas": {
+        "gear_request": {
+          "properties": { "steering": { "const": 0 }, "throttle": { "const": 0 }, "brake": { "const": 20 }, "direction": { "const": 0 } },
+          "not": { "required": ["service_brake"] }
+        },
+        "service_brake": { "properties": { "direction": { "const": 0 }, "brake": { "minimum": 1 } } }
       },
       "not": {
         "properties": { "throttle": { "minimum": 1 }, "brake": { "minimum": 1 } },

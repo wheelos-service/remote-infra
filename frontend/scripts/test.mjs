@@ -157,7 +157,7 @@ test('control interruption events select one centralized safety strategy', () =>
   assert.equal(controlSafety.controlSafetyDecision('window_blur').strategy, 'disarm')
   assert.equal(controlSafety.controlSafetyDecision('page_hidden').strategy, 'disarm')
   assert.equal(controlSafety.controlSafetyDecision('page_hidden').escalateAfterMs, CONTROL_TIMING.pageHiddenGraceMs)
-  assert.equal(controlSafety.controlSafetyDecision('page_hidden').recovery, 'manual-rearm')
+  assert.equal(controlSafety.controlSafetyDecision('page_hidden').recovery, 'recenter')
   assert.equal(controlSafety.controlSafetyDecision('page_visible').strategy, 'observe')
   assert.equal(controlSafety.controlSafetyDecision('page_unload').strategy, 'release')
   assert.equal(controlSafety.controlSafetyDecision('rtc_reconnecting').strategy, 'disarm')
@@ -537,7 +537,7 @@ test('shared input converts normalized intent to v2 integers without enabling le
     { steering: 0, throttle: 0, brake: 100, direction: 0 })
   assert.equal(convert({ mode: 'high_level', action: 'reverse' }).direction, -1)
   assert.equal(convert({ mode: 'high_level', action: 'left' }).throttle, 0)
-  for (const action of ['gear_drive', 'auto_enter', 'auto_exit']) {
+  for (const action of ['gear_park', 'auto_enter', 'auto_exit']) {
     assert.throws(() => convert({ mode: 'high_level', action }))
   }
   for (const value of [NaN, Infinity, 1.01]) {
@@ -546,7 +546,8 @@ test('shared input converts normalized intent to v2 integers without enabling le
   assert.throws(() => convert({ mode: 'low_level', steering: 0, throttle: 0.5, brake: 0.5, direction: 1 }))
   assert.throws(() => convert({ mode: 'low_level', steering: 0, throttle: 0.0001, brake: 0.0001, direction: 1 }))
   assert.equal(controlInput.v2GamepadMapping.autoEnterButton, -1)
-  assert.equal(controlInput.v2GamepadMapping.reverseButton, -1)
+  assert.equal(controlInput.v2GamepadMapping.gearCycleButton, 6)
+  assert.equal(controlInput.v2GamepadMapping.requestControlButton, 7)
 })
 
 test('v2 input capability gate stops held movement instead of passing gear or mode through', async () => {
@@ -572,13 +573,13 @@ test('v2 input capability gate stops held movement instead of passing gear or mo
   } finally { input.setAvailable(false) }
 })
 
-test('shared gamepad uses the v2 adapter and release neutralizes propulsion', async () => {
+test('shared gamepad uses the v2 adapter and centering neutralizes propulsion', async () => {
   const sent = []
   const input = new controlInput.ControlInput({
     allowVehicleActions: false, send: async (value) => { sent.push(controlInput.toV2ControlCommand(value)) },
     onChange: () => {}, onError: (error) => { throw error },
   })
-  const monitor = new controlInput.GamepadInput(input, () => {})
+  const monitor = new controlInput.GamepadInput(input, () => {}, () => 1)
   const pad = {
     index: 0, id: 'standard-test-pad', mapping: 'standard', connected: true,
     axes: [0, 0, 0, 0], buttons: Array.from({ length: 16 }, () => ({ pressed: false, value: 0 })),
@@ -588,15 +589,13 @@ test('shared gamepad uses the v2 adapter and release neutralizes propulsion', as
     monitor.setMapping(controlInput.v2GamepadMapping)
     monitor.poll([pad], true)
     monitor.confirmMapping(true)
-    monitor.setEnabled(true)
     monitor.poll([pad], true)
-    pad.buttons[4].pressed = true
     pad.axes[0] = 0.575
     pad.axes[3] = -0.575
     monitor.poll([pad], true)
     await flush()
     assert.deepEqual(sent.at(-1), { steering: 50, throttle: 50, brake: 0, direction: 1 })
-    pad.buttons[4].pressed = false
+    pad.axes.fill(0)
     monitor.poll([pad], true)
     await flush()
     assert.deepEqual(sent.at(-1), { steering: 0, throttle: 0, brake: 0, direction: 0 })
@@ -1369,6 +1368,33 @@ test('controller requires bound feedback, signs commands, and fences switching t
   } finally { await f.controller.release() }
 })
 
+test('a browser left pending observes a later vehicle confirmation without issuing another release', async () => {
+  const f = controllerFixture()
+  let handoverResponse = () => new Response('', { status: 503 })
+  let releaseCount = 0
+  const client = new ControlSessionClient('car-test', 'http://localhost', 'test-bearer', f.connection, () => {},
+    async (url, options) => {
+      if (url.endsWith('/handover')) return handoverResponse()
+      if (url.endsWith('/release')) releaseCount++
+      return f.request(url, options)
+    })
+  await client.acquire()
+  await assert.rejects(client.release())
+  assert.equal(client.state, 'pending')
+  const result = { vehicle_id: 'car-test', session_id: f.feedback().session_id, state: 'PENDING', vehicle_handover_confirmed: false }
+  handoverResponse = () => Response.json(result)
+  assert.equal(await client.refreshHandover(), false)
+  result.state = 'CONFIRMED'
+  result.vehicle_handover_confirmed = true
+  result.session_id = 'different-session'
+  assert.equal(await client.refreshHandover(), false)
+  result.session_id = f.feedback().session_id
+  assert.equal(await client.refreshHandover(), true)
+  assert.equal(client.state, 'closed')
+  assert.equal(client.cleanupError, '')
+  assert.equal(releaseCount, 1)
+})
+
 test('stalled RTC disconnect still releases control through Gateway', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] })
   const f = controllerFixture()
@@ -1453,7 +1479,7 @@ test('control acquire timeout covers stalled response bodies', async (context) =
   } finally { context.mock.timers.reset() }
 })
 
-test('releasing the deadman while signing cannot publish a stale pressed command', async (context) => {
+test('centering the stick while signing prevents publication of stale throttle', async (context) => {
   const f = controllerFixture()
   await f.controller.acquire()
   f.accept()
@@ -1797,6 +1823,7 @@ test('video pause selects the command from current session arbitration and prese
   const standby = controlProtocol.neutralCommand
   const emergency = { ...standby, brake: 100 }
   function expectPause(outcome, command) {
+    assert.equal(c.handheldReady, outcome === 'remote_brake_20')
     assert.deepEqual(c.selectVideoPauseCommand(), { outcome, command })
   }
   try {

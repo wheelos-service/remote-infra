@@ -211,6 +211,8 @@ function ed25519Verify(publicKeyB64, payloadJson) {
     parsed.client_instance_id, parsed.receiver_instance_id, parsed.revision,
     parsed.sequence, parsed.timestamp_ms,
     parsed.command.steering, parsed.command.throttle, parsed.command.brake, parsed.command.direction,
+    ...(parsed.command.gear_request ? [parsed.command.gear_request] : []),
+    ...(parsed.command.service_brake ? [true] : []),
   ]))
   assert.equal(verify(null, canonical, key, Buffer.from(parsed.signature, 'base64')), true, 'Ed25519 signature invalid')
   return parsed
@@ -243,7 +245,7 @@ class FakeReceiver {
       version: 2, type: 'control.feedback', vehicle_id: 'car-e2e', session_id: sessionId,
       receiver_instance_id: this.instanceId, revision: 1, accepted_sequence: this.sequence,
       status: this.paused ? 'PAUSED' : (this.sequence > 0 ? 'APPLIED' : 'READY'),
-      reason: this.paused ? 'command_paused' : (this.sequence > 0 ? 'simulated_not_physical' : 'awaiting_command'),
+      reason: this.paused ? 'command_paused' : (this.sequence > 0 ? 'simulated_not_physical' : this.supportsGears ? 'awaiting_command_gear_v1' : 'awaiting_command'),
       last_rejection: '', simulation: true, command: this.paused ? null : this.lastCommand,
     }))
   }
@@ -286,6 +288,8 @@ test('native bench requires a matching neutral ACK before enabling takeover', as
   await client.acquire()
   try {
     client.acceptFeedback('vehicle-car-e2e', true, nativeFeedback(receiver.readyFeedback(state.controlSession.session_id)))
+    assert.equal(client.supportsGearControl, false)
+    assert.throws(() => client.setCommand({steering: 0, throttle: 0, brake: 20, direction: 0, gear_request: 'N'}))
     const hold = {steering: 0, throttle: 0, brake: 20, direction: 0}
     assert.equal(client.neutralAcknowledged, false)
     assert.throws(() => client.setCommand(hold), /standby acknowledgement/)
@@ -302,9 +306,10 @@ test('native bench requires a matching neutral ACK before enabling takeover', as
 
 test.after(() => server.close())
 
-test('E2E Normal Flow: viewing acquire -> 3-camera rVFC ready -> gamepad 0-100 control -> handover release', async () => {
+test('E2E Normal Flow: viewing acquire -> 3-camera rVFC ready -> gamepad 0-100 control -> handover release', async t => {
   resetState()
   const receiver = new FakeReceiver()
+  receiver.supportsGears = true
   const frames = { left: false, center: false, right: false }
   const frameStops = []
   let observerConnected = false
@@ -342,6 +347,7 @@ test('E2E Normal Flow: viewing acquire -> 3-camera rVFC ready -> gamepad 0-100 c
 
   let controller
   const published = []
+  let dropShift = true
   controller = new ControlSessionClient('car-e2e', gatewayOrigin, 'test-bearer', {
     connect: async () => {
       setImmediate(() => controller.acceptFeedback('vehicle-car-e2e', true,
@@ -349,19 +355,19 @@ test('E2E Normal Flow: viewing acquire -> 3-camera rVFC ready -> gamepad 0-100 c
     },
     publish: async body => {
       published.push(body)
+      if (dropShift && JSON.parse(new TextDecoder().decode(body)).command.gear_request) {
+        dropShift = false
+        return
+      }
       const fb = receiver.accept(state.controlSession.public_key_b64, body, Date.now() + state.clockSkewMs)
       controller.acceptFeedback('vehicle-car-e2e', true, fb)
     },
     disconnect: async () => {},
   }, () => {})
   controller.setMediaReady(true)
-  await controller.acquire()
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(controller.state, 'ready')
 
   // Wire GamepadInput -> ControlInput -> toV2ControlCommand -> ControlSessionClient
   const controls = new ControlInput({
-    allowVehicleActions: false,
     send: async intent => {
       const cmd = toV2ControlCommand(intent)
       controller.setCommand(cmd)
@@ -370,18 +376,52 @@ test('E2E Normal Flow: viewing acquire -> 3-camera rVFC ready -> gamepad 0-100 c
     onChange: () => {},
     onError: err => { throw err },
   })
-  const padInput = new GamepadInput(controls, () => {})
-  padInput.setMapping(v2GamepadMapping)
-  controls.setAvailable(true)
+  const reportGear = (gear, age = 0) => {
+    const now = Date.now() + controller.clockOffset
+    controller.updateChassisGear({ age_ms: age, source_timestamp_ms: now - age,
+      message: { gear_location: gear } }, now)
+  }
+  t.after(async () => {
+    controls.setAvailable(false)
+    if (controller.state !== 'closed') await controller.release()
+    await lifecycle.stop()
+  })
+  let acquisition, handback
+  const padInput = new GamepadInput(controls, () => {}, () => controller.propulsionDirection,
+    () => controller.supportsGearControl, {
+      currentGear: () => controller.actualGear,
+      standardMapping: v2GamepadMapping,
+      canDrive: () => controller.handheldReady,
+      toggleControl: () => {
+        if (controller.state === 'idle') acquisition = controller.acquire()
+        else if (controller.state === 'ready') {
+          handback = (async () => {
+            await controls.suspendAndWait()
+            await controller.neutralizeAndPublish()
+            await controller.release()
+          })()
+        }
+      },
+    })
   const pad = {
     index: 0, id: 'pad-e2e', connected: true, mapping: 'standard',
     axes: [0, 0, 0, 0], buttons: Array.from({ length: 16 }, () => ({ pressed: false, value: 0 })),
   }
   padInput.poll([pad], true)
-  padInput.confirmMapping(true)
-  padInput.setEnabled(true)
   padInput.poll([pad], true)
-  pad.buttons[4].pressed = true
+  pad.buttons[7].pressed = true
+  padInput.poll([pad], true)
+  await acquisition
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(controller.state, 'ready')
+  assert.equal(controls.isGamepadEnabled, false)
+  pad.buttons[7].pressed = false
+  controls.setAvailable(true)
+  reportGear('GEAR_DRIVE')
+  padInput.poll([pad], true)
+  assert.equal(controls.isGamepadEnabled, false, 'wait for vehicle takeover')
+  controller.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE')
+  padInput.poll([pad], true)
   pad.axes[0] = 0.575 // ~50% steer
   pad.axes[3] = -0.575 // ~50% throttle, forward
   padInput.poll([pad], true)
@@ -390,10 +430,54 @@ test('E2E Normal Flow: viewing acquire -> 3-camera rVFC ready -> gamepad 0-100 c
   assert.ok(published.length >= 1)
   assert.deepEqual(receiver.lastCommand, { steering: 50, throttle: 50, brake: 0, direction: 1 })
 
+  const sample = async () => {
+    controller.updateArbitration('REMOTE', 'COMPLETE_REMOTE_DRIVE')
+    padInput.poll([pad], true)
+    await new Promise(resolve => setTimeout(resolve, 110))
+    await controller.tick()
+  }
+  pad.axes[3] = .575
+  await sample()
+  assert.deepEqual(receiver.lastCommand, { steering: 50, throttle: 0, brake: 50, direction: 0, service_brake: true })
+  pad.axes[3] = .14
+  await sample()
+  assert.deepEqual(receiver.lastCommand, { steering: 50, throttle: 0, brake: 0, direction: 0 })
+  pad.axes = [0, 0, 0, 1]
+  await sample()
+  assert.equal(receiver.lastCommand.brake, 100)
+  assert.equal(controller.isEmergencyStop, false)
+  pad.axes[3] = 0
+  reportGear('GEAR_DRIVE')
+  pad.buttons[6].pressed = true
+  await sample()
+  await controller.tick()
+  const shifts = () => published.map(bytes => JSON.parse(new TextDecoder().decode(bytes)).command)
+    .filter(command => command.gear_request)
+  assert.deepEqual(shifts(), [{ steering: 0, throttle: 0, brake: 20, direction: 0, gear_request: 'R' }])
+  assert.equal(dropShift, false)
+  assert.equal(controller.propulsionDirection, 0, 'lost shift blocks throttle in the old gear')
+  assert.equal(receiver.lastCommand.gear_request, undefined)
+  pad.buttons[6].pressed = false
+  await sample()
+  reportGear('GEAR_DRIVE')
+  pad.buttons[6].pressed = true
+  await sample()
+  assert.equal(shifts().length, 2)
+  pad.buttons[6].pressed = false
+  await sample()
+  reportGear('GEAR_REVERSE')
+  pad.axes[3] = -1
+  await sample()
+  assert.deepEqual(receiver.lastCommand, { steering: 0, throttle: 100, brake: 0, direction: -1 })
+  reportGear('GEAR_REVERSE', 501)
+  await controller.tick()
+  assert.equal(receiver.lastCommand.throttle, 0, 'expired chassis blocks a repeating heartbeat')
   // Neutralize, release and verify handover confirmation completes
-  controls.setAvailable(false)
-  await controller.neutralizeAndPublish()
-  await controller.release()
+  pad.buttons[7].pressed = true
+  padInput.poll([pad], true)
+  assert.ok(handback)
+  await handback
+  padInput.poll([pad], true)
   assert.equal(controller.state, 'closed')
   assert.equal(state.handoverConfirmed, true)
 

@@ -7,7 +7,7 @@ import { isSingleFront, type FrontCamera } from '../lib/camera-view'
 import { TeleopDiagnosticsBuffer } from '../lib/teleop-diagnostics'
 import ThreeCameraView from './ThreeCameraView'
 import { DrivingControlPanel } from './DrivingControlPanel'
-import TeleopWorkbench from './TeleopWorkbench'
+import TeleopWorkbench, { type TeleopWorkbenchProps } from './TeleopWorkbench'
 import { FleetOverviewContent } from './FleetOverview'
 import { VehicleMonitorDetail, VehicleMonitorList } from './VehicleMonitor'
 import { useVehicleData } from '../hooks/use-vehicle-data'
@@ -38,6 +38,8 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
   const bench = useBenchCameras(vehicleId, bearer, !observeOnly, cameras.connected, cameras.tracks, cameras.frames, diagnostics.current)
   const drivingEnabled = !observeOnly && bench.eligible
   const [busy, setBusy] = useState(false)
+  const [sessionGear, setSessionGear] = useState<Exclude<TeleopWorkbenchProps['gear'], '—'>>()
+  const directoryGear = row.gear === 'P' || row.gear === 'N' || row.gear === 'D' || row.gear === 'R' ? row.gear : '—'
   const { reportFrame, reportProgress } = cameras
   const onStats = useCallback((name: FrontCamera, stats: CameraFrameStats) => {
     const extra = stats.lastResidenceMs !== undefined ? `res=${stats.lastResidenceMs}ms` : ''
@@ -59,20 +61,19 @@ function LiveWorkbench({ vehicleId, bearer, onBusyChange, onClose, observeOnly, 
   }, [busy])
   return <div className="space-y-4" data-testid="live-driving-workbench">
     {cameras.error && <p role="alert" className="text-xs text-red-300">{cameras.error}</p>}
-    <TeleopWorkbench vehicleId={vehicleId} row={row} gear={['P', 'R', 'N', 'D'].includes(row.gear) ? row.gear as 'P' | 'R' | 'N' | 'D' : '—'}
-      networkQuality={null} speedKph={row.speed ?? undefined} batteryPercent={row.battery ?? undefined}
+    <TeleopWorkbench vehicleId={vehicleId} row={row} gear={busy ? sessionGear ?? '—' : directoryGear}
+      speedKph={row.speed ?? undefined} batteryPercent={row.battery ?? undefined}
       runModeLabel={row.modeLabel} locationLabel={row.locationReason} authenticated busy={busy} observeOnly={!drivingEnabled}
       onBack={onClose} onMonitor={onMonitor} videoStatus={viewingStatus(cameras)}
       cameraView={<ThreeCameraView key={cameras.playbackEpoch} vehicleId={vehicleId} tracks={cameras.tracks} frames={cameras.frames} failedCameras={cameras.failedCameras} requireFrameCallback={drivingEnabled} onFrame={trackChanged} onProgress={reportProgress} onStats={onStats} onPresented={bench.present} onSample={drivingEnabled ? bench.sample : undefined} />}
       controlPanel={drivingEnabled
-      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={bench.ready} verifyVideo={bench.check} receiverReady={bench.receiverReady} requestBlocker={bench.requestBlocker} onBusyChange={onBusy} onIntent={onIntent} diagnostics={diagnostics.current} />
+      ? <DrivingControlPanel vehicleId={vehicleId} bearer={bearer} videoReady={bench.ready} verifyVideo={bench.check} receiverReady={bench.receiverReady} requestBlocker={bench.requestBlocker} onBusyChange={onBusy} onGearChange={setSessionGear} onIntent={onIntent} diagnostics={diagnostics.current} />
       : <div className="space-y-2 text-xs text-amber-200">
           <button type="button" disabled aria-describedby="control-denied-reason"
             className="rounded border border-slate-700 px-3 py-2 opacity-40">申请控制权</button>
           <p id="control-denied-reason">{controlDenied ? '无此车辆的驾驶权限'
             : observeOnly ? '当前角色无驾驶权限' : '源视频新鲜度尚未验证，仅可监看'}</p>
         </div>} />
-    {busy && <p className="text-xs text-amber-200">释放并确认车辆交接前，禁止切换车辆或退出工作台。</p>}
   </div>
 }
 

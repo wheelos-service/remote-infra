@@ -70,6 +70,34 @@ entries and empty or absent lists require no migration or per-vehicle edits.
 The percent-command receiver polls the instance-bound native-v3 context,
 accepts signed v2 packets, and reports native handback for the same revision.
 
+#### Handheld gears and service brake
+
+The browser enables handheld driving after the bound receiver returns reliable
+`READY` feedback with reason `awaiting_command_gear_v1`. Older receivers
+retain standby, takeover, release and emergency-stop controls. The Apollo
+source changes are in commit `88c06171a62510571acf41b40bf66eb99341ed85`
+on `teleop-V1` and cover Teleop, Guardian and Canbus together.
+[Native patch against Apollo 6de50aa262](../infra/apollo/handheld-gear.patch)
+
+The four required signed v2 command values are `steering, throttle, brake,
+direction`. The Ed25519 signature covers the UTF-8 JSON array of version, type,
+vehicle ID, session ID, client instance ID, receiver instance ID, revision,
+sequence, timestamp and those four integers, in that order. The two optional
+extensions are mutually exclusive.
+
+| Input | Signed extension after the four integers | Receiver behavior |
+| --- | --- | --- |
+| LT gear cycle (N → D → R → N) | Append the value of `gear_request` as a JSON string, e.g. `"R"` | One request with steering, throttle and direction zero and brake 20%. A fresh known chassis gear, speed at or below 0.1 m/s in magnitude and the Guardian brake interlock permit the shift. |
+| Service brake | Append JSON boolean `true` for `service_brake: true` | Apply the requested 1–100% service brake with zero throttle and direction. Steering remains proportional. |
+| Other commands | End the array after direction | Idle, heartbeats, steering and propulsion leave gear selection alone. The existing emergency-stop command uses 100% brake, zero throttle and zero direction. |
+
+Throttle requires D or R in a chassis sample less than 500 ms old. The
+direction field on propulsion identifies that confirmed gear. A request for
+another gear blocks propulsion until the chassis reports the requested gear.
+A lost or interlocked shift allows service braking and a fresh button press
+after releasing LT and recentering. The panel shows the last
+request and the fresh chassis gear separately. [Command schema](../api/schemas/vehicle-control.schema.json)
+
 The matching SDK-Kit generated publisher schedules 640 × 480 test images at
 30 fps and encodes its camera index, Gateway clock epoch, capture-time lower
 bound and CRC-16 in the top 16 rows. Physical cameras can carry their capture

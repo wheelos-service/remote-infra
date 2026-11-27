@@ -2,12 +2,18 @@ import { z } from 'zod'
 
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/)
 const integer = z.number().int().safe()
+const gear = z.enum(['D', 'N', 'R'])
+export type Gear = z.infer<typeof gear>
 export const controlCommandSchema = z.object({
   steering: integer.min(-100).max(100),
   throttle: integer.min(0).max(100),
   brake: integer.min(0).max(100),
   direction: z.union([z.literal(-1), z.literal(0), z.literal(1)]),
-}).strict().refine((value) => !(value.throttle && value.brake), 'Conflicting pedals')
+  gear_request: gear.optional(),
+  service_brake: z.literal(true).optional(),
+}).strict().refine(c => !c.gear_request || (c.steering === 0 && c.direction === 0 && c.throttle === 0 && c.brake === 20 && !c.service_brake), 'Invalid shift request')
+  .refine(c => !c.service_brake || (c.direction === 0 && c.brake > 0), 'Invalid service brake')
+  .refine((value) => !(value.throttle && value.brake), 'Conflicting pedals')
 export type ControlCommand = z.infer<typeof controlCommandSchema>
 export const neutralCommand: ControlCommand = { steering: 0, throttle: 0, brake: 0, direction: 0 }
 
@@ -47,6 +53,8 @@ export function controlSignBytes(input: ControlPayload): Uint8Array {
     p.version, p.type, p.vehicle_id, p.session_id, p.client_instance_id,
     p.receiver_instance_id, p.revision, p.sequence, p.timestamp_ms,
     p.command.steering, p.command.throttle, p.command.brake, p.command.direction,
+    ...(p.command.gear_request ? [p.command.gear_request] : []),
+    ...(p.command.service_brake ? [true] : []),
   ]))
 }
 
