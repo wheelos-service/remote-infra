@@ -85,7 +85,7 @@ export default function ThreeCameraView({ vehicleId, tracks = {}, frames = {}, f
     : frontCameras
   return <section className={fullscreen ? 'fixed inset-0 z-50 flex flex-col bg-slate-950 p-4 pb-24 text-slate-100' : 'flex min-h-[300px] flex-col text-slate-100'}>
     <header className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
-      <span>{vehicleId} · {singleFront ? '单路前视画面' : '三路独立画面 · 未拼接'} · 无后视覆盖</span>
+      <span>{vehicleId} · {singleFront ? '单路前视画面' : '三路前视画面'}</span>
       <div className="flex gap-2">
         <button type="button" disabled={!tracks.center} onClick={() => setFocused(value => !value)} className="rounded border border-slate-700 px-3 py-2 disabled:opacity-40">{focused ? '恢复三路布局' : '放大中间'}</button>
         <button type="button" onClick={() => setFullscreen(value => !value)} className="rounded border border-slate-700 px-3 py-2">{fullscreen ? '退出全屏' : '全屏查看'}</button>

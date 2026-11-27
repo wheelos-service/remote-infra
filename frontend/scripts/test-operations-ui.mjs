@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-const base = new URL(process.env.FRONTEND_URL ?? 'http://localhost:8000/')
+const base = new URL(process.env.FRONTEND_URL ?? 'http://localhost:8000/?preview=1')
 const profile = await mkdtemp(path.join(tmpdir(), 'operations-ui-'))
 const chrome = spawn(process.env.CHROME_BIN ?? 'google-chrome', [
   '--headless=new', '--disable-gpu', '--disable-background-networking',
@@ -139,13 +139,12 @@ try {
   assert.equal(await evaluate(`!![...document.querySelectorAll('[data-testid="vehicle-timeline"] button')].find(b=>b.textContent==='最新在前')`), true)
   await click('车辆详情')
   await click('实时')
-  await press('button[aria-label="进入 sim-004 远程驾驶监看"]')
+  await click('进入远程驾驶')
   await until(`document.querySelector('[data-testid="remote-driving-workbench"] h1')?.textContent.includes('sim-004')`)
-  assert.match(await evaluate('document.body.innerText'), /网络质量未知 · 未测量/)
   assert.doesNotMatch(await evaluate('document.body.innerText'), /信号优秀|信号良好/)
   assert.equal(await evaluate(`document.querySelector('svg[aria-label="跟车局部 BEV"]').getAttribute('data-stale')`), 'false')
   await click('全屏查看')
-  assert.match(await evaluate('document.body.innerText'), /sim-004 · 三路独立画面 · 未拼接 · 无后视覆盖/)
+  assert.match(await evaluate('document.body.innerText'), /sim-004 · 三路前视画面/)
   await click('退出全屏')
 
   await click('远程驾驶')
@@ -177,7 +176,7 @@ try {
   const listScroll = await evaluate(`document.querySelector('[data-testid="remote-driving-list"] section').scrollTop`)
   assert.ok(listScroll > 0)
   await press('[data-testid="remote-driving-list"] tbody tr:nth-child(3) td:nth-child(3)')
-  assert.match(await evaluate('document.body.innerText'), /无后视覆盖/)
+  assert.doesNotMatch(await evaluate('document.body.innerText'), /无后视覆盖|倒车前需确认后方环境/)
   assert.deepEqual(await evaluate(`[...document.querySelectorAll('[data-testid="remote-driving-workbench"] [data-camera]')].map(e=>e.dataset.camera)`), ['left', 'center', 'right'])
   assert.doesNotMatch(await evaluate('document.body.innerText'), /后视摄像头/)
   assert.equal(await evaluate(`document.documentElement.scrollWidth > innerWidth`), false)
@@ -253,10 +252,15 @@ try {
   await send('Page.reload')
   await until(`document.querySelector('input[aria-label="筛选车队车辆"]')?.value === 'sim-007'`)
   assert.equal(await evaluate(`document.querySelectorAll('button[aria-label^="选中 sim-"]').length`), 1)
-  await send('Page.navigate', { url: `${base.origin}/?map=ruantong_hry_origin#/?page=drive&driveVehicle=sim-002` })
+  const mapUrl = new URL(base)
+  const catalog = await (await fetch(new URL('/maps/index.json', base))).json()
+  const mapId = catalog.maps.at(-1).id
+  mapUrl.searchParams.set('map', mapId)
+  mapUrl.hash = '/?page=drive&driveVehicle=sim-002'
+  await send('Page.navigate', { url: mapUrl.href })
   await until(`document.querySelector('[data-testid="remote-driving-workbench"] h1')?.textContent.includes('sim-002')`)
   await click('返回远程驾驶列表')
-  assert.equal(await evaluate(`new URLSearchParams(location.search).get('map')`), 'ruantong_hry_origin')
+  assert.equal(await evaluate(`new URLSearchParams(location.search).get('map')`), mapId)
   assert.equal(requests.some((url) => /\/api\/|^wss?:/.test(url)), false)
   assert.deepEqual(errors, [])
   console.log('Passed: shareable vehicle/filter URLs, back/forward, reload, invalid routes/vehicles, preserved map choice, collapsed task creation, readiness states, row/keyboard entry, single alert workspace, retained context, offline BEV, fullscreen identity, responsive layout and no control/API requests.')

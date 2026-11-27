@@ -282,3 +282,82 @@ func TestNativeBenchControlAndHandover(t *testing.T) {
 	f.request(t, "POST", path+"/handover/ack/"+instance, "device2", ack, 204)
 	f.request(t, "POST", path+"/acquire", "controller", body, 200)
 }
+
+func TestNativeHandbackAfterRestartBeforeRevocation(t *testing.T) {
+	for _, lostBrowser := range []bool{false, true} {
+		name := "explicit release"
+		if lostBrowser {
+			name = "browser lost before release"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newControlContextFixture(t)
+			t.Setenv("NATIVE_BENCH_VEHICLES_JSON", `["car-2"]`)
+			const path = "/api/vehicles/car-2/control"
+			const original = "0123456789abcdef0123456789abcdef"
+			const replacement = "1123456789abcdef0123456789abcdef"
+			const acquire = `{"contract_version":3,"protocol_version":2,"client_instance_id":"first-tab","public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`
+			poll := func(instance string) DeviceControlContext {
+				t.Helper()
+				r := f.request(t, "GET", path+"/context/native-v3-percent/"+instance, "device2", "", 200)
+				var c DeviceControlContext
+				if err := json.Unmarshal(r.Body.Bytes(), &c); err != nil {
+					t.Fatal(err)
+				}
+				return c
+			}
+			blocker := func(want string) {
+				t.Helper()
+				r := f.request(t, "GET", path+"/bench-clock", "controller", "", 200)
+				var b struct {
+					Blocker string `json:"control_request_blocker"`
+				}
+				if err := json.Unmarshal(r.Body.Bytes(), &b); err != nil || b.Blocker != want {
+					t.Fatalf("blocker %q, want %q: %v", b.Blocker, want, err)
+				}
+			}
+			poll(original)
+			f.request(t, "POST", path+"/acquire", "controller", acquire, 200)
+			active := poll(original)
+			report := func(instance string, confirmed bool, code int) {
+				t.Helper()
+				body := fmt.Sprintf(`{"revision":%d,"session_id":%q,"edge_revocation_applied":true,"vehicle_handover_confirmed":%t}`, active.Revision, active.SessionID, confirmed)
+				f.request(t, "POST", path+"/handover/ack/"+instance, "device2", body, code)
+			}
+			poll(replacement)
+			report(replacement, false, 409)
+			if lostBrowser {
+				f.redis.FastForward(f.api.leases.ttl + time.Millisecond)
+			} else {
+				f.request(t, "POST", "/api/control/"+active.SessionID+"/release", "controller", "{}", 202)
+			}
+
+			const revision = 1
+			pending := poll(replacement)
+			if pending.State != "PENDING" || pending.SessionID != active.SessionID || pending.Revision != revision || pending.Session != nil {
+				t.Fatalf("replacement received incorrect revocation context: %+v", pending)
+			}
+			now := time.Unix(1730000000, 0)
+			f.redis.SetTime(now)
+			blocker("awaiting_revocation")
+			report(replacement, true, 409)
+			report(replacement, false, 409)
+			drain := time.Duration(defaultControlTimingPolicy().ContextTTLMS+handoverEvidenceMaxAgeMS) * time.Millisecond
+			f.redis.SetTime(now.Add(drain - time.Millisecond))
+			report(replacement, false, 409)
+			f.redis.SetTime(now.Add(drain))
+			report(replacement, true, 409)
+			report(replacement, false, 202)
+			blocker("awaiting_vehicle")
+			f.request(t, "POST", path+"/acquire", "controller", acquire, 409)
+			report(original, true, 409)
+			report(replacement, true, 204)
+			report(replacement, true, 204)
+			blocker("")
+			f.request(t, "POST", path+"/acquire", "controller", strings.Replace(acquire, "first-tab", "new-tab", 1), 200)
+			if next := poll(replacement); next.State != "ACTIVE" || next.Revision != revision+1 || next.SessionID == active.SessionID {
+				t.Fatalf("new browser acquired incorrect session: %+v", next)
+			}
+			report(replacement, true, 409)
+		})
+	}
+}

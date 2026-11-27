@@ -34,7 +34,7 @@ Separate **physical motion safety** from **control-session ownership**:
      blocking and stale queued command bursts after transient packet loss. Keep
      `vehicle.control.feedback.v2` and `vehicle.state` `Reliable`.
    - `RoomEvent.Reconnecting` on the control Room must **disarm** local inputs
-     immediately (neutralize stick inputs and require manual re-enable) while
+     immediately (neutralize stick inputs and wait for a centered sample) while
      preserving the control session up to `rtcReconnectGraceMs` (`1200 ms`)
      and refreshing in-flight `pendingCommands` timestamps on `Reconnected` so
      late reliable ACKs are consumed rather than misclassified as
@@ -56,10 +56,8 @@ Separate **physical motion safety** from **control-session ownership**:
        continues HTTP lease renewal.
      - **Recovery**: Once the control link (or 3 front cameras within 5 s)
        recovers, neutral/brake (`throttle == 0`) packets restore `ACCEPTED`;
-       transient `<= 5 s` pauses automatically re-enable the gamepad only if
-       the tab remains active/focused and the physical gamepad passes
-       `GamepadInput`'s `needsNeutral` + `enableHeld` safety gate (zero motion
-       until sticks are centered and enable is re-pressed).
+       after a transient video pause, input resumes when the tab is focused,
+       remote driving is ready, and the sticks are centered with mapped buttons released.
      - **`> 1500 ms` / `> 5 s` video loss / lease loss / hardware `FAULT` / explicit exit**:
        Permanently lock/revoke the session, emit `STOP` (`Guardian HARD_ESTOP`),
        automatically release & complete `handover` confirmation (`PENDING ->

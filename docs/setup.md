@@ -2,8 +2,8 @@
 
 For a registry installation, download the Compose installer and its checksum.
 After verifying and extracting the archive, run `./install.sh` to pull the
-1.1.3 images from `registry.cn-hangzhou.aliyuncs.com/wheelos/saas`.
-[Compose installer](https://github.com/wheelos-service/remote-infra/releases/download/1.1.3/teleop-1.1.3-compose.tar.gz) · [SHA-256 checksum](https://github.com/wheelos-service/remote-infra/releases/download/1.1.3/teleop-1.1.3-compose.tar.gz.sha256)
+1.1.4 images from `registry.cn-hangzhou.aliyuncs.com/wheelos/saas`.
+[Compose installer](https://github.com/wheelos-service/remote-infra/releases/download/1.1.4/teleop-1.1.4-compose.tar.gz) · [SHA-256 checksum](https://github.com/wheelos-service/remote-infra/releases/download/1.1.4/teleop-1.1.4-compose.tar.gz.sha256)
 
 The offline Ubuntu 24.04 x86_64 package requires only Docker Engine, usable by
 your user without `sudo`. It includes all images and setup tools; no source
@@ -11,15 +11,15 @@ checkout, compilation, or registry access is needed after downloading it.
 
 ## 1. Deploy
 
-Extract `teleop-1.1.3-linux-amd64.tar.gz`. From the extracted directory,
+Extract `teleop-1.1.4-linux-amd64.tar.gz`. From the extracted directory,
 replace the example LAN IP and hostnames. Reserve the IP in your router or
 configure a static address. For the same application URLs in LAN and public
 deployments, configure internal DNS so both names resolve to this LAN IP:
 
 ```bash
-sha256sum --check teleop-1.1.3-linux-amd64.tar.gz.sha256
-tar -xzf teleop-1.1.3-linux-amd64.tar.gz
-cd teleop-1.1.3-linux-amd64
+sha256sum --check teleop-1.1.4-linux-amd64.tar.gz.sha256
+tar -xzf teleop-1.1.4-linux-amd64.tar.gz
+cd teleop-1.1.4-linux-amd64
 ./teleop --lan-ip 192.168.1.50 \
   --domain console.example.com --auth-domain login.example.com all
 ```
@@ -140,7 +140,7 @@ once from a source checkout with `sudo install -m 0755 infra/scripts/teleop-upda
 Run it as the deployment owner on the Docker host:
 
 ```bash
-teleop-update 1.1.3
+teleop-update 1.1.4
 ```
 
 The updater discovers the state directory from the Gateway. Supply `--state PATH`

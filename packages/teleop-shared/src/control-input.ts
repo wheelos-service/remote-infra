@@ -55,6 +55,7 @@ export class ControlInput {
 
     get isKeyboardEnabled(): boolean { return this.keyboardEnabled; }
     get isGamepadEnabled(): boolean { return this.gamepadEnabled; }
+    get isEmergencyLatched(): boolean { return this.emergencyLatched; }
     get isAvailable(): boolean { return this.available; }
 
     private report(message: string): void {
@@ -106,7 +107,7 @@ export class ControlInput {
         this.dispatch(command);
         this.timer = setInterval(() => {
             if (this.gamepadActive && performance.now() - this.gamepadSampleAt > TELEOP_TIMING.gamepadSampleTimeoutMs) {
-                this.suspend('手柄采样超时：已停止，请重新启用');
+                this.suspend('手柄采样超时：已停止');
                 return;
             }
             if (this.active) this.dispatch(this.active);
@@ -123,7 +124,7 @@ export class ControlInput {
         this.gamepadEnabled = false;
         this.emergencyLatched = false;
         this.available = available;
-        this.report(available ? '控制已就绪，请启用手柄' : '控制不可用');
+        this.report(available ? '控制会话已就绪' : '控制不可用');
     }
 
     setKeyboardEnabled(enabled: boolean): void {
@@ -139,7 +140,7 @@ export class ControlInput {
         this.report(enabled ? '键盘控制已启用，等待按键' : '键盘控制未启用');
     }
 
-    suspend(message = '已停止；请重新启用键盘控制'): void {
+    suspend(message = '驾驶输入已暂停'): void {
         const wasActive = this.keyboardEnabled || this.gamepadEnabled || Boolean(this.active);
         const pendingSafety = this.pending?.action === 'emergency_stop'
             ? this.pending : this.emergencySending || this.emergencyLatched
@@ -156,7 +157,7 @@ export class ControlInput {
         this.report(message);
     }
 
-    async suspendAndWait(message = '已停止；请重新启用控制'): Promise<void> {
+    async suspendAndWait(message = '驾驶输入已暂停'): Promise<void> {
         this.suspend(message);
         await this.sendingTask;
     }
@@ -166,7 +167,7 @@ export class ControlInput {
         this.suspend();
         if (enabled) this.emergencyLatched = false;
         this.gamepadEnabled = enabled;
-        this.report(enabled ? '手柄已启用：先松开使能键并回中' : '手柄控制未启用');
+        this.report(enabled ? '手柄输入就绪' : '手柄输入待命');
     }
 
     updateGamepad(value: ControlCommand | 'forward' | 'reverse' | 'left' | 'right' | 'stop'): void {
@@ -176,7 +177,7 @@ export class ControlInput {
             if (this.gamepadActive) {
                 this.clearMovement();
                 this.dispatch({mode: 'high_level', action: 'stop'});
-                this.report('手柄已停止，等待使能键与摇杆输入');
+                this.report('手柄已停止');
             }
             return;
         }
@@ -256,7 +257,7 @@ export class ControlInput {
         this.clearMovement();
         this.blocked = this.pressed.size > 0;
         this.dispatch({mode: 'high_level', action: 'emergency_stop'});
-        this.report('已发送急停；松开按键并回中，手柄需重新启用');
+        this.report('已发送急停');
     }
 }
 
@@ -291,13 +292,13 @@ export function bindKeyboardInput(input: ControlInput, targetWindow: Window, tar
         input.keyUp(event.code);
     };
     const blur = () => {
-        input.suspend('窗口失焦：已停止，请重新启用控制');
+        input.suspend('窗口失焦：驾驶输入已暂停');
         onInterruption?.('window_blur');
     };
     const focus = () => onInterruption?.('window_focus');
     const visibility = () => {
         if (targetDocument.hidden) {
-            input.suspend('页面已隐藏：已停止，请重新启用控制');
+            input.suspend('页面已隐藏：驾驶输入已暂停');
             onInterruption?.('page_hidden');
         } else onInterruption?.('page_visible');
     };

@@ -4,7 +4,7 @@ import { controlSafetyDecision } from './control-safety'
 import { organizationHeaders, requestOrganization } from './organization-context'
 import {
   base64, controlCommandSchema, controlFeedbackSchema, neutralCommand, signControl,
-  type ControlCommand, type ControlFeedback,
+  type ControlCommand, type ControlFeedback, type Gear,
 } from './control-protocol'
 
 const sessionSchema = z.object({
@@ -50,6 +50,12 @@ export interface ControlConnection {
 // rather than coupling safety deadlines to packet cadence or sequence count.
 const MAX_PENDING_COMMANDS = 64
 const MAX_TRACE_EVENTS = 128
+const CHASSIS_GEAR_MAX_AGE_MS = 500
+const chassisGears = new Map<string, Gear | 'P'>([
+  ['GEAR_DRIVE', 'D'], ['GEAR_REVERSE', 'R'], ['GEAR_NEUTRAL', 'N'], ['GEAR_PARKING', 'P'],
+])
+
+type TimedSample<T> = { age_ms?: number; source_timestamp_ms?: number; message?: T }
 
 type TraceEvent = 'input' | 'tick' | 'sign' | 'superseded' | 'dispatch' | 'published' |
   'ack' | 'feedback' | 'renew' | 'fault' | 'disconnect_failed' | 'release_failed'
@@ -84,6 +90,11 @@ export function steeringAlignedHold(steeringPct?: number): ControlCommand {
 
 export class ControlSessionClient {
   state: ControllerState = 'idle'
+  private gearCapability = false
+  get supportsGearControl(): boolean { return this.gearCapability }
+  requestedGear?: Gear
+  private chassisGear?: Gear | 'P'
+  private gearExpiresAt = 0
   feedback?: ControlFeedback
   error = ''
   cleanupError = ''
@@ -113,7 +124,7 @@ export class ControlSessionClient {
   private renewTimer?: ReturnType<typeof setTimeout>
   private renewalSeq = 0
   private clockOffsetMs = 0
-  private remoteReportedAt?: number
+  private remoteExpiresAt = 0
   private steeringPct?: number
   private mediaReady = true
   private rtcReconnecting = false
@@ -151,8 +162,39 @@ export class ControlSessionClient {
     return !this.verifyVideo || (this.feedback?.accepted_sequence ?? 0) > 0
   }
 
+  get actualGear() {
+    return performance.now() < this.gearExpiresAt ? this.chassisGear : undefined
+  }
+
+  get propulsionDirection(): -1 | 0 | 1 {
+    const gear = this.actualGear
+    if (!this.supportsGearControl || (this.requestedGear && gear !== this.requestedGear)) return 0
+    return gear === 'D' ? 1 : gear === 'R' ? -1 : 0
+  }
+
+  private propulsionBlocked(command: ControlCommand): boolean {
+    return this.supportsGearControl && command.throttle > 0 &&
+      (command.direction === 0 || command.direction !== this.propulsionDirection)
+  }
+
+  private sampleAge(sample: TimedSample<unknown> | undefined, publishedAt?: number): number {
+    const source = sample?.source_timestamp_ms
+    const age = sample?.age_ms
+    if (typeof source !== 'number' || typeof age !== 'number' || typeof publishedAt !== 'number' ||
+        !Number.isFinite(source) || !Number.isFinite(age) || !Number.isFinite(publishedAt)) return Infinity
+    const now = Date.now() + this.clockOffsetMs
+    const elapsed = now - publishedAt
+    if (elapsed < 0 || age < 0 || source > now) return Infinity
+    return Math.max(now - source, elapsed + age)
+  }
+
+  updateChassisGear(chassis?: TimedSample<{ gear_location?: string }>, publishedAt?: number): void {
+    this.gearExpiresAt = performance.now() + CHASSIS_GEAR_MAX_AGE_MS - this.sampleAge(chassis, publishedAt)
+    this.chassisGear = chassisGears.get(chassis?.message?.gear_location ?? '')
+  }
+
   get isEmergencyStop(): boolean {
-    return this.command.brake === 100 && this.command.throttle === 0 &&
+    return !this.command.service_brake && this.command.brake === 100 && this.command.throttle === 0 &&
       this.command.steering === 0 && this.command.direction === 0
   }
 
@@ -230,7 +272,7 @@ export class ControlSessionClient {
   async acquire(): Promise<void> {
     if (this.state !== 'idle') throw new Error('Controller is already in use')
     if (!this.mediaReady || this.verifyVideo && !this.verifyVideo()) throw new Error('Three camera feeds are not ready')
-    this.remoteReportedAt = undefined
+    this.remoteExpiresAt = 0
     this.steeringPct = undefined
     this.acquiring = true
     this.error = ''
@@ -352,6 +394,7 @@ export class ControlSessionClient {
       this.record('ack', acknowledged.sequence, performance.now() - acknowledged.dispatchedAt)
       this.pendingCommands = this.pendingCommands.filter(command => command.sequence > data.accepted_sequence)
     }
+    if (data.status === 'READY' && data.reason === 'awaiting_command_gear_v1') this.gearCapability = true
     this.feedback = data
     this.lastFeedback = performance.now()
     this.record('feedback', data.accepted_sequence)
@@ -388,20 +431,41 @@ export class ControlSessionClient {
 
   private videoHoldRevision = -1
 
-  updateArbitration(state?: string, drivingMode?: string, steeringPct?: number): void {
-    this.steeringPct = steeringPct
-    if ((drivingMode != null && drivingMode !== 'COMPLETE_REMOTE_DRIVE') ||
-        (state != null && state !== 'REMOTE')) {
-      this.remoteReportedAt = undefined
-    } else if (state === 'REMOTE') {
-      this.remoteReportedAt = performance.now()
+  updateArbitration(status: TimedSample<{ state?: string; safety_override?: string }> | undefined,
+      chassis: TimedSample<{ driving_mode?: string; steering_percentage?: number }> | undefined,
+      publishedAt?: number, sourcesOmitted = false): void {
+    this.steeringPct = chassis?.message?.steering_percentage
+    const mode = chassis?.message?.driving_mode
+    // teleop-V1 uses the same drive-by-wire mode for Guardian AUTO and REMOTE.
+    const dbwActive = mode === 'COMPLETE_AUTO_DRIVE' || mode === 'COMPLETE_REMOTE_DRIVE'
+    const chassisAge = this.sampleAge(chassis, publishedAt)
+    const limit = this.timing.feedbackTimeoutMs
+    if (!dbwActive || chassisAge >= limit) {
+      this.remoteExpiresAt = 0
+      return
     }
+    if (sourcesOmitted && !status) return // A compact packet cannot renew the last confirmation.
+    const override = status?.message?.safety_override
+    if (status?.message?.state !== 'REMOTE' || (override && override !== 'SAFETY_OVERRIDE_NONE')) {
+      this.remoteExpiresAt = 0
+      return
+    }
+    const age = Math.max(chassisAge, this.sampleAge(status, publishedAt))
+    this.remoteExpiresAt = performance.now() + limit - age
+  }
+
+  get remoteControlActive(): boolean {
+    return performance.now() < this.remoteExpiresAt
+  }
+
+  get handheldReady(): boolean {
+    return this.state === 'ready' && this.mediaReady && this.neutralAcknowledged && this.remoteControlActive &&
+      !this.rtcReconnecting && !this.closing && !this.isEmergencyStop
   }
 
   selectVideoPauseCommand() {
     if (this.isEmergencyStop) return { outcome: 'emergency_stop', command: { ...this.command } } as const
-    if (this.neutralAcknowledged && this.remoteReportedAt !== undefined &&
-        performance.now() - this.remoteReportedAt < this.timing.feedbackTimeoutMs) {
+    if (this.neutralAcknowledged && this.remoteControlActive) {
       const command = steeringAlignedHold(this.steeringPct)
       this.setCommand(command)
       this.videoHoldRevision = this.intentRevision
@@ -415,11 +479,14 @@ export class ControlSessionClient {
     if (this.state !== 'ready' || !this.mediaReady) throw new Error('Vehicle control is not ready')
     this.videoHoldRevision = -1
     const next = controlCommandSchema.parse(command)
-    const neutral = next.steering === 0 && next.throttle === 0 && next.direction === 0
+    if ((next.gear_request || next.service_brake) && !this.supportsGearControl) throw new Error('车端未开放手柄挡位与行车制动')
+    const neutral = !next.gear_request && !next.service_brake && next.steering === 0 && next.throttle === 0 && next.direction === 0
     if (!this.neutralAcknowledged && !(neutral && (next.brake === 0 || next.brake === 100))) {
       throw new Error('Waiting for signed standby acknowledgement')
     }
-    if (next.steering === this.command.steering && next.throttle === this.command.throttle &&
+    if (next.gear_request) this.requestedGear = next.gear_request
+    if (next.gear_request === this.command.gear_request && next.service_brake === this.command.service_brake &&
+        next.steering === this.command.steering && next.throttle === this.command.throttle &&
         next.brake === this.command.brake && next.direction === this.command.direction) return
     this.command = next
     this.intentRevision++
@@ -511,6 +578,10 @@ export class ControlSessionClient {
     this.sendStarted = now
     const intentRevision = this.intentRevision
     const signedCommand = { ...this.command }
+    if (this.propulsionBlocked(signedCommand)) {
+      signedCommand.throttle = 0
+      signedCommand.direction = 0
+    }
     const sequence = ++this.sequence
     try {
       const body = await signControl(this.key, {
@@ -521,7 +592,7 @@ export class ControlSessionClient {
       })
       this.record('sign', sequence, performance.now() - now)
       if (!this.canContinue() || this.state !== 'ready' || !this.checkDeadlines(performance.now()) || this.rtcReconnecting) return
-      if (intentRevision !== this.intentRevision) {
+      if (intentRevision !== this.intentRevision || this.propulsionBlocked(signedCommand)) {
         this.record('superseded', sequence)
         return
       }
@@ -538,6 +609,10 @@ export class ControlSessionClient {
       const dispatchedAt = performance.now()
       // Register before calling publish: feedback may arrive before its promise
       // settles. Sequence numbers consumed by discarded signatures stay unique.
+      if (signedCommand.gear_request) {
+        this.command = { ...neutralCommand }
+        this.intentRevision++
+      }
       this.pendingCommands.push({ sequence, dispatchedAt })
       this.record('dispatch', sequence, dispatchedAt - now)
       await this.connection.publish(new TextEncoder().encode(body))
@@ -651,6 +726,24 @@ export class ControlSessionClient {
     return this.releaseTask
   }
 
+  private async handoverConfirmed(sessionID: string): Promise<boolean> {
+    const status = z.object({
+      vehicle_id: z.string(), session_id: z.string(), state: z.string(),
+      vehicle_handover_confirmed: z.boolean(),
+    }).parse(await this.api(`/api/vehicles/${encodeURIComponent(this.vehicleId)}/control/handover`))
+    return status.vehicle_id === this.vehicleId && status.session_id === sessionID &&
+      status.state === 'CONFIRMED' && status.vehicle_handover_confirmed
+  }
+
+  async refreshHandover(): Promise<boolean> {
+    if (this.state !== 'pending' || this.releaseTask || !this.session) return false
+    if (!await this.handoverConfirmed(this.session.session_id) || this.releaseTask || this.state !== 'pending') return false
+    this.state = 'closed'
+    this.cleanupError = ''
+    this.changed()
+    return true
+  }
+
   private async finishRelease(): Promise<void> {
     try {
       let disconnectCleanupError = ''
@@ -674,12 +767,7 @@ export class ControlSessionClient {
       this.changed()
       const until = performance.now() + CONTROL_TIMING.handoverTimeoutMs
       while (performance.now() < until) {
-        const value = z.object({
-          vehicle_id: z.string(), session_id: z.string(), state: z.string(),
-          vehicle_handover_confirmed: z.boolean(),
-        }).parse(await this.api(`/api/vehicles/${this.vehicleId}/control/handover`))
-        if (value.vehicle_id === this.vehicleId && value.session_id === session.session_id &&
-            value.state === 'CONFIRMED' && value.vehicle_handover_confirmed === true) {
+        if (await this.handoverConfirmed(session.session_id)) {
           this.state = 'closed'
           this.cleanupError = disconnectCleanupError
           this.changed()
